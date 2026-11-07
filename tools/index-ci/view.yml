@@ -9,6 +9,11 @@ name: view
 on:
   push:
     branches: [main]
+  # check.yml and probe.yml push with the workflow's token, and GitHub starts no workflow for such a push: the view is
+  # regenerated when they finish instead (when they pushed nothing, only the files that changed would be written)
+  workflow_run:
+    workflows: [check, probe]
+    types: [completed]
   workflow_dispatch:
 permissions:
   contents: read
@@ -19,6 +24,8 @@ concurrency:
   cancel-in-progress: true
 jobs:
   view:
+    # after check.yml or probe.yml, only when they succeeded: a failed run pushed nothing
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
     container: ubuntu:26.04  # the system otok-linux-x64 is built on
     environment:

@@ -34,7 +34,7 @@ recipe = "apotocki/boost"
 variant = "windows-clang-cl"
 version = "1.92.0"
 revision = 3
-recipe-source = { git = "https://github.com/otok-dev/recipes", commit = "1ad90a68…", path = "boost/1.92/windows-clang-cl" }
+recipe-source = { git = "https://github.com/otok-dev/recipes", commit = "1ad90a68…", path = "recipes/boost/1.92/windows-clang-cl" }
 recipe-sha256 = "…"
 source = { url = "https://archives.boost.io/release/1.92.0/source/boost_1_92_0.tar.bz2", sha256 = "…" }
 license = "BSL-1.0"
@@ -49,7 +49,7 @@ recipe = "apotocki/boost"
 variant = "windows-msvc"
 version = "1.92.0"
 revision = 1
-recipe-source = { git = "https://github.com/otok-dev/recipes", commit = "1ad90a68…", path = "boost/1.92/windows-msvc" }
+recipe-source = { git = "https://github.com/otok-dev/recipes", commit = "1ad90a68…", path = "recipes/boost/1.92/windows-msvc" }
 recipe-sha256 = "…"
 source = { url = "https://archives.boost.io/release/1.92.0/source/boost_1_92_0.tar.bz2", sha256 = "…" }
 license = "BSL-1.0"
@@ -63,7 +63,7 @@ recipe = "apotocki/zlib"
 variant = "windows"
 version = "1.3.2"
 revision = 1
-recipe-source = { git = "https://github.com/otok-dev/recipes", commit = "1ad90a68…", path = "zlib/1.3/windows" }
+recipe-source = { git = "https://github.com/otok-dev/recipes", commit = "1ad90a68…", path = "recipes/zlib/1.3/windows" }
 recipe-sha256 = "…"
 source = { url = "https://zlib.net/zlib-1.3.2.tar.gz", sha256 = "…" }
 license = "Zlib"
@@ -75,7 +75,7 @@ recipe = "apotocki/cmake"
 variant = "linux"
 version = "4.4.5"
 revision = 1
-recipe-source = { git = "https://github.com/otok-dev/recipes", commit = "1ad90a68…", path = "cmake/4.4/linux" }
+recipe-source = { git = "https://github.com/otok-dev/recipes", commit = "1ad90a68…", path = "recipes/cmake/4.4/linux" }
 recipe-sha256 = "…"
 source = { url = "…", sha256 = "…" }
 license = "BSD-3-Clause"

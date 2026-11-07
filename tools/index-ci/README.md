@@ -11,7 +11,8 @@ decision 47). An index maintainer copies them to `.github/workflows/` of the ind
   merges with a merge commit of its own, pushed to the default branch, whose new entries carry the time of the merge
   (`published`, `index.md` 3): maintainers never merge with GitHub's button.
 - `probe.yml`: weekly, `otok index-probe` writes `availability.toml`.
-- `view.yml`: on every push, `otok index-view` generates the HTTPS view (`index.md` 8) and `otok index-catalog`
+- `view.yml`: on every push, and when `check.yml` or `probe.yml` finish (their pushes, made with the workflow's
+  token, start no workflow), `otok index-view` generates the HTTPS view (`index.md` 8) and `otok index-catalog`
   the catalog site beside it (DESIGN 8), and GitHub Pages serves them (the repository's Pages source set to
   "GitHub Actions").
 
@@ -53,4 +54,13 @@ in a container of the system it was built on (`ubuntu:26.04`), since it needs th
 
 The repository's settings: Actions may write (the workflows ask for `contents: write` and
 `pull-requests: write` themselves); the labels `approved`, `ready-for-review` and `refused` exist; the default branch
-is protected so that only GitHub Actions (and administrators) push to it, which `check.yml` and `probe.yml` do.
+is protected so that only `check.yml` and `probe.yml` push to it. A ruleset of the default branch restricts deletions,
+force pushes and updates, with a deploy key of the repository (write access) as its only bypass: the workflows push
+with it, its private key in the Actions secret `INDEX_PUSH_KEY` (GitHub Actions' own token cannot be a ruleset's
+bypass). Without the secret they push with the workflow's token, for an index whose default branch is not protected so.
+Publishing tokens write to the repository (`otok publish` makes its branch there), and an administrator's token would
+bypass a ruleset that administrators bypass: administrators are left out of the bypass list and turn the ruleset off
+for their rare changes of the repository's own files.
+
+GitHub's own merge of a pull request with the default branch is not used: it is not renewed reliably when the default
+branch moves, so `check.yml` merges the pull request's head with the default branch as it is itself.

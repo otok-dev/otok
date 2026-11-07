@@ -1,6 +1,7 @@
 # Publishing in this index
 
-This repository is an index of otok recipes (`docs/formats/index.md` of otok). Recipes are published into it
+This repository is an index of otok recipes
+([the index format](https://github.com/otok-dev/otok/blob/main/docs/formats/index.md)). Recipes are published into it
 with `otok publish`, which opens a pull request adding their entries; its CI checks each pull request, and a
 maintainer reviews those of publishers that are not established yet.
 
@@ -32,4 +33,5 @@ under their own licenses.
 
 A publisher is a name under `publishers/`, registered with the first pull request publishing under it and
 allowed by a maintainer who merges it. Pull requests of a publisher wait for a maintainer until the publisher is
-established; the limits of entries per day are in `index.toml`. See `docs/formats/index.md` 9 of otok.
+established; the limits of entries per day are in `index.toml`. See section 9 of
+[the index format](https://github.com/otok-dev/otok/blob/main/docs/formats/index.md).

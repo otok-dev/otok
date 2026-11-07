@@ -20,7 +20,7 @@ jobs:
       - name: Tools
         run: |
           apt-get update -qq
-          apt-get install -y -qq git ca-certificates curl jq > /dev/null
+          apt-get install -y -qq git ca-certificates curl jq openssh-client > /dev/null
       - uses: actions/checkout@v5
         with:
           path: index
@@ -39,6 +39,10 @@ jobs:
         run: |
           "$RUNNER_TEMP/otok" index-probe
       - name: Commit
+        # pushed as check.yml pushes: with the deploy key of INDEX_PUSH_KEY when there is one, else with the workflow's token
+        env:
+          PUSH_KEY: ${{ secrets.INDEX_PUSH_KEY }}
+          BRANCH: ${{ github.event.repository.default_branch }}
         working-directory: index
         run: |
           git add availability.toml
@@ -46,5 +50,13 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git commit -q -m "Probe the inputs of the published versions"
-            git push -q
+            if [ -n "$PUSH_KEY" ]; then
+              host=${GITHUB_SERVER_URL#https://}
+              printf '%s\n' "$PUSH_KEY" > "$RUNNER_TEMP/push-key" && chmod 600 "$RUNNER_TEMP/push-key"
+              curl -fsSL "$GITHUB_API_URL/meta" | jq -r --arg h "$host" '.ssh_keys[] | "\($h) \(.)"' > "$RUNNER_TEMP/known_hosts"
+              export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/push-key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
+              git push -q "git@$host:$GITHUB_REPOSITORY.git" "HEAD:refs/heads/$BRANCH"
+            else
+              git push -q
+            fi
           fi

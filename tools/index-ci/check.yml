@@ -32,7 +32,7 @@ jobs:
       - name: Tools
         run: |
           apt-get update -qq
-          apt-get install -y -qq git ca-certificates curl jq > /dev/null
+          apt-get install -y -qq git ca-certificates curl jq openssh-client > /dev/null
       - name: Drop an earlier approval
         # an approval is of what was approved: a changed pull request is approved again
         if: ${{ github.event.action == 'synchronize' }}
@@ -42,40 +42,34 @@ jobs:
           NUMBER: ${{ github.event.pull_request.number }}
         run: |
           curl -sS -o /dev/null -X DELETE -H "Authorization: Bearer $GH_TOKEN" "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/issues/$NUMBER/labels/approved"
-      - name: Find the merge of the event's head
-        # GitHub computes the merge of a pull request with the default branch after each change, asynchronously: the merge
-        # checked is the one of the head of this event, waited for
-        id: merge
+      - name: Check out the default branch
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: index
+      - name: Merge the event's head as data
+        # the merge checked is made here, of the default branch as it is now and the head of this event: the merge GitHub
+        # computes for a pull request is not renewed reliably when the default branch moves (pushes of this workflow), and
+        # a merge of an older default branch could not be pushed. git runs no hook of a fresh clone and no merge driver
+        # of the pull request: nothing of it is executed.
         env:
           GH_TOKEN: ${{ github.token }}
           NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        working-directory: index
         run: |
-          api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY"
-          pr="$RUNNER_TEMP/pull-request.json"  # a file: sh's echo would expand the escapes of the JSON
-          for attempt in $(seq 1 36); do
-            curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -o "$pr" "$api/pulls/$NUMBER"
-            if [ "$(jq -r .head.sha "$pr")" != "$HEAD_SHA" ]; then
-              echo "the pull request has changed since this event; its newer check decides" >> "$GITHUB_STEP_SUMMARY"
-              exit 1
-            fi
-            sha=$(jq -r '.merge_commit_sha // empty' "$pr")
-            if [ -n "$sha" ] && [ "$(jq -r .mergeable "$pr")" = true ] \
-              && [ "$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" "$api/commits/$sha" | jq -r '.parents[1].sha // empty')" = "$HEAD_SHA" ]; then
-              echo "sha=$sha" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "GitHub has not merged the pull request with the default branch (a conflict?)" >> "$GITHUB_STEP_SUMMARY"
-          exit 1
-      - name: Check out the pull request as data
-        uses: actions/checkout@v5
-        with:
-          ref: ${{ steps.merge.outputs.sha }}
-          fetch-depth: 2
-          persist-credentials: false
-          path: index
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch -q origin "refs/pull/$NUMBER/head"
+          if [ "$(git rev-parse FETCH_HEAD)" != "$HEAD_SHA" ]; then
+            echo "the pull request has changed since this event; its newer check decides" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          if ! git -c user.name=otok -c user.email=otok@invalid merge -q --no-ff --no-edit "$HEAD_SHA"; then
+            echo "the pull request conflicts with the default branch" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
       - name: Get otok from the index's release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -146,8 +140,11 @@ jobs:
       - name: Merge
         # a merge commit of the checked base and head holding the checked files with the time of the merge: pushed to the
         # default branch, it makes GitHub show the pull request merged; refused when the default branch has moved since
+        # The push: with the deploy key of the secret INDEX_PUSH_KEY when there is one, the bypass of a ruleset that lets no
+        # one else update the default branch (GitHub Actions' own token cannot be given that bypass); else with that token.
         env:
           GH_TOKEN: ${{ github.token }}
+          PUSH_KEY: ${{ secrets.INDEX_PUSH_KEY }}
           NUMBER: ${{ github.event.pull_request.number }}
           TITLE: ${{ github.event.pull_request.title }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -163,8 +160,19 @@ jobs:
           commit=$(printf 'Merge pull request #%s\n\n%s\n' "$NUMBER" "$TITLE" \
             | git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
               commit-tree "$tree" -p HEAD^1 -p HEAD^2)
-          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
-          if ! git -c http.extraheader="AUTHORIZATION: basic $auth" push -q "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$commit:refs/heads/$BASE_REF"; then
-            echo "the default branch has moved since the check: run the check again" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$PUSH_KEY" ]; then
+            host=${GITHUB_SERVER_URL#https://}
+            printf '%s\n' "$PUSH_KEY" > "$RUNNER_TEMP/push-key" && chmod 600 "$RUNNER_TEMP/push-key"
+            curl -fsSL "$GITHUB_API_URL/meta" | jq -r --arg h "$host" '.ssh_keys[] | "\($h) \(.)"' > "$RUNNER_TEMP/known_hosts"
+            export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/push-key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
+            remote="git@$host:$GITHUB_REPOSITORY.git"
+          else
+            auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+            set -- -c http.extraheader="AUTHORIZATION: basic $auth"
+            remote="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          fi
+          if ! git "$@" push -q "$remote" "$commit:refs/heads/$BASE_REF"; then
+            echo "the push to the default branch was refused: it moved since the check (run the check again), or the push" \
+              "is not allowed (the deploy key of INDEX_PUSH_KEY in the ruleset's bypass list)" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi

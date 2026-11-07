@@ -20,6 +20,9 @@ permissions:
 env:
   # the vcpkg tool and scripts; the ports come from the baseline of vcpkg-configuration.json
   VCPKG_COMMIT: a2f9862da6d88040a8537fb9b8cb24deaa9a196b
+  # the revision otok shows: the tag (actions/checkout fetches the pushed tag as a lightweight one, which `git describe`
+  # does not see), or `git describe` of the checkout when run by hand
+  OTOK_REVISION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
 
 jobs:
   version:
