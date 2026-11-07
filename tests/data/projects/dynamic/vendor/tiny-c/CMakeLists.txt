@@ -1,0 +1,11 @@
+cmake_minimum_required(VERSION 3.18...4.0)  # CMake 4 policies: its own MSVC runtime checks and debug format
+project(tiny_c C)
+# tiny-d from its prefix (CMAKE_PREFIX_PATH of otok.cmake)
+find_path(TINY_D_INCLUDE tiny_d.h REQUIRED)
+find_library(TINY_D_LIBRARY tiny_d REQUIRED)
+add_library(tiny_c tiny_c.c)
+set_target_properties(tiny_c PROPERTIES VERSION 1.0 SOVERSION 1 WINDOWS_EXPORT_ALL_SYMBOLS ON)
+target_include_directories(tiny_c PRIVATE ${TINY_D_INCLUDE})
+target_link_libraries(tiny_c PRIVATE ${TINY_D_LIBRARY})
+install(TARGETS tiny_c ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
+install(FILES tiny_c.h DESTINATION include)

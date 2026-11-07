@@ -1,0 +1,42 @@
+# A tiny C library for the end-to-end test of the native target. The project builds it from its
+# vendored copy (`source = { path }`), so [source] is never fetched: the sha256 is a placeholder.
+[recipe]
+api = 1
+library = "tiny-a"
+name = "tiny-a"
+variant = "all"
+version = "1.0"
+revision = 1
+license = "MIT"
+license-files = ["LICENSE"]
+description = "A tiny C library for otok's tests."
+
+[source]
+url = "https://example.com/tiny-a-1.0.tar.gz"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[platforms]
+supported = ["linux", "windows", "android", "ios", "iossim", "macosx", "catalyst", "tvos", "tvossim", "watchos", "watchossim", "xros", "xrossim"]
+build-on = ["linux/gcc", "linux/clang", "windows/msvc", "windows/clang-cl", "linux/clang-cl", "macos/xcode", "*/ndk"]
+
+[options.value]
+type = "int"
+default = 1
+doc = "What tiny_a() returns."
+
+[options.fast]
+type = "bool"
+default = false
+doc = "Reaches the wrapper as OTOK_OPTION_FAST."
+
+[toolchains]
+cmake = ">= 3.20"
+ninja = ">= 1.10"
+
+[[product]]
+name = "TinyA"
+libraries = ["tiny_a"]
+defines = ["TINY_A_EXTRA=5"]
+# a C library: ws2_32 and the C++ runtime are there for the tests of recipe-toml.md 11
+link = { libraries = ["z", { library = "ws2_32", when = { os = ["windows"] } }], runtime = "c++" }
+apple = { frameworks = ["CoreFoundation"], wrappers = ["TinyASwift"], privacy-manifest = "PrivacyInfo.xcprivacy" }

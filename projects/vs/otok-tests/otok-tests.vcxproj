@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>18.0</VCProjectVersion>
+    <ProjectGuid>{EBCA105F-C0BF-4DAE-AF09-EFBE77351558}</ProjectGuid>
+    <RootNamespace>otok-tests</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <PlatformToolset>v145</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <UseDebugLibraries Condition="'$(Configuration)' == 'Debug'">true</UseDebugLibraries>
+    <UseDebugLibraries Condition="'$(Configuration)' == 'Release'">false</UseDebugLibraries>
+    <WholeProgramOptimization Condition="'$(Configuration)' == 'Release'">false</WholeProgramOptimization>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+    <Import Project="..\otok.props" />
+  </ImportGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <!-- Fixtures are found through this path, independent of the working directory. -->
+      <!-- OTOK_TEST_CHILD: the program process_test.cpp starts, built into the same OutDir. -->
+      <PreprocessorDefinitions>OTOK_TEST_DATA_DIR="$(OtokRoot.Replace('\', '/'))tests/data";OTOK_TEST_CHILD="$(OutDir.Replace('\', '/'))otok-test-child.exe";%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>gtest.lib;manual-link\gtest_main.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="$(OtokRoot)tests\unit\build_info_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\cache_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\catalog_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\command_line_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\console_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\commands_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\config_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\dev_manifest_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\environment_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\license_headers_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\lock_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\lua_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\apple_target_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\builder_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\host_target_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\android_target_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\windows_target_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\constraint_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\dependencies_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\fetch_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\fs_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\index_check_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\index_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\publish_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\hash_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\jobserver_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\sandbox_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\binary_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\license_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\recipe_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\resolver_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\manifest_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\names_paths_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\process_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\toml_reader_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\version_test.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\otok-core\otok-core.vcxproj">
+      <Project>{47746624-8EB8-4E15-9751-5766555DA36F}</Project>
+    </ProjectReference>
+    <ProjectReference Include="..\otok-lua\otok-lua.vcxproj">
+      <Project>{6F3B2C1D-8E4A-4B7C-9D2E-5A1F0C3B7E91}</Project>
+    </ProjectReference>
+    <ProjectReference Include="..\otok-target-android\otok-target-android.vcxproj">
+      <Project>{6E3C1B52-8F4D-4A7B-9C21-5D0A7E9B4F13}</Project>
+    </ProjectReference>
+    <ProjectReference Include="..\otok-target-linux\otok-target-linux.vcxproj">
+      <Project>{2A24903A-2EC0-4673-A1D2-BB6B1B1B3671}</Project>
+    </ProjectReference>
+    <ProjectReference Include="..\otok-target-windows\otok-target-windows.vcxproj">
+      <Project>{9A68B558-76A2-4F72-A3D1-89797AFFB109}</Project>
+    </ProjectReference>
+    <ProjectReference Include="..\otok-test-child\otok-test-child.vcxproj">
+      <Project>{010BD305-E12B-43F7-9D90-FCC8EAF14CD9}</Project>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+    </ProjectReference>
+    <ProjectReference Include="..\otok-target-apple\otok-target-apple.vcxproj">
+      <Project>{9634C25C-63BB-4994-A215-3434F86C462A}</Project>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

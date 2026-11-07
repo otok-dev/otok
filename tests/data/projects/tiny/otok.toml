@@ -1,0 +1,17 @@
+# Two tiny C libraries built end to end with the native toolchain (docs/PLAN.md decision 19).
+[otok]
+format = 1
+
+[linux]
+build-on = ["linux/gcc"]
+cflags = ["-DTINY_BONUS=2"]
+
+[deps.tiny-a]
+recipe = { path = "recipes/tiny-a" }
+source = { path = "vendor/tiny-a" }
+options = { value = 7 }
+cflags = ["-DTINY_BONUS=3"]  # after the target's: wins
+
+[deps.tiny-b]
+recipe = { path = "recipes/tiny-b" }
+source = { path = "vendor/tiny-b" }

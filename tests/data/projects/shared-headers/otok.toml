@@ -1,0 +1,11 @@
+# Products of headers only (recipe-toml.md 11.1), built with the native toolchain; the Apple test writes
+# its own otok.toml.
+[otok]
+format = 1
+
+[linux]
+build-on = ["linux/gcc"]
+
+[deps.tiny-h]
+recipe = { path = "recipes/tiny-h" }
+source = { path = "vendor/tiny-h" }

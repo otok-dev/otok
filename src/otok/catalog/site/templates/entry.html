@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block content %}
+<p class="crumbs"><a href="../../">{{ id }}</a></p>
+<h1>{{ id }} {{ label }}</h1>
+{% if withdrawn %}
+<p class="notice bad">This version is withdrawn: otok does not install it.</p>
+{% endif %}
+{% for a in advisories %}
+<p class="notice {% if a.severity == "broken" %}warn{% else %}bad{% endif %}"><a href="{{ root }}advisories/#{{ a.id }}">{{ a.id }}</a> ({{ a.severity }}): {{ a.summary }}</p>
+{% endfor %}
+{% if unavailable %}
+<p class="notice warn">Since {{ unavailable.since }} some inputs of this version cannot be fetched: {{ join(unavailable.inputs, ", ") }}.</p>
+{% endif %}
+<dl class="facts">
+<dt>Library</dt><dd><a href="{{ root }}libraries/{{ library }}/">{{ library }}</a></dd>
+<dt>Variant</dt><dd>{{ variant }}{% if target %}, target {{ target }}{% endif %}</dd>
+<dt>Channel</dt><dd>{{ channel }}</dd>
+{% if published %}<dt>Published</dt><dd>{{ published }}</dd>{% endif %}
+<dt>Recipe source</dt><dd>{% if recipe_source.browse %}<a href="{{ recipe_source.browse }}">{{ recipe_source.git }}</a>{% else %}{{ recipe_source.git }}{% endif %}<br><code>{{ recipe_source.commit }}</code> {% if recipe_source.tag %}({{ recipe_source.tag }}) {% endif %}{% if recipe_source.path %}in <code>{{ recipe_source.path }}/</code>{% endif %}</dd>
+<dt>Recipe SHA-256</dt><dd><code>{{ recipe_sha256 }}</code></dd>
+{% if previous %}<dt>Previous</dt><dd><a href="{{ previous.href }}">{{ previous.label }}</a></dd>{% endif %}
+</dl>
+{% if compare %}
+<section>
+<h2>Changes since {{ compare.label }}</h2>
+{% if length(compare.inputs) %}
+<table>
+<thead><tr><th>Key</th><th>{{ compare.label }}</th><th>{{ label }}</th></tr></thead>
+<tbody>
+{% for row in compare.inputs %}
+<tr class="{{ row.change }}"><th>{{ row.key }}</th><td>{% if row.old %}<code>{{ row.old }}</code>{% else %}<span class="meta">absent</span>{% endif %}</td><td>{% if row.new %}<code>{{ row.new }}</code>{% else %}<span class="meta">absent</span>{% endif %}</td></tr>
+{% endfor %}
+</tbody>
+</table>
+{% else %}
+<p>The inputs, options and dependencies are the same.</p>
+{% endif %}
+{% if compare.upstream %}
+<p><a href="{{ compare.upstream }}">The upstream changes between the two sources</a></p>
+{% endif %}
+</section>
+{% endif %}
+{% if others %}
+<section>
+<h2>Recipe files changed</h2>
+<div id="diff" data-root="{{ root }}" data-entries="{{ entries }}" data-current="{{ dir }}" data-base="{% if compare %}{{ compare.dir }}{% endif %}">
+{% if compare %}
+{% if compare.files %}
+<ul>
+{% for f in compare.files %}
+<li><code>{{ f.path }}</code> <span class="meta">{{ f.change }}</span></li>
+{% endfor %}
+</ul>
+<p class="meta">{% if compare.same == 1 %}1 file is {% else %}{{ compare.same }} files are {% endif %}the same as in {{ compare.label }}.</p>
+{% else %}
+<p class="meta">Not compared: the recipe source of one of the two versions is unavailable.</p>
+{% endif %}
+{% endif %}
+</div>
+</section>
+{% endif %}
+<section>
+<h2>Inputs</h2>
+<table>
+<tbody>
+{% for row in source %}
+<tr><th>source.{{ row.key }}</th><td><code>{{ row.value }}</code></td></tr>
+{% endfor %}
+{% for r in resources %}
+{% for row in r.rows %}
+<tr><th>resource {{ r.name }}.{{ row.key }}</th><td><code>{{ row.value }}</code></td></tr>
+{% endfor %}
+{% endfor %}
+</tbody>
+</table>
+</section>
+{% include "_contents.html" %}
+{% endblock %}
+{% block scripts %}
+{% if others %}
+<script src="{{ root }}{{ assets.diff_min_js }}"></script>
+<script src="{{ root }}{{ assets.catalog_js }}"></script>
+{% endif %}
+{% endblock %}
+{# Otok (c) Alexander A Pototskiy
+   SPDX-License-Identifier: GPL-3.0-only WITH AdditionRef-otok-output-exception #}

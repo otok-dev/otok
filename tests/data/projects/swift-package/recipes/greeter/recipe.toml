@@ -1,0 +1,26 @@
+# A SwiftPM package delivered patched (recipe-toml.md 12.1), for the end-to-end test of Swift packages from
+# recipes. Built from the project's vendored copy; the sha256 is a placeholder.
+[recipe]
+api = 1
+library = "greeter"
+name = "greeter"
+version = "1.0"
+revision = 1
+license = "MIT"
+license-files = ["LICENSE"]
+description = "A tiny Swift package for otok's tests."
+
+[source]
+url = "https://example.com/greeter-1.0.tar.gz"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+patches = ["patches/0001-https.patch"]
+
+[platforms]
+supported = ["ios", "iossim", "macosx", "catalyst"]
+build-on = ["macos/xcode"]
+
+[apple]
+swift-package = "."
+
+[[product]]
+name = "Greeter"

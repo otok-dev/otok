@@ -1,0 +1,31 @@
+# Two shared objects linked by hand, as a recipe with its own makefiles links them. Built from the
+# project's vendored copy; the sha256 is a placeholder.
+[recipe]
+api = 1
+library = "pair"
+name = "pair"
+variant = "all"
+version = "1.0"
+revision = 1
+license = "MIT"
+license-files = ["LICENSE"]
+description = "Two tiny shared objects for otok's tests, the second needing the first."
+linkage = ["dynamic"]
+
+[source]
+url = "https://example.com/pair-1.0.tar.gz"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[platforms]
+supported = ["linux", "windows"]
+build-on = ["linux/gcc", "linux/clang", "windows/msvc", "windows/clang-cl", "linux/clang-cl"]
+
+[options.origin]
+type = "bool"
+default = true
+doc = "Whether libtwo carries slice.toolchain.rpath, by which it finds libone beside itself."
+
+[[product]]
+name = "Pair"
+libraries = ["two", "one"]
+headers = "two"

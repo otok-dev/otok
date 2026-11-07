@@ -1,0 +1,30 @@
+{
+    "version": "0.2.0",
+    "description": "A dependency manager that builds native libraries from source",
+    "homepage": "https://github.com/otok-dev/otok",
+    "license": "GPL-3.0-only WITH AdditionRef-otok-output-exception",
+    "notes": "otok builds with Visual Studio's C++ tools and git of the machine; the other tools recipes need (CMake, Ninja, Python, MSYS2's make, ...) are built or fetched by their own recipes.",
+    "suggest": {
+        "git": "git"
+    },
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/otok-dev/otok/releases/download/v0.2.0/otok-0.2.0-windows-x64.zip",
+            "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+    },
+    "bin": "otok.exe",
+    "checkver": {
+        "github": "https://github.com/otok-dev/otok"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/otok-dev/otok/releases/download/v$version/otok-$version-windows-x64.zip",
+                "hash": {
+                    "url": "$url.sha256"
+                }
+            }
+        }
+    }
+}

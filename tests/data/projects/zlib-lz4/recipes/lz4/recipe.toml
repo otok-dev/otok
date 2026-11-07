@@ -1,0 +1,30 @@
+# lz4 from its git repository at the v1.10.0 tag (milestone A, docs/PLAN.md decision 19). Built by a
+# test that runs only with OTOK_TEST_NETWORK=1.
+[recipe]
+api = 1
+library = "lz4"
+name = "lz4"
+variant = "all"
+version = "1.10.0"
+revision = 1
+license = "BSD-2-Clause"
+license-files = ["lib/LICENSE"]
+homepage = "https://lz4.org"
+description = "LZ4, an extremely fast lossless compression library."
+
+[source]
+git = "https://github.com/lz4/lz4"
+commit = "ebb370ca83af193212df4dcbadcc5d87bc0de2f0"
+tag = "v1.10.0"
+
+[platforms]
+supported = ["linux", "windows"]
+build-on = ["linux/gcc", "linux/clang", "windows/msvc", "windows/clang-cl", "linux/clang-cl"]
+
+[toolchains]
+cmake = ">= 3.20"
+ninja = ">= 1.10"
+
+[[product]]
+name = "LZ4"
+libraries = ["lz4"]

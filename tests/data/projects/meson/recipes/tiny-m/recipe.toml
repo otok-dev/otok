@@ -1,0 +1,34 @@
+# A tiny C library with a meson build, for the tests of otok.meson. Built from the project's vendored
+# copy; the sha256 is a placeholder.
+[recipe]
+api = 1
+library = "tiny-m"
+name = "tiny-m"
+variant = "all"
+version = "1.0"
+revision = 1
+license = "MIT"
+license-files = ["LICENSE"]
+description = "A tiny C library with a meson build, for otok's tests."
+linkage = ["static", "dynamic"]
+
+[source]
+url = "https://example.com/tiny-m-1.0.tar.gz"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[platforms]
+supported = ["linux", "windows", "ios", "iossim", "macosx", "catalyst", "tvos", "tvossim", "watchos", "watchossim", "xros", "xrossim"]
+build-on = ["linux/gcc", "linux/clang", "windows/msvc", "windows/clang-cl", "linux/clang-cl", "macos/xcode"]
+
+[options.value]
+type = "int"
+default = 1
+doc = "What tiny_m() returns, besides TINY_M_BONUS."
+
+[toolchains]
+meson = ">= 1.2"
+ninja = ">= 1.10"
+
+[[product]]
+name = "TinyM"
+libraries = ["tiny_m"]

@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ library }}</h1>
+{% if length(recipes) == 0 %}
+<p class="lead">No recipe builds this library yet.</p>
+{% else %}
+<p class="lead">Recipes that build {{ library }}. Name one in <code>otok.toml</code> with <code>recipe = "…"</code>.</p>
+<table>
+<thead><tr><th>Recipe</th><th>Version</th><th>Updated</th><th>Targets</th><th>Platforms</th><th>Options</th><th>Advisories</th></tr></thead>
+<tbody>
+{% for r in recipes %}
+<tr>
+<td><a href="{{ root }}recipes/{{ r.id }}/">{{ r.id }}</a>{% if r.deprecated %} <span class="badge warn">deprecated</span>{% endif %}</td>
+<td>{{ r.version }}</td>
+<td>{% if r.published %}{{ r.published }}{% endif %}</td>
+<td>{{ join(r.targets, ", ") }}</td>
+<td>{{ join(r.platforms, ", ") }}</td>
+<td>{{ join(r.options, ", ") }}</td>
+<td>{% if r.advisories %}<span class="badge bad">{{ r.advisories }}</span>{% else %}none{% endif %}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% endif %}
+{% endblock %}
+{# Otok (c) Alexander A Pototskiy
+   SPDX-License-Identifier: GPL-3.0-only WITH AdditionRef-otok-output-exception #}

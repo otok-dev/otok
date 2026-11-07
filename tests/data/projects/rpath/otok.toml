@@ -1,0 +1,12 @@
+# Two shared objects of one recipe, linked by hand, the second needing the first (Linux only; the
+# native_target test turns `origin` off and on, docs/PLAN.md decision 42).
+[otok]
+format = 1
+
+[linux]
+build-on = ["linux/gcc"]
+linkage = "dynamic"
+
+[deps.pair]
+recipe = { path = "recipes/pair" }
+source = { path = "vendor/pair" }

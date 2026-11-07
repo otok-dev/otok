@@ -1,0 +1,68 @@
+<section>
+<h2>Platforms</h2>
+<p>{% if length(platforms) %}{{ join(platforms, ", ") }}{% else %}none{% endif %}</p>
+</section>
+{% if length(options) %}
+<section>
+<h2>Options</h2>
+<table>
+<thead><tr><th>Option</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+<tbody>
+{% for o in options %}
+<tr>
+<td><code>{{ o.name }}</code>{% if o.additive %} <span class="badge">additive</span>{% endif %}</td>
+<td>{{ o.type }} {% if o.values %}of <code>{{ o.values }}</code>{% endif %}</td>
+<td><code>{{ o.default }}</code></td>
+<td>{{ o.doc }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</section>
+{% endif %}
+{% for group in dependency_groups %}
+<section>
+<h2>{{ group.title }}</h2>
+<table>
+<thead><tr><th>Library</th><th>Version</th><th>Recipe</th><th>Details</th></tr></thead>
+<tbody>
+{% for d in group.items %}
+<tr>
+<td><a href="{{ root }}libraries/{{ d.library }}/">{{ d.library }}</a></td>
+<td><code>{{ d.version }}</code></td>
+<td>{% if d.recipe %}<a href="{{ root }}recipes/{{ d.recipe }}/">{{ d.recipe }}</a>{% endif %}</td>
+<td>{% for row in d.details %}<code>{{ row.key }} = {{ row.value }}</code>{% if not loop.is_last %}<br>{% endif %}{% endfor %}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</section>
+{% endfor %}
+{% if length(toolchains) %}
+<section>
+<h2>Toolchains</h2>
+<ul>
+{% for t in toolchains %}
+<li><code>{{ t.key }} {{ t.value }}</code></li>
+{% endfor %}
+</ul>
+</section>
+{% endif %}
+<section>
+<h2>Recipe files</h2>
+{% if tree_error %}
+<p class="notice bad">The recipe source is unavailable: {{ tree_error }}.</p>
+{% endif %}
+{% for f in files %}
+<details class="file" open>
+<summary><code>{{ f.path }}</code> <span class="meta">{{ f.size }} bytes · <a href="{{ root }}{{ f.file }}">raw</a></span></summary>
+{% if f.binary %}
+<p class="meta">Binary file, SHA-256 <code>{{ f.sha256 }}</code></p>
+{% else %}
+<pre><code>{{ f.text }}</code></pre>
+{% endif %}
+</details>
+{% endfor %}
+</section>
+{# Otok (c) Alexander A Pototskiy
+   SPDX-License-Identifier: GPL-3.0-only WITH AdditionRef-otok-output-exception #}

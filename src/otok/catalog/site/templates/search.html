@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ site.name }}</h1>
+<p class="lead">{% if libraries == 1 %}1 library{% else %}{{ libraries }} libraries{% endif %}, {% if recipes == 1 %}1 recipe{% else %}{{ recipes }} recipes{% endif %}. Each recipe builds a library from source on your machine, or delivers its Swift package.</p>
+<input type="search" id="search" class="search" data-root="{{ root }}" placeholder="Search by library, recipe, description or keyword" aria-label="Search" autofocus hidden>
+{% if length(targets) > 1 %}
+<select id="target" class="target" aria-label="Target" hidden>
+<option value="">every target</option>
+{% for t in targets %}<option value="{{ t }}">{{ t }}</option>
+{% endfor %}</select>
+{% endif %}
+<div id="results"></div>
+<div id="idle">
+<p><a href="libraries/">All libraries, A to Z</a> · <a href="advisories/">Advisories</a></p>
+<h2>Published last</h2>
+<table>
+<thead><tr><th>Library</th><th>Recipe</th><th>Target</th><th>Published</th></tr></thead>
+<tbody id="recent">
+{% for r in recent %}
+<tr {% if not r.newest %}hidden {% endif %}data-target="{% if r.target %}{{ r.target }}{% endif %}">
+<td><a href="libraries/{{ r.library }}/">{{ r.library }}</a></td>
+<td><a href="recipes/{{ r.id }}/{{ r.dir }}/">{{ r.id }} {{ r.label }}</a></td>
+<td>{% if r.target %}{{ r.target }}{% endif %}</td>
+<td>{{ r.published }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+<p class="meta">Index commit <code>{{ commit }}</code></p>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="{{ assets.minisearch_js }}"></script>
+<script src="{{ assets.catalog_js }}"></script>
+{% endblock %}
+{# Otok (c) Alexander A Pototskiy
+   SPDX-License-Identifier: GPL-3.0-only WITH AdditionRef-otok-output-exception #}

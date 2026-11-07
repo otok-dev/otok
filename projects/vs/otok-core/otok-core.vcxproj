@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>18.0</VCProjectVersion>
+    <ProjectGuid>{47746624-8EB8-4E15-9751-5766555DA36F}</ProjectGuid>
+    <RootNamespace>otok-core</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <PlatformToolset>v145</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <UseDebugLibraries Condition="'$(Configuration)' == 'Debug'">true</UseDebugLibraries>
+    <UseDebugLibraries Condition="'$(Configuration)' == 'Release'">false</UseDebugLibraries>
+    <WholeProgramOptimization Condition="'$(Configuration)' == 'Release'">false</WholeProgramOptimization>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+    <Import Project="..\otok.props" />
+  </ImportGroup>
+  <ItemGroup>
+    <ClInclude Include="$(OtokRoot)src\otok\builder\builder.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\builder\dev_tree.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\builder\target.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\builder\toolchains.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\cache\inputs.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\cache\store.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\catalog\catalog.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\commands\commands.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\config\config.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\core\binary.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\core\build_info.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\core\command_line.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\core\console.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\core\diagnostics.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\core\environment.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\core\error.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\core\executor.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\core\file_lock.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\core\fs.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\core\jobserver.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\core\sandbox.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\core\license.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\core\names.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\core\option_data.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\core\option_values.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\core\paths.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\core\process.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\core\sha256.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\core\tree_hash.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\core\target_info.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\core\toml_reader.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\fetch\archive.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\fetch\git.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\fetch\http.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\fetch\locations.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\index\check.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\index\index.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\index\view.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\publish\github.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\publish\publish.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\lock\lock.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\lua\build_script.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\lua\library.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\lua\state.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\manifest\dev_manifest.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\manifest\manifest.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\packager\packager.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\recipe\recipe.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\recipe\recipe_tree.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\resolver\locking.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\resolver\options.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\resolver\provider.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\resolver\resolver.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\version\constraint.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\version\standard.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\version\version.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\version\version_detail.hpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="$(OtokRoot)src\otok\builder\builder.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\builder\dev_tree.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\builder\toolchains.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\cache\inputs.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\cache\store.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\catalog\catalog.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\catalog\site.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\commands\commands.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\config\config.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\core\build_info.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\core\notices.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\core\command_line.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\core\console.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\core\diagnostics.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\core\environment.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\core\executor.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\core\file_lock.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\core\fs.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\core\jobserver.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\core\sandbox.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\core\binary.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\core\license.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\core\names.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\core\option_values.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\core\paths.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\core\process.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\core\sha256.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\core\tree_hash.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\core\toml_reader.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\fetch\archive.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\fetch\git.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\fetch\http.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\fetch\locations.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\index\check.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\index\index.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\index\view.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\publish\github.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\publish\publish.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\lock\lock.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\lua\build_script.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\lua\library.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\lua\state.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\manifest\dev_manifest.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\manifest\manifest.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\packager\packager.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\recipe\recipe.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\recipe\recipe_tree.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\resolver\locking.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\resolver\options.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\resolver\provider.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\resolver\resolver.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\version\constraint.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\version\standard.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\version\version.cpp" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

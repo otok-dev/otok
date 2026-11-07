@@ -1,0 +1,59 @@
+# Otok (c) Alexander A Pototskiy
+# SPDX-License-Identifier: GPL-3.0-only WITH AdditionRef-otok-output-exception
+#
+# The HTTPS view of the index (docs/formats/index.md 8) and its catalog site (DESIGN 8): on every push to the
+# default branch, `otok index-view` and `otok index-catalog` generate them and GitHub Pages serves them. Users name
+# the view as `index = "view+https://<pages URL>"`; the catalog is the site itself. The recipe trees the catalog
+# shows stay in an actions cache between runs, so a push fetches only the trees of new versions.
+name: view
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: view
+  cancel-in-progress: true
+jobs:
+  view:
+    runs-on: ubuntu-24.04
+    container: ubuntu:26.04  # the system otok-linux-x64 is built on
+    environment:
+      name: github-pages
+    steps:
+      - name: Tools
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq git ca-certificates curl jq zstd > /dev/null
+      - uses: actions/checkout@v5
+        with:
+          path: index
+          persist-credentials: false
+      - name: Get otok from the index's release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY"
+          asset=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" "$api/releases/tags/otok" | jq -r '.assets[] | select(.name == "otok-linux-x64") | .url')
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" -o "$RUNNER_TEMP/otok" "$asset"
+          chmod +x "$RUNNER_TEMP/otok"
+      - name: Recipe trees of the previous runs
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/otok-cache
+          key: otok-cache-${{ github.sha }}
+          restore-keys: otok-cache-
+      - name: Generate
+        env:
+          OTOK_CACHE_DIR: ${{ runner.temp }}/otok-cache
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/index"
+          "$RUNNER_TEMP/otok" index-view index --output "$RUNNER_TEMP/site"
+          "$RUNNER_TEMP/otok" index-catalog index --output "$RUNNER_TEMP/site"
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: ${{ runner.temp }}/site
+      - uses: actions/deploy-pages@v4

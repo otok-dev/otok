@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ id }}</h1>
+<p class="lead">{{ description }}</p>
+{% if deprecated %}
+<p class="notice warn">This recipe is {{ deprecated }}.{% if in_favor_of %}<br><a href="{{ root }}recipes/{{ in_favor_of }}/">Go to {{ in_favor_of }}</a>{% endif %}</p>
+{% endif %}
+<dl class="facts">
+<dt>Library</dt><dd><a href="{{ root }}libraries/{{ library }}/">{{ library }}</a></dd>
+<dt>Newest</dt><dd><a href="{{ newest_href }}">{{ newest }}</a></dd>
+{% if length(targets) %}<dt>Targets</dt><dd>{{ join(targets, ", ") }}</dd>{% endif %}
+{% if license %}<dt>License</dt><dd>{{ license }}</dd>{% endif %}
+{% if homepage %}<dt>Homepage</dt><dd><a href="{{ homepage }}">{{ homepage }}</a></dd>{% endif %}
+{% if documentation %}<dt>Documentation</dt><dd><a href="{{ documentation }}">{{ documentation }}</a></dd>{% endif %}
+{% if length(keywords) %}<dt>Keywords</dt><dd>{{ join(keywords, ", ") }}</dd>{% endif %}
+{% if transferred_from %}<dt>Transferred from</dt><dd>{{ transferred_from }}</dd>{% endif %}
+</dl>
+<section>
+<h2>Use it</h2>
+<p>In <code>otok.toml</code>:</p>
+<pre><code>{{ snippet }}</code></pre>
+</section>
+<section>
+<h2>Versions</h2>
+<table>
+<thead><tr><th>Version</th><th>Target</th><th>Channel</th><th>Published</th><th>Status</th></tr></thead>
+<tbody>
+{% for v in versions %}
+<tr>
+<td><a href="{{ v.href }}">{{ v.label }}</a></td>
+<td>{% if v.target %}{{ v.target }}{% endif %}</td>
+<td>{{ v.channel }}</td>
+<td>{% if v.published %}{{ v.published }}{% endif %}</td>
+<td>{% if v.withdrawn %}<span class="badge bad">withdrawn</span> {% endif %}{% if v.advisories %}<span class="badge warn">{{ v.advisories }} advisories</span> {% endif %}{% if v.unavailable %}<span class="badge warn">inputs unavailable</span>{% endif %}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</section>
+<h2 class="part">{{ newest }}</h2>
+{% include "_contents.html" %}
+{% endblock %}
+{# Otok (c) Alexander A Pototskiy
+   SPDX-License-Identifier: GPL-3.0-only WITH AdditionRef-otok-output-exception #}

@@ -1,0 +1,13 @@
+# A tiny C library built with meson (otok.meson, build-lua-api.md 6.2), end to end with the native
+# toolchain; the Apple tests give it their own [apple].
+[otok]
+format = 1
+
+[linux]
+build-on = ["linux/gcc"]
+cflags = ["-DTINY_M_BONUS=2"]
+
+[deps.tiny-m]
+recipe = { path = "recipes/tiny-m" }
+source = { path = "vendor/tiny-m" }
+options = { value = 5 }

@@ -1,0 +1,36 @@
+# A library with one set of headers for a part of headers only and a compiled part, as Boost has
+# (recipe-toml.md 11.1), for the end-to-end tests of products of headers only. Built from the project's
+# vendored copy; the sha256 is a placeholder.
+[recipe]
+api = 1
+library = "tiny-h"
+name = "tiny-h"
+variant = "all"
+version = "1.0"
+revision = 1
+license = "MIT"
+license-files = ["LICENSE"]
+description = "A tiny C library with shared headers for otok's tests."
+
+[source]
+url = "https://example.com/tiny-h-1.0.tar.gz"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[platforms]
+supported = ["linux", "windows", "ios", "iossim", "macosx", "catalyst", "tvos", "tvossim", "watchos", "watchossim", "xros", "xrossim"]
+build-on = ["linux/gcc", "linux/clang", "windows/msvc", "windows/clang-cl", "linux/clang-cl", "macos/xcode"]
+
+[toolchains]
+cmake = ">= 3.20"
+ninja = ">= 1.10"
+
+[[product]]
+name = "TinyH"
+libraries = []
+apple = { privacy-manifest = "none" }
+
+[[product]]
+name = "TinyHCompiled"
+libraries = ["compiled"]
+headers = false
+depends = ["TinyH"]

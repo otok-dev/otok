@@ -1,0 +1,34 @@
+{
+  "name": "otok",
+  "version": "0.0.0",
+  "description": "Otok: builds native libraries from source and hands them to the consumer's build",
+  "$comment": "otok is GPL-3.0-only WITH AdditionRef-otok-output-exception (LICENSE-EXCEPTION); vcpkg warns of that expression at every run, knowing only the exceptions of SPDX's list, and reads this field for nothing but the build of otok",
+  "license": "GPL-3.0-only",
+  "dependencies": [
+    "tomlplusplus",
+    {
+      "$comment": "header-only; otok metadata writes JSON, the index client will read it (docs/PLAN.md decision 40)",
+      "name": "nlohmann-json"
+    },
+    {
+      "$comment": "header-only; the templates of the catalog site (docs/PLAN.md decision 49)",
+      "name": "inja"
+    },
+    {
+      "$comment": "macOS links the system libcurl (docs/PLAN.md decision 14); the default TLS is Schannel on Windows, OpenSSL on Linux",
+      "name": "curl",
+      "platform": "!osx"
+    },
+    {
+      "$comment": "only the codecs of source archives: gzip (zlib), bzip2, xz, zstd; no crypto, xar or lz4",
+      "name": "libarchive",
+      "default-features": false,
+      "features": [
+        "bzip2",
+        "lzma",
+        "zstd"
+      ]
+    },
+    "gtest"
+  ]
+}

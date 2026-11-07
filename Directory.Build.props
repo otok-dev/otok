@@ -1,0 +1,22 @@
+<Project>
+  <!--
+    Global properties of every project under this directory. Imported by MSBuild before the project
+    and before Microsoft.Cpp.props, so only properties belong here; compiler and linker settings are in
+    projects/vs/otok.props, which each .vcxproj imports after Microsoft.Cpp.props.
+    Machine-specific overrides go into Directory.Build.local.props (not in git).
+  -->
+  <PropertyGroup>
+    <OtokRoot>$(MSBuildThisFileDirectory)</OtokRoot>
+    <OtokVcpkgTriplet>x64-windows-otok</OtokVcpkgTriplet>
+    <OtokVcpkgInstalled>$(OtokRoot)vcpkg_installed\$(OtokVcpkgTriplet)\</OtokVcpkgInstalled>
+    <OtokGeneratedDir>$(OtokRoot)build\generated\</OtokGeneratedDir>
+
+    <!-- vcpkg_installed is wired by hand in otok.props; a global `vcpkg integrate install` must not add its own. -->
+    <VcpkgEnabled>false</VcpkgEnabled>
+
+    <OutDir>$(OtokRoot)build\vs\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(OtokRoot)build\vs\obj\$(MSBuildProjectName)\$(Platform)\$(Configuration)\</IntDir>
+  </PropertyGroup>
+
+  <Import Project="$(MSBuildThisFileDirectory)Directory.Build.local.props" Condition="Exists('$(MSBuildThisFileDirectory)Directory.Build.local.props')" />
+</Project>

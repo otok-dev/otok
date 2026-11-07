@@ -1,0 +1,66 @@
+# The example of docs/formats/recipe-toml.md section 1. Parsed only, never fetched or built:
+# the sha256 below is a placeholder, not the hash of the real archive.
+[recipe]
+api = 1
+library = "openssl"
+name = "openssl"
+version = "3.5.4"
+revision = 1
+license = "Apache-2.0"
+license-files = ["LICENSE.txt"]
+homepage = "https://www.openssl.org"
+description = "OpenSSL (libssl, libcrypto), built from source."
+keywords = ["tls", "crypto"]
+
+[source]
+url = "https://github.com/openssl/openssl/releases/download/openssl-3.5.4/openssl-3.5.4.tar.gz"
+sha256 = "967311f84955316969bdb1d8d4b983718ef42338639c621ec4c34fddef355e99"
+verify-against = { git = "https://github.com/openssl/openssl", tag = "openssl-3.5.4" }
+patches = ["patches/0001-ios-no-fork.patch"]
+
+[platforms]
+supported = ["ios", "iossim", "macosx", "catalyst", "tvos", "tvossim", "watchos", "watchossim", "xros", "xrossim"]
+build-on = ["macos/xcode"]
+
+[vars]
+openssl_target = { ios = "ios64-xcrun", iossim-arm64 = "iossimulator-arm64-xcrun", iossim-x86_64 = "iossimulator-x86_64-xcrun", macosx-arm64 = "darwin64-arm64-cc", macosx-x86_64 = "darwin64-x86_64-cc", default = "ios64-xcrun" }
+
+[options.no-deprecated]
+type = "bool"
+default = false
+doc = "Configure with no-deprecated: removes deprecated APIs."
+
+[options.features]
+type = "list"
+values = ["no-legacy", "no-quic", "no-engine"]
+default = []
+doc = "Extra Configure flags."
+
+[options.zlib]
+type = "bool"
+default = false
+additive = true
+doc = "Build with zlib compression support."
+
+[deps.zlib]
+version = "~> 1.3"
+default-recipe = "apotocki/zlib"
+when = { option = "zlib", os = ["android", "windows"] }
+
+[[product]]
+name = "OpenSSL"
+libraries = ["ssl", "crypto"]
+headers = "crypto"
+defines = [{ define = "OPENSSL_NO_DEPRECATED", when = { option = "no-deprecated" } }]
+link = { libraries = ["z"] }
+apple = { module = "COpenSSL", frameworks = ["Security"], wrappers = ["OpenSSLSwift"], privacy-manifest = "PrivacyInfo.xcprivacy" }
+
+[apple]
+xcode = ">= 16"
+
+[toolchains]
+make = ">= 3.81"
+perl = ">= 5.30"
+
+[[publish.check]]
+options = { no-deprecated = true, features = ["no-legacy"] }

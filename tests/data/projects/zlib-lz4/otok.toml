@@ -1,0 +1,13 @@
+# Milestone A (docs/PLAN.md decision 19): zlib and lz4 from their upstream sources, built with the
+# native toolchain. Needs the network: built by a test only with OTOK_TEST_NETWORK=1.
+[otok]
+format = 1
+
+[linux]
+build-on = ["linux/gcc"]
+
+[deps.zlib]
+recipe = { path = "recipes/zlib" }
+
+[deps.lz4]
+recipe = { path = "recipes/lz4" }

@@ -1,0 +1,28 @@
+# Otok (c) Alexander A Pototskiy
+# SPDX-License-Identifier: GPL-3.0-only WITH AdditionRef-otok-output-exception
+#
+# otok takes no pull requests (CONTRIBUTING.md, docs/PLAN.md decision 7): one from anyone but the repository's
+# owner is closed with a comment pointing to CONTRIBUTING.md, collaborators' too, whose code would be theirs as
+# anyone's. pull_request_target runs in the context of the base repository and checks nothing out, so no code of
+# the pull request runs.
+name: Pull requests
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  close:
+    if: github.event.pull_request.author_association != 'OWNER'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Close with a comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr close "$NUMBER" --repo "$REPO" --comment "Thank you for your interest in otok! otok does not take pull requests: every change is written by its maintainer (see CONTRIBUTING.md). Please open an issue describing the problem or the need; code in a pull request is read as an illustration only."

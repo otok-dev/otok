@@ -1,0 +1,1 @@
+option('value', type: 'integer', value: 1, description: 'What tiny_m() returns, besides TINY_M_BONUS')

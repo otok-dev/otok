@@ -1,0 +1,36 @@
+# The example of docs/formats/otok-toml.md section 1.
+[otok]
+format = 1
+include = ["otok.generated.toml"]
+
+[apple]
+platforms = ["ios", "iossim", "macosx", "catalyst"]
+architectures = { iossim = ["arm64"] }
+deployment = { ios = "15.0", macos = "12.0" }
+
+[deps.openssl]
+recipe = "apotocki/openssl"
+version = "~> 3.5"
+options = { no-deprecated = true }
+
+[deps.boost]
+recipe = "apotocki/boost"
+version = "~> 1.92"
+options = { libraries = ["json", "program_options"] }
+platforms = ["ios", "iossim"]
+
+[deps.libssh2]
+recipe = { path = "../otok-recipes/libssh2" }
+
+[tool-deps.protobuf]
+recipe = "apotocki/protobuf"
+version = "~> 31.0"
+
+[profile.ci]
+apple = { platforms = ["iossim"] }
+
+[profile.debug]
+apple = { configurations = ["debug"] }
+
+[policy]
+deny-licenses = ["GPL-3.0-only", "GPL-3.0-or-later", "AGPL-3.0-only", "AGPL-3.0-or-later"]

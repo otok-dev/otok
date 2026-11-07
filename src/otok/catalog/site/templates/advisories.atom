@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+<title>Advisories of {{ site.name }}</title>
+<id>{{ feed_id }}</id>
+<link rel="self" href="{{ base }}advisories.atom"/>
+<link rel="alternate" type="text/html" href="{{ base }}advisories/"/>
+<updated>{{ updated }}</updated>
+<author><name>{{ site.name }}</name></author>
+{% for a in advisories %}
+<entry>
+<id>{{ a.entry_id }}</id>
+<title>{{ a.id }} ({{ a.severity }}, {{ a.status }}): {{ a.summary }}</title>
+<link rel="alternate" type="text/html" href="{{ base }}advisories/#{{ a.id }}"/>
+<published>{{ a.published_time }}</published>
+<updated>{{ a.updated_time }}</updated>
+<summary>{{ a.concerns }}: {{ a.summary }}</summary>
+</entry>
+{% endfor %}
+</feed>
+{# Otok (c) Alexander A Pototskiy
+   SPDX-License-Identifier: GPL-3.0-only WITH AdditionRef-otok-output-exception #}

@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.18)
+project(tiny_h C)
+add_library(tiny_h_compiled STATIC compiled.c)
+target_include_directories(tiny_h_compiled PRIVATE include)
+install(TARGETS tiny_h_compiled ARCHIVE DESTINATION lib)
+install(DIRECTORY include/ DESTINATION include)

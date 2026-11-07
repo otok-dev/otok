@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Libraries</h1>
+<p class="lead">Every library a recipe of the index builds, A to Z.</p>
+<p class="letters">{% for g in groups %}<a href="#{{ g.anchor }}">{{ g.letter }}</a>{% endfor %}</p>
+{% for g in groups %}
+<section id="{{ g.anchor }}">
+<h2>{{ g.letter }}</h2>
+<ul class="columns">
+{% for l in g.libraries %}
+<li><a href="{{ l.name }}/">{{ l.name }}</a> <span class="meta">{% if l.recipes == 1 %}1 recipe{% else %}{{ l.recipes }} recipes{% endif %}</span></li>
+{% endfor %}
+</ul>
+</section>
+{% endfor %}
+{% endblock %}
+{# Otok (c) Alexander A Pototskiy
+   SPDX-License-Identifier: GPL-3.0-only WITH AdditionRef-otok-output-exception #}

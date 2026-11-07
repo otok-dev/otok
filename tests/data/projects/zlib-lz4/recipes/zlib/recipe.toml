@@ -1,0 +1,29 @@
+# zlib from its release archive (milestone A, docs/PLAN.md decision 19). Built by a test that runs only
+# with OTOK_TEST_NETWORK=1; the sha256 is that of the real archive.
+[recipe]
+api = 1
+library = "zlib"
+name = "zlib"
+variant = "all"
+version = "1.3.2"
+revision = 1
+license = "Zlib"
+license-files = ["LICENSE"]
+homepage = "https://zlib.net"
+description = "zlib, the general-purpose compression library."
+
+[source]
+url = "https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.gz"
+sha256 = "bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16"
+
+[platforms]
+supported = ["linux", "windows"]
+build-on = ["linux/gcc", "linux/clang", "windows/msvc", "windows/clang-cl", "linux/clang-cl"]
+
+[toolchains]
+cmake = ">= 3.20"
+ninja = ">= 1.10"
+
+[[product]]
+name = "ZLIB"
+libraries = ["z"]

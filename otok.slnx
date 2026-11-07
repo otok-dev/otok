@@ -1,0 +1,20 @@
+<Solution>
+  <Configurations>
+    <BuildType Name="Debug" />
+    <BuildType Name="Release" />
+    <Platform Name="x64" />
+  </Configurations>
+  <Folder Name="/targets/">
+    <Project Path="projects/vs/otok-target-android/otok-target-android.vcxproj" Id="6e3c1b52-8f4d-4a7b-9c21-5d0a7e9b4f13" />
+    <Project Path="projects/vs/otok-target-apple/otok-target-apple.vcxproj" Id="9634c25c-63bb-4994-a215-3434f86c462a" />
+    <Project Path="projects/vs/otok-target-linux/otok-target-linux.vcxproj" Id="2a24903a-2ec0-4673-a1d2-bb6b1b1b3671" />
+    <Project Path="projects/vs/otok-target-windows/otok-target-windows.vcxproj" Id="9a68b558-76a2-4f72-a3d1-89797affb109" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="projects/vs/otok-test-child/otok-test-child.vcxproj" Id="010bd305-e12b-43f7-9d90-fcc8eaf14cd9" />
+    <Project Path="projects/vs/otok-tests/otok-tests.vcxproj" Id="ebca105f-c0bf-4dae-af09-efbe77351558" />
+  </Folder>
+  <Project Path="projects/vs/otok-lua/otok-lua.vcxproj" Id="6f3b2c1d-8e4a-4b7c-9d2e-5a1f0c3b7e91" />
+  <Project Path="projects/vs/otok-core/otok-core.vcxproj" Id="47746624-8eb8-4e15-9751-5766555da36f" />
+  <Project Path="projects/vs/otok/otok.vcxproj" Id="fa642bb0-b924-4df0-b9a9-eda3fe0b43f1" />
+</Solution>

@@ -1,0 +1,50 @@
+# Otok (c) Alexander A Pototskiy
+# SPDX-License-Identifier: GPL-3.0-only WITH AdditionRef-otok-output-exception
+#
+# The availability of inputs (docs/formats/index.md 11): weekly, `otok index-probe` writes
+# availability.toml, committed to the default branch.
+name: probe
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: probe
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    container: ubuntu:26.04  # the system otok-linux-x64 is built on
+    steps:
+      - name: Tools
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq git ca-certificates curl jq > /dev/null
+      - uses: actions/checkout@v5
+        with:
+          path: index
+      - name: Get otok from the index's release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY"
+          asset=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" "$api/releases/tags/otok" | jq -r '.assets[] | select(.name == "otok-linux-x64") | .url')
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" -o "$RUNNER_TEMP/otok" "$asset"
+          chmod +x "$RUNNER_TEMP/otok"
+      - name: Probe
+        env:
+          OTOK_CACHE_DIR: ${{ runner.temp }}/otok-cache
+        working-directory: index
+        run: |
+          "$RUNNER_TEMP/otok" index-probe
+      - name: Commit
+        working-directory: index
+        run: |
+          git add availability.toml
+          if ! git diff --cached --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -q -m "Probe the inputs of the published versions"
+            git push -q
+          fi

@@ -1,0 +1,34 @@
+# A tiny C library built static or dynamic, for the end-to-end test of the native target. Built from
+# the project's vendored copy; the sha256 is a placeholder.
+[recipe]
+api = 1
+library = "tiny-c"
+name = "tiny-c"
+variant = "all"
+version = "1.0"
+revision = 1
+license = "MIT"
+license-files = ["LICENSE"]
+description = "A tiny C library for otok's tests, static or dynamic."
+linkage = ["static", "dynamic"]
+
+[source]
+url = "https://example.com/tiny-c-1.0.tar.gz"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[platforms]
+supported = ["linux", "windows", "android", "ios", "iossim", "macosx", "catalyst", "tvos", "tvossim", "watchos", "watchossim", "xros", "xrossim"]
+build-on = ["linux/gcc", "linux/clang", "windows/msvc", "windows/clang-cl", "linux/clang-cl", "macos/xcode", "*/ndk"]
+
+[deps.tiny-d]
+version = ">= 1"
+default-recipe = "apotocki/tiny-d"
+
+[toolchains]
+cmake = ">= 3.20"
+ninja = ">= 1.10"
+
+[[product]]
+name = "TinyC"
+libraries = ["tiny_c"]
+apple = { privacy-manifest = "none" }  # in its framework when dynamic (otok-toml.md 4.10)

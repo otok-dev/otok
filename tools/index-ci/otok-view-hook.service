@@ -1,0 +1,18 @@
+# Otok (c) Alexander A Pototskiy
+# SPDX-License-Identifier: GPL-3.0-only WITH AdditionRef-otok-output-exception
+#
+# Regenerates the HTTPS view of an otok index when GitHub reports a push (tools/index-ci/README.md):
+# adnanh/webhook checks the signature with the secret of EnvironmentFile and runs run-update.sh.
+[Unit]
+Description=otok index view webhook
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=otok
+EnvironmentFile=/home/otok/.config/otok-dev/view-hook.env
+ExecStart=/usr/bin/webhook -hooks /home/otok/.local/share/otok-view/hooks.json -template -ip 127.0.0.1 -port 9000
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,32 @@
+# A tiny C library that needs tiny-a's header, for the end-to-end test of the native target. Built from
+# the project's vendored copy; the sha256 is a placeholder.
+[recipe]
+api = 1
+library = "tiny-b"
+name = "tiny-b"
+variant = "all"
+version = "1.0"
+revision = 1
+license = "MIT"
+license-files = ["LICENSE", { recipe = "NOTICE" }]  # the second from the recipe directory (recipe-toml.md 3)
+description = "A tiny C library for otok's tests, depending on tiny-a."
+
+[source]
+url = "https://example.com/tiny-b-1.0.tar.gz"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[platforms]
+supported = ["linux", "windows", "android", "ios", "iossim", "macosx", "catalyst", "tvos", "tvossim", "watchos", "watchossim", "xros", "xrossim"]
+build-on = ["linux/gcc", "linux/clang", "windows/msvc", "windows/clang-cl", "linux/clang-cl", "macos/xcode", "*/ndk"]
+
+[deps.tiny-a]
+version = ">= 1.0"
+default-recipe = "test/tiny-a"
+
+[toolchains]
+cmake = ">= 3.20"
+ninja = ">= 1.10"
+
+[[product]]
+name = "TinyB"
+libraries = ["tiny_b"]

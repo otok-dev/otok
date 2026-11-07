@@ -1,0 +1,17 @@
+# Two dynamic libraries, the one linked against the other, in both configurations (docs/PLAN.md
+# decision 31), installed with the real native target by native_target_test.
+[otok]
+format = 1
+
+[linux]
+build-on = ["linux/gcc"]
+configurations = ["debug", "release"]
+linkage = "dynamic"
+
+[deps.tiny-c]
+recipe = { path = "recipes/tiny-c" }
+source = { path = "vendor/tiny-c" }
+
+[deps.tiny-d]
+recipe = { path = "recipes/tiny-d" }
+source = { path = "vendor/tiny-d" }

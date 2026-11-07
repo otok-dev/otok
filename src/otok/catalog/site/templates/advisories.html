@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Advisories</h1>
+<p class="lead">Withdrawn versions, security problems and broken builds, newest first. <code>otok audit</code> checks a project's lock against them. Follow them in a feed reader: <a href="{{ root }}advisories.atom">Atom feed</a>.</p>
+{% if length(advisories) == 0 %}
+<p>No advisories.</p>
+{% endif %}
+{% for a in advisories %}
+<article class="advisory" id="{{ a.id }}">
+<h2>{{ a.id }} <span class="badge {% if a.severity == "broken" %}warn{% else %}bad{% endif %}">{{ a.severity }}</span> <span class="badge">{{ a.status }}</span></h2>
+<p>{{ a.summary }}</p>
+<dl class="facts">
+{% if length(a.recipes) %}<dt>Recipes</dt><dd>{% for r in a.recipes %}<a href="{{ root }}recipes/{{ r }}/">{{ r }}</a>{% if not loop.is_last %}, {% endif %}{% endfor %}</dd>{% endif %}
+{% if a.library %}<dt>Library</dt><dd><a href="{{ root }}libraries/{{ a.library }}/">{{ a.library }}</a></dd>{% endif %}
+<dt>Versions</dt><dd>{{ join(a.versions, ", ") }}</dd>
+{% if length(a.aliases) %}<dt>Aliases</dt><dd>{{ join(a.aliases, ", ") }}</dd>{% endif %}
+<dt>Published</dt><dd>{{ a.published }}{% if a.updated %}, updated {{ a.updated }}{% endif %}</dd>
+{% if length(a.references) %}<dt>References</dt><dd>{% for r in a.references %}<a href="{{ r }}">{{ r }}</a>{% if not loop.is_last %}<br>{% endif %}{% endfor %}</dd>{% endif %}
+</dl>
+{% if a.details %}<div class="details">{{ a.details }}</div>{% endif %}
+</article>
+{% endfor %}
+{% endblock %}
+{# Otok (c) Alexander A Pototskiy
+   SPDX-License-Identifier: GPL-3.0-only WITH AdditionRef-otok-output-exception #}

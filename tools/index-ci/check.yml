@@ -1,0 +1,170 @@
+# Otok (c) Alexander A Pototskiy
+# SPDX-License-Identifier: GPL-3.0-only WITH AdditionRef-otok-output-exception
+#
+# Index CI (docs/formats/index.md 9): every pull request is checked by `otok index-check`, and one with
+# the verdict `auto` is merged by this workflow, with the time of the merge written into its new entries
+# (`published`, index.md 3). An index maintainer approves a pull request waiting for one by labelling it
+# `approved`; the workflow checks it again and merges it.
+#
+# The workflow runs on pull_request_target, so this definition comes from the default branch: a pull
+# request cannot change what checks it. Nothing of the pull request is executed: it is checked out as
+# data, without credentials, and otok comes from the index's release `otok`, never from the pull request.
+#
+# The default branch should be protected so that only this workflow pushes to it: a pull request merged
+# with GitHub's button has no `published` in its entries.
+name: check
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled]
+permissions:
+  contents: write
+  pull-requests: write
+concurrency:
+  group: check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  check:
+    # other labels are not approvals; the workflow's own labels start no workflow
+    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'approved' }}
+    runs-on: ubuntu-24.04
+    container: ubuntu:26.04  # the system otok-linux-x64 is built on
+    steps:
+      - name: Tools
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq git ca-certificates curl jq > /dev/null
+      - name: Drop an earlier approval
+        # an approval is of what was approved: a changed pull request is approved again
+        if: ${{ github.event.action == 'synchronize' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          curl -sS -o /dev/null -X DELETE -H "Authorization: Bearer $GH_TOKEN" "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/issues/$NUMBER/labels/approved"
+      - name: Find the merge of the event's head
+        # GitHub computes the merge of a pull request with the default branch after each change, asynchronously: the merge
+        # checked is the one of the head of this event, waited for
+        id: merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY"
+          pr="$RUNNER_TEMP/pull-request.json"  # a file: sh's echo would expand the escapes of the JSON
+          for attempt in $(seq 1 36); do
+            curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -o "$pr" "$api/pulls/$NUMBER"
+            if [ "$(jq -r .head.sha "$pr")" != "$HEAD_SHA" ]; then
+              echo "the pull request has changed since this event; its newer check decides" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+            sha=$(jq -r '.merge_commit_sha // empty' "$pr")
+            if [ -n "$sha" ] && [ "$(jq -r .mergeable "$pr")" = true ] \
+              && [ "$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" "$api/commits/$sha" | jq -r '.parents[1].sha // empty')" = "$HEAD_SHA" ]; then
+              echo "sha=$sha" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "GitHub has not merged the pull request with the default branch (a conflict?)" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+      - name: Check out the pull request as data
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.merge.outputs.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+          path: index
+      - name: Get otok from the index's release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY"
+          asset=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" "$api/releases/tags/otok" | jq -r '.assets[] | select(.name == "otok-linux-x64") | .url')
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" -o "$RUNNER_TEMP/otok" "$asset"
+          chmod +x "$RUNNER_TEMP/otok"
+      - name: Check
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          OTOK_CACHE_DIR: ${{ runner.temp }}/otok-cache
+          AUTHOR_ID: ${{ github.event.pull_request.user.id }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          APPROVER_ID: ${{ github.event.action == 'labeled' && github.event.sender.id || '' }}
+        working-directory: index
+        run: |
+          # the head checked is the head of the event: the one a maintainer approved
+          if [ "$(git rev-parse HEAD^2)" != "$HEAD_SHA" ]; then
+            echo "the pull request has changed since this event; its newer check decides" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          approval=
+          [ -n "$APPROVER_ID" ] && approval="--approved-by $APPROVER_ID"
+          "$RUNNER_TEMP/otok" index-check --base HEAD^1 --author-id "$AUTHOR_ID" --repository "$GITHUB_REPOSITORY" --pull-request "$NUMBER" \
+            $approval --stamp --summary "$RUNNER_TEMP/summary.json" --comment "$RUNNER_TEMP/comment.md"
+      - name: Comment
+        # whatever the verdict, refused too: the author learns in the pull request what became of it (index.md 9)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          [ -f "$RUNNER_TEMP/comment.md" ] || exit 0
+          api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/issues"
+          # the comment of an earlier check is replaced
+          id=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" "$api/$NUMBER/comments?per_page=100" \
+            | jq -r '[.[] | select(.user.type == "Bot" and (.body | contains("<!-- otok-index-check ")))] | last | .id // empty')
+          jq -Rs '{body: .}' "$RUNNER_TEMP/comment.md" > "$RUNNER_TEMP/comment.json"
+          if [ -n "$id" ]; then
+            curl -fsSL -X PATCH -H "Authorization: Bearer $GH_TOKEN" "$api/comments/$id" -d @"$RUNNER_TEMP/comment.json" > /dev/null
+          else
+            curl -fsSL -X POST -H "Authorization: Bearer $GH_TOKEN" "$api/$NUMBER/comments" -d @"$RUNNER_TEMP/comment.json" > /dev/null
+          fi
+      - name: Label
+        # the verdict as a label: the maintainers' queue is the open pull requests labelled ready-for-review (index.md 9.2)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          [ -f "$RUNNER_TEMP/summary.json" ] || exit 0
+          api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/issues/$NUMBER/labels"
+          case $(jq -r .verdict "$RUNNER_TEMP/summary.json") in
+            maintainer) add=ready-for-review ;;
+            refused) add=refused ;;
+            *) add= ;;
+          esac
+          for label in ready-for-review refused; do
+            [ "$label" = "$add" ] || curl -sS -o /dev/null -X DELETE -H "Authorization: Bearer $GH_TOKEN" "$api/$label"
+          done
+          if [ -n "$add" ]; then
+            curl -fsSL -X POST -H "Authorization: Bearer $GH_TOKEN" "$api" -d "{\"labels\": [\"$add\"]}" > /dev/null
+          fi
+      - name: Merge
+        # a merge commit of the checked base and head holding the checked files with the time of the merge: pushed to the
+        # default branch, it makes GitHub show the pull request merged; refused when the default branch has moved since
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          TITLE: ${{ github.event.pull_request.title }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        working-directory: index
+        run: |
+          verdict=$(jq -r .verdict "$RUNNER_TEMP/summary.json")
+          if [ "$verdict" != auto ]; then
+            echo "verdict: $verdict; it waits for an index maintainer's approval" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git add -u
+          tree=$(git write-tree)
+          commit=$(printf 'Merge pull request #%s\n\n%s\n' "$NUMBER" "$TITLE" \
+            | git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit-tree "$tree" -p HEAD^1 -p HEAD^2)
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          if ! git -c http.extraheader="AUTHORIZATION: basic $auth" push -q "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$commit:refs/heads/$BASE_REF"; then
+            echo "the default branch has moved since the check: run the check again" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
