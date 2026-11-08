@@ -46,6 +46,7 @@ Building otok from this source is described in [Install otok](https://otok-dev.g
 
 otok takes no pull requests: please report problems and proposals as issues ([CONTRIBUTING.md](CONTRIBUTING.md)).
 Recipes are published to the [index](https://github.com/otok-dev/index) by pull requests, which `otok publish` makes.
+If otok saves you time, [sponsoring](https://github.com/sponsors/apotocki) keeps it going.
 
 ## License
 
