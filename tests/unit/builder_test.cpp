@@ -55,7 +55,20 @@ target_info const& other_info()
     return other;
 }
 
-target_info const* const both_targets[] = {&test::native_info(), &other_info()};
+// `other` with two compilers of the machine's system and one ABI: a library whose recipe builds with `two` only is built there for
+// a graph of `one` (docs/PLAN.md decision 91)
+target_info const& abi_info()
+{
+    static target_info const abi = [] {
+        target_info t = other_info();
+        std::string const system = machine_environment("").system;
+        t.environments = {{system, "", "one"}, {system, "", "two"}};
+        t.any_host_compilers = {};
+        t.abis = {{"one", "x"}, {"two", "x"}};
+        return t;
+    }();
+    return abi;
+}
 
 std::string machine_arch()
 {
@@ -77,11 +90,21 @@ struct fake_toolchain
 class fake_target final : public build_target
 {
 public:
-    explicit fake_target(fake_toolchain& t, target_info const& info = test::native_info()) : t_{t}, info_{info} {}
+    explicit fake_target(fake_toolchain& t, target_info const& info = test::native_info(), std::set<std::string> lacking = {})
+        : t_{t}, info_{info}, lacking_{std::move(lacking)}
+    {
+    }
 
     target_info const& info() const override { return info_; }
     std::string tool_arch() const override { return machine_arch(); }
     result<std::string> tools_path() override { return t_.tools; }
+
+    // the compilers it is told it lacks
+    result<void> find_compiler(build_environment const& e) override
+    {
+        if (lacking_.contains(e.compiler)) return fail("no " + e.compiler + " here");
+        return {};
+    }
 
     result<toolchain_profile> profile(slice_spec const&) override
     {
@@ -121,6 +144,7 @@ public:
 private:
     fake_toolchain& t_;
     target_info const& info_;
+    std::set<std::string> lacking_;
     std::unique_ptr<build_target> native_ = target::linux::make_build_target({});  // its plain layout
 };
 
@@ -178,6 +202,7 @@ protected:
             if (auto it = extra.find(std::string{name}); it != extra.end()) return it->second;
             return std::nullopt;
         };
+        target_info const* const both_targets[] = {&test::native_info(), second};
         command_context ctx{project.path(), with_other ? std::span<target_info const* const>{both_targets} : native_targets, nullptr, out, err,
             environment};
         ctx.terminal = terminal;
@@ -185,7 +210,7 @@ protected:
         ctx.make_build_targets = [this](machine_config const&) {
             std::vector<std::unique_ptr<build_target>> targets;
             targets.push_back(std::make_unique<fake_target>(toolchain));
-            if (with_other) targets.push_back(std::make_unique<fake_target>(toolchain, other_info()));
+            if (with_other && second_built) targets.push_back(std::make_unique<fake_target>(toolchain, *second, second_lacks));
             return targets;
         };
         // the toolchains' programs answer by name (docs/PLAN.md decision 38)
@@ -223,6 +248,9 @@ protected:
     int probes = 0;
     bool tool_roots = false;                    // command_context::tool_roots: the project's [tool-deps] built as roots
     bool with_other = false;                    // the target `other` besides `native` (other_info)
+    target_info const* second = &other_info();  // that target
+    bool second_built = true;                   // whether this machine has a build target for it
+    std::set<std::string> second_lacks;         // the compilers that target does not find
     fake_toolchain toolchain;
     std::ostringstream out, err;
     terminal_caps terminal;                     // live: the display draws the slices under way
@@ -338,18 +366,145 @@ TEST(machine_environment, of_tool_slices)
     EXPECT_EQ(m.tool_environment(target::windows::info()).text(), "windows/msvc");
 }
 
-// a project built in environments this machine has none of is refused before anything is fetched (otok-toml.md 4.9)
-TEST_F(builder_test, refuses_a_machine_without_the_environments_of_the_project)
+namespace {
+
+// The fixture's recipes of a and b for `native` and `other`, with the environments `other_build_on` gives a library after
+// `*/cc` in its `build-on`.
+void for_both_targets(test::temp_dir& project, std::map<std::string, std::string> const& other_build_on = {})
 {
+    for (std::string const library : {"a", "b"}) {
+        std::string text = read_file(project.path() / "recipes" / library / "recipe.toml").value_or("");
+        auto const replace = [&text](std::string const& from, std::string const& to) { text.replace(text.find(from), from.size(), to); };
+        replace("supported = [\"native\"]", "supported = [\"native\", \"other\"]");
+        replace("description = \"Test.\"\n", "description = \"Test.\"\nvariant = \"all\"\n");
+        if (auto it = other_build_on.find(library); it != other_build_on.end()) {
+            replace("build-on = [\"*/cc\"]", "build-on = [\"*/cc\", \"" + it->second + "\"]");
+        }
+        project.write("recipes/" + library + "/recipe.toml", text);
+    }
+}
+
+// A recipe for `other` only.
+void only_for_other(test::temp_dir& project, std::string const& library)
+{
+    std::filesystem::path const file = project.path() / "recipes" / library / "recipe.toml";
+    std::string text = read_file(file).value_or("");
+    std::string const from = "supported = [\"native\"]";
+    text.replace(text.find(from), from.size(), "supported = [\"other\"]");
+    project.write("recipes/" + library + "/recipe.toml", text);
+}
+
+}
+
+// docs/PLAN.md decision 100: the target tables this machine can build are built, the others skipped with a note each; the
+// output of a skipped one is left as it is, and --locked checks the whole lock
+TEST_F(builder_test, skips_a_target_this_machine_has_none_for)
+{
+    with_other = true;
+    for_both_targets(project);
+    write_recipe("gen", "1.0", build_lua("gen"));
+    only_for_other(project, "gen");
+    std::string const both = manifest + "[other]\nplatforms = [\"other\"]\noutput = \"OtokOther\"\n";
+    std::string const gen = "[deps.gen]\nrecipe = { path = \"recipes/gen\" }\nplatforms = [\"other\"]\n";
+    project.write("otok.toml", both + gen);
+
+    // both built first: gen in OtokOther only
+    ASSERT_EQ(run({"install"}), 0) << err.str();
+    EXPECT_TRUE(std::filesystem::exists(project.path() / "OtokOther" / "gen"));
+    std::string const state = read_file(project.path() / "OtokOther" / ".otok-output.toml").value_or("?");
+
+    // no target for `other` on this machine: native is built, OtokOther left with gen, which the project no longer has
+    second_built = false;
+    project.write("otok.toml", both);
+    ASSERT_EQ(run({"install"}), 0) << err.str();
+    EXPECT_NE(out.str().find("note: not building for 'other': this otok does not build it on this machine\n"), std::string::npos) << out.str();
+    EXPECT_NE(out.str().find("slices: 2 (2 from the cache)\n"), std::string::npos) << out.str();
+    EXPECT_NE(out.str().find("output 'Otok': "), std::string::npos) << out.str();
+    EXPECT_EQ(out.str().find("output 'OtokOther'"), std::string::npos) << out.str();
+    EXPECT_EQ(err.str().find("error"), std::string::npos) << err.str();
+    for (char const* library : {"a", "b", "gen"}) EXPECT_TRUE(std::filesystem::exists(project.path() / "OtokOther" / library)) << library;
+    EXPECT_EQ(read_file(project.path() / "OtokOther" / ".otok-output.toml").value_or("?"), state);
+    // the lock keeps both graphs
+    std::string const lock = read_file(project.path() / "otok.lock").value_or("?");
+    EXPECT_NE(lock.find("library = \"a\"\ntarget = \"other\"\n"), std::string::npos) << lock;
+    EXPECT_NE(lock.find("library = \"a\"\ntarget = \"native\"\n"), std::string::npos) << lock;
+
+    // the output of the target built is written anew
+    std::filesystem::remove_all(project.path() / "Otok");
+    ASSERT_EQ(run({"install"}), 0) << err.str();
+    EXPECT_TRUE(std::filesystem::exists(project.path() / "Otok" / "a"));
+
+    // --locked checks the graph of `other` too
+    project.write("otok.toml", both + gen);
+    ASSERT_EQ(run({"install"}), 0) << err.str();
+    write_recipe("gen", "1.1", build_lua("gen"));
+    only_for_other(project, "gen");
+    EXPECT_EQ(run({"install", "--locked"}), 1);
+    EXPECT_NE(err.str().find("error: otok.lock is out of date (--locked):\n  gen@other: 1.0 (r1) -> 1.1 (r1)\n"), std::string::npos) << err.str();
+}
+
+// docs/PLAN.md decision 100: a target whose environments this machine lacks is skipped, the note naming them
+TEST_F(builder_test, skips_a_target_without_its_environments)
+{
+    with_other = true;
+    second_lacks = {"cc"};
+    for_both_targets(project);
+    project.write("otok.toml", manifest + "[other]\nplatforms = [\"other\"]\nbuild-on = [\"*/cc\"]\noutput = \"OtokOther\"\n");
+    ASSERT_EQ(run({"install"}), 0) << err.str();
+    std::string const system = machine_environment("").system;
+    EXPECT_NE(out.str().find("note: not building for 'other': this project builds 'other' in */cc; this machine is "
+        + std::string{host_machine()} + "; " + system + "/cc: no cc here\n"), std::string::npos) << out.str();
+    EXPECT_NE(out.str().find("slices: 2 (0 from the cache)\n"), std::string::npos) << out.str();
+    EXPECT_TRUE(std::filesystem::exists(project.path() / "Otok" / "a"));
+    EXPECT_FALSE(std::filesystem::exists(project.path() / "OtokOther"));
+}
+
+// docs/PLAN.md decisions 91, 100: a library built in a substitute environment this machine lacks makes its target skipped
+TEST_F(builder_test, skips_a_target_without_the_environment_of_a_library)
+{
+    with_other = true;
+    second = &abi_info();
+    second_lacks = {"two"};
+    std::string const system = machine_environment("").system;
+    for_both_targets(project, {{"a", system + "/one"}, {"b", system + "/two"}});
+    project.write("otok.toml", manifest + "[other]\nplatforms = [\"other\"]\nbuild-on = [\"" + system + "/one\"]\noutput = \"OtokOther\"\n");
+    ASSERT_EQ(run({"install"}), 0) << err.str();
+    EXPECT_NE(out.str().find("note: not building for 'other': b@other is built in " + system + "/two (its recipe does not build in " + system
+        + "/one), which this machine does not have: no two here\n"), std::string::npos) << out.str();
+    EXPECT_NE(out.str().find("slices: 2 (0 from the cache)\n"), std::string::npos) << out.str();
+    EXPECT_TRUE(std::filesystem::exists(project.path() / "Otok" / "a"));
+    EXPECT_FALSE(std::filesystem::exists(project.path() / "OtokOther"));
+
+    // with that compiler, both are built
+    second_lacks.clear();
+    ASSERT_EQ(run({"install"}), 0) << err.str();
+    EXPECT_EQ(out.str().find("note:"), std::string::npos) << out.str();
+    EXPECT_TRUE(std::filesystem::exists(project.path() / "OtokOther" / "b"));
+}
+
+// docs/PLAN.md decision 100: a machine that can build none of the target tables is an error naming each, after the lock is
+// written and the inputs fetched (otok-toml.md 4.9)
+TEST_F(builder_test, builds_nothing_without_a_target_it_can_build)
+{
+    with_other = true;
+    second_built = false;
+    for_both_targets(project);
     std::string const system = machine_environment("").system;
     std::string const other = system == "linux" ? "windows" : "linux";
     project.write("otok.toml", "[otok]\nformat = 1\n[native]\nplatforms = [\"native\"]\nbuild-on = [\"" + other + "/cc\"]\n"
+        "[other]\nplatforms = [\"other\"]\noutput = \"OtokOther\"\n"
         "[deps.a]\nrecipe = { path = \"recipes/a\" }\n[deps.b]\nrecipe = { path = \"recipes/b\" }\n");
     ASSERT_EQ(run({"install"}), 1);
-    EXPECT_NE(err.str().find("error: this project builds 'native' in " + other + "/cc; this machine is " + std::string{host_machine()} + "\n"),
-        std::string::npos) << err.str();
-    EXPECT_EQ(out.str().find("inputs in the cache"), std::string::npos) << out.str();  // nothing fetched
+    EXPECT_NE(err.str().find("error: this machine can build none of the target tables of this project:\n"
+        "  'native': this project builds 'native' in " + other + "/cc; this machine is " + std::string{host_machine()} + "\n"
+        "  'other': this otok does not build it on this machine\n"), std::string::npos) << err.str();
+    EXPECT_NE(out.str().find("otok.lock created:\n"), std::string::npos) << out.str();
+    EXPECT_NE(out.str().find("inputs in the cache: 2 sources\n"), std::string::npos) << out.str();
+    EXPECT_EQ(out.str().find("note:"), std::string::npos) << out.str();
+    EXPECT_TRUE(std::filesystem::exists(project.path() / "otok.lock"));
+    EXPECT_FALSE(std::filesystem::exists(project.path() / "Otok"));
 
+    // an environment of the machine among them: built
     project.write("otok.toml", "[otok]\nformat = 1\n[native]\nplatforms = [\"native\"]\nbuild-on = [\"" + other + "/cc\", \"" + system + "/cc\"]\n"
         "[deps.a]\nrecipe = { path = \"recipes/a\" }\n[deps.b]\nrecipe = { path = \"recipes/b\" }\n");
     ASSERT_EQ(run({"install"}), 0) << err.str();
@@ -910,7 +1065,7 @@ TEST_F(builder_test, writes_the_output)
         if (d.is_directory()) entry = d.path();
     }
     std::string const key = read_file(entry / "key.txt").value_or("?");
-    EXPECT_NE(key.find("packager = 8\n"), std::string::npos) << key;
+    EXPECT_NE(key.find("packager = 9\n"), std::string::npos) << key;
     EXPECT_NE(key.find("slice.native-" + machine_arch() + ".release = "), std::string::npos) << key;
     EXPECT_EQ(sha256_hex(key).substr(0, 32), entry.filename().string());
     std::string const state = read_file(output / ".otok-output.toml").value_or("?");

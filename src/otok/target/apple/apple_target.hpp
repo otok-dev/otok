@@ -149,6 +149,7 @@ struct cmake_package
     std::vector<std::string> macos_frameworks;                         // the directories of their macOS frameworks
     std::vector<cmake_product> products;
     std::vector<std::string> privacy_manifests;                        // relative to the output
+    std::vector<std::pair<std::string, std::string>> data_dirs;        // library → its data/, relative to the output
     std::vector<std::string> warnings;                                 // what CMake's consumers do not get
 };
 

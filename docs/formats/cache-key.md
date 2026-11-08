@@ -2,14 +2,13 @@
 
 Status: draft.
 
-The build cache (DESIGN 5.7) stores built output under keys that hash every input that can change
+The build cache stores built output under keys that hash every input that can change
 it, and nothing else. Identical inputs are built once per machine and shared by projects; a changed
 input never reuses a stale build.
 
 ## 1. Two levels
 
-DESIGN 5.7 describes one key per package. The cache uses two levels instead, so that adding a platform
-to a project builds only the new slices:
+The cache has two levels of entries, so that adding a platform to a project builds only the new slices:
 
 | Level | Stores | Directory |
 |---|---|---|
@@ -36,7 +35,7 @@ The SHA-256 of a canonical description (3) of:
 | deployment version of the slice's platform | |
 | toolchain identity | Apple: Xcode build version (`27A266a`) and SDK version of the slice. Plus the version found of every toolchain the recipe declares (`recipe-toml.md` 13). |
 | slice keys of the active dependencies for the same slice | A rebuilt dependency rebuilds its dependents. |
-| keys of the tool dependencies | A rebuilt tool rebuilds what it generated (DESIGN 6.8). |
+| keys of the tool dependencies | A rebuilt tool rebuilds what it generated. |
 | the `build_tools` slice key, when the recipe defines `build_tools` | |
 | the entry point, `build` or `build_tools` | `build_tools` has an entry of its own on the tool slice. |
 
@@ -49,7 +48,7 @@ The names:
 |---|---|
 | `key-format`, `toolchain-profile` | the two version numbers |
 | `os`, `slice` | the target and the slice: `apple`, `iossim-arm64` |
-| `environment` | the environment the slice is built in (common 4.2), its host's system and the compiler: `linux/clang-cl`; also for a recipe that says `*/ndk`, so machines of two systems do not share slices (`docs/PLAN.md` decision 82) |
+| `environment` | the environment the slice is built in (common 4.2), its host's system and the compiler: `linux/clang-cl`; also for a recipe that says `*/ndk`, so machines of two systems do not share slices |
 | `library`, `version`, `revision` | |
 | `recipe-sha256` | the locked hash; for a recipe outside the project, its tree hash at build time |
 | `source` | `archive:<sha256>`, `git:<commit>` (`+submodules`), `path:<tree hash>`, `local:<tree hash at build time>` |
@@ -82,8 +81,8 @@ entry, `<cache-dir>/builds/<library>/<version>-r<revision>/sources/<sources key>
 The SHA-256 of a canonical description of: the key format version, the packager version (bumped when
 otok changes how it packages), the slice keys of all slices in the package, the recipe's
 `recipe-sha256` (products, wrappers, privacy manifest), the merged options (wrapper compilation
-conditions). `Package.swift` is not part of any entry: it is written into the project from the
-entries of all libraries (`otok-toml.md` 4), which is cheap.
+conditions). `Package.swift`, `otok-config.cmake`, `otok.props` and `otok.targets` are not part of any entry: they are
+written into the project from the entries of all libraries (`otok-toml.md` 4, 4.11), which is cheap.
 
 The description has the form of 3, with the names:
 
@@ -101,7 +100,8 @@ Directory names again use the first 32 hex digits. A package entry holds what th
 generator made of the slices, laid out as it goes into the project, `licenses/` with the recipe's
 `license-files` copied from the source (whose hash is in the slice keys), `data/` with the files
 `build` returned as `data` (`build-lua-api.md` 8), and `key.txt`. For `linux`, `windows` and `android`
-that is `include/`, `lib/`, `bin/` and `debug/` as each lays them out (`otok-toml.md` 4.1, 4.7, 4.8), for Apple one XCFramework per library output name (and one of its headers for a dynamic library, `otok-toml.md` 4.10),
+that is `include/`, `lib/`, `bin/` and `debug/` as each lays them out (`otok-toml.md` 4.1, 4.7, 4.8) and `otok-package.toml`
+naming their files (`otok-toml.md` 4.11), for Apple one XCFramework per library output name (and one of its headers for a dynamic library, `otok-toml.md` 4.10),
 `shims/`, `wrappers/` and `undefined-symbols/` (`otok-toml.md` 4, 4.4). Product `defines` and option values are written into
 the entry or `Package.swift` after evaluating `when`, so the merged options are part of the key. Tool
 packages have no package entry.

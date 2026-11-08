@@ -51,6 +51,27 @@ std::string slashed(fs::path const& p)
     return path_to_utf8(p.generic_u8string());
 }
 
+// Compares two toolsets of MSVC, "14.44" and "14.51", by their numbers.
+int compare_toolsets(std::string_view a, std::string_view b)
+{
+    auto const numbers = [](std::string_view s) {
+        std::vector<int> out;
+        int n = 0;
+        for (char c : s) {
+            if (c == '.') {
+                out.push_back(n);
+                n = 0;
+            } else if (c >= '0' && c <= '9') {
+                n = n * 10 + (c - '0');
+            }
+        }
+        out.push_back(n);
+        return out;
+    };
+    auto const x = numbers(a), y = numbers(b);
+    return x < y ? -1 : y < x ? 1 : 0;
+}
+
 #ifdef _WIN32
 // A value of Visual Studio's environment or of vswhere without its line end and trailing backslash.
 std::string trimmed(std::string s)
@@ -597,6 +618,7 @@ public:
         std::error_code ec;
         fs::create_directories(staging / "include", ec);
         if (ec) return fail("cannot create '" + path_to_utf8(staging) + "': " + ec.message());
+        package_files recorded;  // which file is which library (otok-toml.md 4.11)
         for (built_slice const& s : package.slices) {
             build_output const& out = s.output;
             std::set<fs::path> headers;
@@ -604,6 +626,11 @@ public:
             for (auto const& [name, dir] : out.library_headers) headers.insert(dir);
             for (fs::path const& dir : headers) {
                 if (auto ok = merge_headers(dir, staging / "include", slice_label(s.spec)); !ok) return ok;
+            }
+            // the newest toolset of the slices' CRTs, which a consumer needs at least
+            if (std::string const crt = detail::crt_of_key(read_file(s.entry / "key.txt").value_or("")); !crt.empty()) {
+                std::string& known = recorded.properties["crt"];
+                if (known.empty() || compare_toolsets(crt, known) > 0) known = crt;
             }
             // under the names the build gave them, which may be part of their contract (MSVC auto-linking)
             fs::path const root = s.spec.configuration == "debug" ? staging / "debug" : staging;
@@ -618,20 +645,27 @@ public:
                 if (ec) return fail("cannot copy the library '" + name + "': " + ec.message());
                 return {};
             };
+            std::string const at = std::string{s.spec.configuration == "debug" ? "debug/" : ""};
             for (auto const& [name, lib] : out.libraries) {
+                package_library_file f{name, s.spec.arch, s.spec.configuration, at + "lib/" + s.spec.arch + "/" + path_to_utf8(lib.filename())};
                 if (auto ok = place(name, lib, "lib"); !ok) return ok;
                 if (auto it = out.runtimes.find(name); it != out.runtimes.end()) {
                     if (auto ok = place(name, it->second, "bin"); !ok) return ok;
+                    f.runtime = at + "bin/" + s.spec.arch + "/" + path_to_utf8(it->second.filename());
+                    f.shared = true;
                 }
                 if (auto it = out.symbols.find(name); it != out.symbols.end()) {
                     if (auto ok = place(name, it->second, "bin"); !ok) return ok;
+                    f.symbols = at + "bin/" + s.spec.arch + "/" + path_to_utf8(it->second.filename());
                 }
+                recorded.files.push_back(std::move(f));
             }
         }
-        return {};
+        return write_file_atomic(staging / package_files_name, write_package_files(recorded));
     }
 
-    // One file name in the lib/<arch>/ of two libraries matters to consumers that link through search paths.
+    // otok-config.cmake, otok.props and otok.targets (otok-toml.md 4.11); and one file name in the lib/<arch>/ of two libraries, which
+    // matters to consumers that link through search paths.
     result<void> finish_output(fs::path const& dir, std::span<output_package const> packages, std::map<std::string, std::string> const& deployment,
         std::vector<std::string>& warnings) const override
     {
@@ -651,6 +685,12 @@ public:
                     }
                 }
             }
+        }
+        auto c = consumer_package_of(dir, packages, info().platforms.front().architectures);
+        if (!c) return std::unexpected{c.error()};
+        for (auto const& [name, text] : {std::pair{"otok-config.cmake", consumer_cmake_config(*c, detail::cmake_parts(*c))},
+                 std::pair{"otok.props", detail::msbuild_props(*c)}, std::pair{"otok.targets", detail::msbuild_targets(*c)}}) {
+            if (auto ok = write_file_if_changed(dir / name, text); !ok) return std::unexpected{ok.error()};
         }
         return {};
     }

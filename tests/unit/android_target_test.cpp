@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -268,6 +269,39 @@ TEST(android_target, checks_libraries)
     EXPECT_EQ(versioned.error().message, "its SONAME is 'libfoo.so.1', not its file name 'libfoo.so' without a version (libfoo.so), which Android needs");
 }
 
+// The ABI of the NDK's toolchain file, and the C++ runtime the app must use with dynamic libraries (otok-toml.md 4.7, 4.11).
+TEST(android_target, writes_its_parts_of_the_cmake_config)
+{
+    consumer_package p;
+    p.libraries = {{"z_z", "z", "", false, {{"z", "arm64-v8a", "release", "z/lib/arm64-v8a/libz.a"}}, {}, {}, false}};
+    consumer_cmake_parts parts = cmake_parts(p);
+    EXPECT_NE(parts.detect.find("if(CMAKE_ANDROID_ARCH_ABI)\n  set(_otok_arch \"${CMAKE_ANDROID_ARCH_ABI}\")\nelseif(ANDROID_ABI)\n"), std::string::npos)
+        << parts.detect;
+    EXPECT_EQ(parts.link_item("log"), "-llog");
+    EXPECT_EQ(parts.cxx_runtime, "");  // the app's ANDROID_STL
+    EXPECT_EQ(parts.checks, "");       // static libraries take the app's runtime
+
+    p.libraries.front().shared = true;
+    p.properties = {{"stl", "shared"}};
+    parts = cmake_parts(p);
+    EXPECT_NE(parts.checks.find("if(NOT _otok_stl STREQUAL \"c++_shared\")\n"
+                                "  message(FATAL_ERROR \"otok: the dynamic libraries of ${_otok_dir} use the C++ runtime c++_shared (stl = \\\"shared\\\" of "
+                                "[android]), \"\n"
+                                "    \"which the app must use and ship too, not ${_otok_stl}: set ANDROID_STL to c++_shared (Gradle: arguments "
+                                "\\\"-DANDROID_STL=c++_shared\\\")\")\n"),
+        std::string::npos)
+        << parts.checks;
+    p.properties = {{"stl", "static"}};
+    parts = cmake_parts(p);
+    EXPECT_NE(parts.checks.find("if(_otok_stl STREQUAL \"c++_shared\")\n"
+                                "  message(FATAL_ERROR \"otok: the dynamic libraries of ${_otok_dir} each have the C++ runtime c++_static in them (stl = "
+                                "\\\"static\\\" of [android]), \"\n"
+                                "    \"and an app using c++_shared would have one more: set ANDROID_STL to c++_static, or stl = \\\"shared\\\" of [android] in "
+                                "otok.toml and run otok install\")\n"),
+        std::string::npos)
+        << parts.checks;
+}
+
 TEST(android_target, packages_include_and_lib_per_abi)
 {
     test::temp_dir dir;
@@ -380,9 +414,37 @@ public:
 
     std::filesystem::path consumer(std::string const& abi) const { return base_ / ("libconsumer-" + abi + ".so"); }
 
+    // A shared object of `source` linking `product` through the output's otok-config.cmake (otok-toml.md 4.11), configured with
+    // the NDK's toolchain file for `abi` and built, as an app's externalNativeBuild does: the shared object, or the log.
+    result<std::filesystem::path> build_cmake_consumer(std::string const& source, std::string const& product, std::string const& abi,
+        std::vector<std::string> const& defines = {})
+    {
+        std::filesystem::path const dir = base_ / ("cmake-" + abi + "-" + std::to_string(consumers_++));
+        std::filesystem::create_directories(dir);
+        std::ofstream{dir / "consumer.c", std::ios::binary} << source;
+        std::ofstream{dir / "CMakeLists.txt", std::ios::binary}
+            << "cmake_minimum_required(VERSION 3.28)\nproject(consumer C)\n"
+               "find_package(Otok CONFIG REQUIRED PATHS \"" + path_to_utf8(output("").generic_u8string()) + "\" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)\n"
+               "add_library(consumer SHARED consumer.c)\ntarget_link_libraries(consumer PRIVATE otok::" + product + ")\n";
+        std::string const ndk = profile_.target_tables.at("android").at("ndk");
+        std::vector<std::string> configure{"cmake", "-S", path_to_utf8(dir), "-B", path_to_utf8(dir / "build"), "-G", "Ninja",
+            "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_TOOLCHAIN_FILE=" + ndk + "/build/cmake/android.toolchain.cmake", "-DANDROID_ABI=" + abi,
+            "-DANDROID_PLATFORM=24"};
+        for (std::string const& d : defines) configure.push_back("-D" + d);
+        env_vars const env = current_environment();
+        std::filesystem::path const log = dir / "build.log";
+        for (auto const& argv : {configure, std::vector<std::string>{"cmake", "--build", path_to_utf8(dir / "build")}}) {
+            auto ran = run_process({argv, env, dir, log});
+            if (!ran) return std::unexpected{ran.error()};
+            if (!ran->success()) return fail(read_file(log).value_or("the consumer does not build"));
+        }
+        return dir / "build" / "libconsumer.so";
+    }
+
     std::ostringstream out, err;
 
 private:
+    int consumers_ = 0;
     test::temp_dir dir_;
     std::filesystem::path base_, project_;
     toolchain_profile profile_;
@@ -432,6 +494,64 @@ TEST(android_target, installs_shared_objects_in_both_configurations)
     }
     auto linked = p.link_consumer("#include <tiny_c.h>\n\nint consumer(void) { return tiny_c(); }\n", "arm64-v8a", {"tiny-c", "tiny-d"});
     EXPECT_TRUE(linked) << linked.error().message;
+}
+
+namespace {
+
+// CMake's message, its lines folded: one space for every run of white space.
+std::string flat(std::string const& text)
+{
+    std::string out;
+    for (char c : text) {
+        bool const space = c == ' ' || c == '\n' || c == '\r' || c == '\t';
+        if (!space) out += c;
+        else if (!out.empty() && out.back() != ' ') out += ' ';
+    }
+    return out;
+}
+
+}
+
+// otok-config.cmake for an app's CMake (otok-toml.md 4.11): the ABI of the NDK's toolchain file picks the libraries.
+TEST(android_target, gives_cmake_consumers_static_libraries)
+{
+    android_project p{"tiny", "architectures = { android = [\"arm64-v8a\", \"x86_64\"] }\ndeployment = { android = \"24\" }\ncflags = [\"-DTINY_BONUS=2\"]\n"};
+    if (std::string const missing = p.missing_tools(); !missing.empty()) GTEST_SKIP() << missing;
+
+    ASSERT_EQ(p.install(), 0) << p.err.str() << p.out.str();
+    std::string const source = "#include <tiny_b.h>\n#if TINY_A_EXTRA != 5\n#error the defines of TinyA\n#endif\n\nint consumer(void) { return tiny_b(); }\n";
+    for (std::string const abi : {"arm64-v8a", "x86_64"}) {
+        auto built = p.build_cmake_consumer(source, "TinyB", abi);
+        ASSERT_TRUE(built) << abi << ": " << built.error().message;
+        EXPECT_EQ(elf_machines_of(*built), std::vector<unsigned>{abi == "x86_64" ? 62u : 183u});
+        EXPECT_TRUE(contains(load_names_of(*built).needed, "libz.so")) << abi;  // TinyA's system library
+    }
+    auto other = p.build_cmake_consumer(source, "TinyB", "armeabi-v7a");
+    ASSERT_FALSE(other);
+    EXPECT_NE(flat(other.error().message).find("has no libraries for the architecture 'armeabi-v7a': add it to 'architectures' of [android] in otok.toml "
+                                               "and run otok install"),
+        std::string::npos)
+        << other.error().message;
+}
+
+// Dynamic libraries linked with c++_shared (stl = "shared") need an app of the same runtime (otok-toml.md 4.7, 4.11).
+TEST(android_target, gives_cmake_consumers_shared_objects)
+{
+    android_project p{"dynamic", "architectures = { android = [\"arm64-v8a\"] }\ndeployment = { android = \"24\" }\n"
+                                 "configurations = [\"debug\", \"release\"]\nlinkage = \"dynamic\"\n"};
+    if (std::string const missing = p.missing_tools(); !missing.empty()) GTEST_SKIP() << missing;
+
+    ASSERT_EQ(p.install(), 0) << p.err.str() << p.out.str();
+    std::string const source = "#include <tiny_c.h>\n\nint consumer(void) { return tiny_c(); }\n";
+    auto refused = p.build_cmake_consumer(source, "TinyC", "arm64-v8a");
+    ASSERT_FALSE(refused);
+    EXPECT_NE(flat(refused.error().message).find("use the C++ runtime c++_shared (stl = \"shared\" of [android]), which the app must use and ship too, "
+                                                 "not c++_static: set ANDROID_STL to c++_shared"),
+        std::string::npos)
+        << refused.error().message;
+    auto built = p.build_cmake_consumer(source, "TinyC", "arm64-v8a", {"ANDROID_STL=c++_shared"});
+    ASSERT_TRUE(built) << built.error().message;
+    EXPECT_TRUE(contains(load_names_of(*built).needed, "libtiny_c.so"));
 }
 
 // build_tools of a recipe runs on the target of the build machine, in its tool environment, with the recipe's toolchains

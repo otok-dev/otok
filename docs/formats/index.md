@@ -1,12 +1,11 @@
 # Index, format 1
 
-Status: draft. Common rules are in [README.md](README.md). DESIGN 7 explains the index; this document
-specifies its files.
+Status: draft. Common rules are in [README.md](README.md). This document specifies the files of an
+index.
 
 The index is a public git repository of immutable version entries, plus a few mutable files
 (libraries, publishers, recipe status, advisories). otok reads a generated HTTPS view of it (section
-8), or the repository itself (8.1); the git repository stays the authoritative publication log
-(DESIGN 7.1).
+8), or the repository itself (8.1); the git repository stays the authoritative publication log.
 
 ## 1. Layout
 
@@ -30,15 +29,15 @@ otok-index/
 │   └── 2026-0001.toml                  # (7)
 ├── availability.toml                   # generated: inputs that went missing (11)
 └── apple/
-    ├── required-reason-apis.toml       # DESIGN 10.1
-    ├── privacy-sdks.toml               # DESIGN 10.1
+    ├── required-reason-apis.toml       # (10.1)
+    ├── privacy-sdks.toml               # snapshot of Apple's commonly used SDK list
     └── private-libraries.toml          # (10.2)
 ```
 
 All files are TOML (common 1). File and directory names are lowercase.
 
 Index CI checks every file strictly, as common 1.2 says (9). otok, reading an index that may have been written for a
-newer otok, is lenient where that cannot change what it builds (common 1.5, `docs/PLAN.md` decision 98): it skips
+newer otok, is lenient where that cannot change what it builds (common 1.5): it skips
 the version entries it cannot read (3.2), takes unknown platforms, architectures and environments as names that
 never match, reads `index.toml`, `recipe-status.toml`, publisher files, `availability.toml` and the Apple data files
 without the check of unknown keys, and reads advisories so that they act at least as much as they mean (7.2).
@@ -49,9 +48,9 @@ without the check of unknown keys, and reads advisories so that they act at leas
 |---|---|---|
 | `format` | integer | Index format version; `1`. |
 | `name` | string | Display name (`"Otok public index"`). |
-| `catalog` | URL | The catalog site generated from this index (DESIGN 8). |
+| `catalog` | URL | The catalog site generated from this index. |
 | `view` | URL | Base URL of the HTTPS view (8). |
-| `repository` | URL | The git repository of the index: where `otok publish` proposes entries when `index` names the view (DESIGN 7.4). |
+| `repository` | URL | The git repository of the index: where `otok publish` proposes entries when `index` names the view. |
 | `established-entries-per-day` | integer | The new entries an established publisher (9.1) may have in 24 hours for index CI to merge them (9.2); at least 1, `20` when missing. |
 | `review-entries-per-day` | integer | The new entries any other publisher may have in 24 hours for index CI to pass them to a maintainer (9.2); at least 1, `5` when missing. |
 
@@ -68,19 +67,19 @@ review-entries-per-day = 10
 A `format` otok does not know makes the whole index unreadable ("the index has format 2; it needs a newer otok"):
 the index format is never meant to change, what changes is the format of its entries (3.2).
 
-A private index (DESIGN 10, item 7) uses the same format.
+A private index uses the same format.
 
 ## 3. Version entries
 
 `recipes/<publisher>/<name>/<variant>/<version>-r<revision>.toml`. Never edited or deleted after it is merged;
-withdrawal is an advisory (DESIGN principle 3). Index CI accepts an entry only after fetching its
-`recipe-source` itself and finding the same `recipe-sha256` and copied fields there (DESIGN 7.4).
+withdrawal is an advisory (common 1.6). Index CI accepts an entry only after fetching its
+`recipe-source` itself and finding the same `recipe-sha256` and copied fields there.
 
 A recipe id has a variant per target and way of building (`recipe-toml.md` 6.1), each with its own revisions:
 `apple/1.92.0-r7.toml` and `windows-msvc/1.92.0-r1.toml` are two recipes of one version. The variants of one id
 entered for one version share no cell, platform and environment (common 4.2: neither covers the other's
 environment for a platform both support); index CI refuses an entry that would. An entry's `[platforms] supported`
-is of one target (`docs/PLAN.md` decision 82).
+is of one target.
 
 An entry is everything resolution needs, so the resolver works from index data alone and fetches
 recipe trees only for the versions it selects (as Cargo's index carries dependencies and features):
@@ -140,10 +139,10 @@ xcode = ">= 16"
 | `recipe-source` | publication | Repository, full commit SHA (with its tag, when the publication names one) and directory of the recipe tree. |
 | `recipe-sha256` | publication | Hash of that tree (`recipe-hash.md`). |
 | `source`, `[[resource]]` | `[source]`, `[[resource]]` | Pins only: `url` + `sha256` (+ `mirrors`) or `git` + `commit` (+ `tag`, `submodules`), and each resource's `name`. Patches, `verify-against`, `unpack` and `dest` stay in the recipe. |
-| `published` | index CI | UTC time of the merge, written into the entry by the workflow that merges it (9.2), or by `otok publish` into a checkout of the index, whose pushes the git host already limits (DESIGN 7.4). Never in a pull request: an author could write any time there, and the limit of entries per day counts by it (9.2). Absent from an entry merged otherwise, which has no date. |
+| `published` | index CI | UTC time of the merge, written into the entry by the workflow that merges it (9.2), or by `otok publish` into a checkout of the index, whose pushes the git host already limits. Never in a pull request: an author could write any time there, and the limit of entries per day counts by it (9.2). Absent from an entry merged otherwise, which has no date. |
 
 An entry says nothing of a build: `otok publish` builds the recipe as the publisher's own check, and whatever a
-publisher wrote of it would be taken on trust (`docs/PLAN.md` decision 82). Marks of builds, if an index has a CI
+publisher wrote of it would be taken on trust. Marks of builds, if an index has a CI
 that builds published recipes, are records of their own, written by that CI.
 | `[tool]`, `[platforms]`, `[options.*]`, `[deps.*]`, `[tool-deps.*]`, `[toolchains]`, `[<target>]` (`[apple]`, …) | the same tables | Copied, except option `doc` strings (the catalog reads them from the recipe). |
 
@@ -177,7 +176,7 @@ cannot both be published.
 
 ### 3.2 Entries for a newer otok
 
-An entry otok cannot read is not there for it (`docs/PLAN.md` decision 98, as Cargo's `v`): an unknown `format` or
+An entry otok cannot read is not there for it (as in Cargo's index, whose entries carry `v`): an unknown `format` or
 `api`, a library whose `scheme` (4) it does not know, or anything else its reader refuses. Resolution chooses among the
 other versions, so `update` takes one this otok reads; the version is an error only when the lock or a constraint of the
 project leaves nothing else, and the message says that it needs a newer otok (it cannot say which, common 1.4).
@@ -199,7 +198,7 @@ no use to this otok, and is left aside like an unreadable one.
 | `order` | array of versions | `explicit` only: all known versions, oldest first. Publishing an unknown version adds it (at the end, or where the publisher states). |
 
 Set by the first publisher; changing `scheme` later needs an index maintainer, because it reorders
-every recipe's versions (DESIGN 7.2). A `scheme` otok does not know (common 1.5) makes the
+every recipe's versions. A `scheme` otok does not know (common 1.5) makes the
 entries of the library unreadable (3.2), not the index. The recipes that build a library are not listed here: the view
 derives them (8).
 
@@ -209,7 +208,7 @@ derives them (8).
 
 | Key | Type | Meaning |
 |---|---|---|
-| `deprecated` | `{ reason = "…", in-favor-of = "<recipe id>" }` | The recipe is no longer maintained; `otok install` and `otok outdated` show the replacement (DESIGN 10, item 10). |
+| `deprecated` | `{ reason = "…", in-favor-of = "<recipe id>" }` | The recipe is no longer maintained; `otok install` and `otok outdated` show the replacement. |
 | `transferred-from` | recipe id | Set by an index maintainer when a recipe moves between publishers; the history stays under the old id. |
 
 A deprecated recipe still resolves and builds; `install`, `update` and `fetch` warn when they choose
@@ -227,17 +226,17 @@ organization's file names the organization, not its author, and is added by an i
 | `github-id` | integer | The numeric GitHub account id. Logins can be renamed and, after deletion, registered again by someone else; the numeric id cannot, so ownership checks use it. |
 | `kind` | `"user"` or `"organization"` | For an organization, its members may publish (checked at PR time). |
 | `established` | boolean | Set by an index maintainer: index CI merges the publisher's pull requests itself, within `established-entries-per-day` (9.1, 9.2). `false` when missing: every pull request waits for a maintainer. |
-| `trusted-publishing` | array of `{ repository = "owner/repo", workflow = ".github/workflows/<file>", environment = "…" }` | GitHub Actions workflows allowed to publish for this publisher with an OIDC token (DESIGN 7.4); `environment` optional. Read but not used yet: how a publisher's workflow reaches the index without a long-lived token is open (`docs/PLAN.md` open item 27). |
+| `trusted-publishing` | array of `{ repository = "owner/repo", workflow = ".github/workflows/<file>", environment = "…" }` | GitHub Actions workflows allowed to publish for this publisher with an OIDC token; `environment` optional. Read but not used yet: how a publisher's workflow reaches the index without a long-lived token is not decided yet. |
 | `suspended` | string | Set by an index maintainer: the reason the publisher may not publish any more. Index CI refuses its pull requests (9); its recipes are withdrawn by advisories. |
 
 ### 6.1 Why GitHub only
 
-In format 1 a publisher of the public index is a GitHub account (DESIGN principle 7). This restricts
+In format 1 a publisher of the public index is a GitHub account. This restricts
 only the publisher's identity: recipe repositories (`recipe-source`) and library sources may be on any
 git host (GitLab, Codeberg, a self-hosted server), and a private index chooses its own rules.
 
 The reasons: the index is a GitHub repository and a publication is a pull request, whose author
-GitHub has already identified, so otok needs no account system or server of its own (DESIGN 8);
+GitHub has already identified, so otok needs no account system or server of its own;
 trusted publishing uses GitHub Actions OIDC tokens; and one identity provider gives one name space.
 
 The format leaves room for more providers: a publisher file could carry e.g. `gitlab-id` next to
@@ -268,7 +267,7 @@ updated = 2026-11-02T14:00:00Z
 | `variants` | array of variant names | With `recipes`: only these variants (`["windows-msvc"]`), whose revisions are their own (3); every variant without it. |
 | `versions` | array | Affected versions: `"<version>-r<revision>"` for specific revisions, `"<version>"` for all its revisions, or a constraint (`"< 3.5.5"`, common 3.2) for every revision of the versions it matches. Versions are compared in the library's scheme (4). |
 | `severity` | `"withdrawn"`, `"security"`, `"broken"` | 7.1 |
-| `status` | `"under-review"`, `"confirmed"`, `"rejected"` | A report can be published immediately as `under-review` and resolved later (DESIGN 7.3). |
+| `status` | `"under-review"`, `"confirmed"`, `"rejected"` | A report can be published immediately as `under-review` and resolved later. |
 | `summary` | string, one line | |
 | `details` | string (Markdown) | Optional. |
 | `aliases` | array of strings | `CVE-…`, `GHSA-…`. |
@@ -284,7 +283,7 @@ updated = 2026-11-02T14:00:00Z
 | any, `rejected` | nothing | nothing |
 
 `under-review` acts like `confirmed`: a false alarm costs a day of delay, a real problem left
-unflagged costs more (DESIGN 7.3).
+unflagged costs more.
 
 An entry of `versions` is first read as `<version>-r<revision>` when it ends in `-r` and digits and the
 part before is a version, then as a version, then as a constraint; a version that its library's scheme
@@ -301,7 +300,7 @@ the versions still warn.
 ### 7.2 Advisories for a newer otok
 
 A newer otok may give advisories new keys and values. otok reads them so that an advisory acts at least as much as it
-means (`docs/PLAN.md` decision 98):
+means:
 
 - A key may only narrow what an advisory concerns (as `variants` does), so an unknown key is left aside and the
   advisory applies more widely.
@@ -312,8 +311,8 @@ means (`docs/PLAN.md` decision 98):
 
 ## 8. HTTPS view
 
-Generated from the repository by `otok index-view` on every change, next to the catalog (DESIGN 7.1,
-8). `config.md` names a view as `index = "view+https://<base>"`; its files are under `<base>/index/`.
+Generated from the repository by `otok index-view` on every change, next to the catalog.
+`config.md` names a view as `index = "view+https://<base>"`; its files are under `<base>/index/`.
 otok reads only the files a command needs, each at most once per command and revalidated with
 `ETag`/`If-None-Match` (`cache.md` 11), so an unchanged index costs one small request per used recipe.
 
@@ -338,7 +337,7 @@ always exist.
 
 `<base>/index/` keeps `view-format` 1. A view of another format is written into a directory of its own,
 `<base>/index-<view-format>/`, which `otok index-view` writes beside the older ones for as long as otoks reading them
-are in use (`docs/PLAN.md` decision 98); a view file whose `view-format` otok does not know is an error saying that it
+are in use; a view file whose `view-format` otok does not know is an error saying that it
 needs a newer otok.
 
 `index/libraries/openssl.json`, as `otok index-view` writes it:
@@ -382,7 +381,7 @@ reads the last commit it fetched. A directory is read as it is, and nothing is f
 ### 9.1 Authors, publishers and maintainers
 
 - An **author** is the GitHub account that opens a pull request; anyone with an account may. `otok publish` opens it
-  from the account of its token (DESIGN 7.4); the workflow names it by its numeric id (`--author-id`).
+  from the account of its token; the workflow names it by its numeric id (`--author-id`).
 - A **publisher** is a name of `publishers/` (6), held by one account or by an organization whose public members
   publish for it. An author's first pull request publishing under a new name adds its publisher file, and an index
   maintainer merges it or closes it: merging it allows the name, and nothing else registers one. Every pull request
@@ -415,12 +414,12 @@ pull request (`refused`) unless:
   and which is not `suspended`;
 - for every new entry: the recipe tree at `recipe-source` hashes to `recipe-sha256`; the projection
   of its `recipe.toml` equals the entry (3); the tree respects the recipe limits (`recipe-toml.md` 15)
-  and what publication requires (DESIGN 7.4); every toolchain of `[toolchains]` has a `default-recipe`
+  and what publication requires; every toolchain of `[toolchains]` has a `default-recipe`
   (`recipe-toml.md` 13) naming a recipe of the index, the pull request included, with an entry of a tool recipe
   whose `[tool] programs` names it (`recipe-toml.md` 3.1, 13.1); `recipe-source`, `source`,
   resources and mirrors are `https`; `source` and resources download and match their hashes; the entry has no
   `published`, which the workflow writes as it merges it (3, below); archives with `verify-against` are compared with
-  their git tree, and the differences are listed in the report without failing it (DESIGN 11, item 2);
+  their git tree, and the differences are listed in the report without failing it (`recipe-toml.md` 4);
 - the version of every new entry is valid in its library's scheme (4) and differs, in that scheme,
   from the versions of the variant's other entries with the same revision (`1.2` and `1.2.0` are one
   version under `semver`);
@@ -468,7 +467,7 @@ or closed. Without `--repository` there are none, and nobody is a maintainer.
 When the limit refuses a pull request, its reason says when it would pass: the time the publisher's entries of the
 last 24 hours have dropped to the limit less this pull request's and its other open ones'; or that its other open
 pull requests, named, must be merged or closed first; or, when the pull request alone adds more than the limit,
-that it must be split. Publishing again after that time (DESIGN 7.4) updates the pull request with a new commit on
+that it must be split. Publishing again after that time updates the pull request with a new commit on
 the index's head, and index CI checks it again; nothing checks a pull request again without a change of it.
 
 The workflow runs on `pull_request_target`, so its own definition comes from the default branch and a
@@ -488,7 +487,7 @@ workflow posts it in the pull request, replacing its comment of an earlier check
 verdict: the author learns there whether the pull request is merged, waits for a maintainer or is
 refused, and why. The comment ends with the summary in an HTML comment, `<!-- otok-index-check
 {…} -->`, the JSON on one line with every `>` written `>`, which `otok publish` reads when it
-updates the pull request (DESIGN 7.4).
+updates the pull request.
 
 The workflow also labels the pull request with its verdict, `ready-for-review` for `maintainer` and `refused` for
 `refused`, removing the other (and both from one merged): the maintainers' queue is the list of open pull requests
@@ -516,7 +515,7 @@ recipe repository's own.
 
 ### 10.1 `apple/required-reason-apis.toml`
 
-The symbols of Apple's required-reason APIs (DESIGN 10.1), by the category a privacy manifest declares
+The symbols of Apple's required-reason APIs, by the category a privacy manifest declares
 them under (`NSPrivacyAccessedAPIType`). otok matches them against the undefined symbols of the static
 libraries it packages for Apple (`otok-toml.md` 4.4). otok carries a built-in copy of this file, used
 when the index has none (a private index, offline work).
@@ -576,7 +575,7 @@ without trouble.
 ## 11. Availability of inputs
 
 A published version builds only while its inputs can be fetched: the recipe tree (`recipe-source`), the
-source and the resources. Hashes stop substitution, not loss (DESIGN 7.1). The index's scheduled
+source and the resources. Hashes stop substitution, not loss. The index's scheduled
 workflow runs `otok index-probe` weekly and commits what it finds to `availability.toml`:
 
 ```toml
@@ -603,5 +602,5 @@ not downloaded: the hashes are checked by every build. A version that becomes av
 the file.
 
 The file changes nothing for resolution: `otok info` shows it ("inputs unavailable since …"), and so
-does the catalog (DESIGN 8). A user who has the inputs (the cache, `otok vendor`, `asset-mirror`) still
+does the catalog. A user who has the inputs (the cache, `otok vendor`, `asset-mirror`) still
 builds. Pull requests may not change it (9).

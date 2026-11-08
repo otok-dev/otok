@@ -94,6 +94,16 @@ result<void> write_file_atomic(std::filesystem::path const& path, std::string_vi
     return {};
 }
 
+result<bool> write_file_if_changed(std::filesystem::path const& path, std::string_view content)
+{
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(path, ec)) {
+        if (auto old = read_file(path); old && *old == content) return false;
+    }
+    if (auto ok = write_file_atomic(path, content); !ok) return std::unexpected{ok.error()};
+    return true;
+}
+
 result<void> copy_tree(std::filesystem::path const& from, std::filesystem::path const& to)
 {
     namespace fs = std::filesystem;

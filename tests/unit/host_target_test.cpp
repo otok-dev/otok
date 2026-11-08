@@ -18,6 +18,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 #include "otok/builder/toolchains.hpp"
@@ -493,9 +494,109 @@ public:
         return ran->code;
     }
 
+    static env_vars with(env_vars env, env_vars const& more)
+    {
+        for (auto const& [name, value] : more) env[name] = value;
+        return env;
+    }
+
+    // The environment of a consumer's build: the toolchain's, with CMake and Ninja where otok finds them.
+    env_vars consumer_env() const
+    {
+        env_vars env = profile_.toolchain.env;
+        std::string path;
+        for (char const* tool : {"cmake", "ninja"}) {
+            auto found = find_program(tool, env, base_);
+            if (!found) found = find_program(tool, current_environment(), base_);
+            if (found) path += path_to_utf8(found->parent_path()) + (std::string_view{host} == "windows" ? ";" : ":");
+        }
+        std::string& p = env[std::string_view{host} == "windows" && env.contains("Path") ? "Path" : "PATH"];
+        p = path + p;
+        return env;
+    }
+
+    // A program of `main_c` linking `product` with CMake through the output's otok-config.cmake (otok-toml.md 4.11), built in
+    // `configuration` ("Debug", "Release") with `generator` and run: its exit code. A failure carries the log.
+    result<int> run_cmake_consumer(std::string const& main_c, std::string const& product, std::string const& configuration,
+        std::string const& generator = "Ninja", env_vars const& run_env = {})
+    {
+        std::string const name = "cmake-" + configuration + "-" + std::to_string(cmake_consumers_++);
+        std::filesystem::path const dir = base_ / name;
+        std::filesystem::create_directories(dir);
+        std::ofstream{dir / "main.c", std::ios::binary} << main_c;
+        std::ofstream{dir / "CMakeLists.txt", std::ios::binary}
+            << "cmake_minimum_required(VERSION 3.28)\nproject(consumer C)\n"
+               "find_package(Otok CONFIG REQUIRED PATHS \"" + path_to_utf8(output("").generic_u8string()) + "\" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)\n"
+               "add_executable(app main.c)\ntarget_link_libraries(app PRIVATE otok::" + product + ")\notok_copy_runtime_dlls(app)\n";
+        env_vars const env = consumer_env();
+        std::filesystem::path const log = dir / "build.log";
+        bool const multi = generator.starts_with("Visual Studio");
+        std::vector<std::string> configure{"cmake", "-S", path_to_utf8(dir), "-B", path_to_utf8(dir / "build"), "-G", generator};
+        if (multi) configure.insert(configure.end(), {"-A", machine_arch == std::string_view{"arm64"} ? "ARM64" : "x64"});
+        else configure.push_back("-DCMAKE_BUILD_TYPE=" + configuration);
+        for (auto const& argv : {configure, std::vector<std::string>{"cmake", "--build", path_to_utf8(dir / "build"), "--config", configuration}}) {
+            auto ran = run_process({argv, env, dir, log});
+            if (!ran) return std::unexpected{ran.error()};
+            if (!ran->success()) return fail(read_file(log).value_or("the consumer does not build"));
+        }
+        std::filesystem::path const program = multi ? dir / "build" / configuration / "app.exe"
+            : dir / "build" / (std::string_view{host} == "windows" ? "app.exe" : "app");
+        auto ran = run_process({{path_to_utf8(program)}, with(env, run_env), dir, {}});
+        if (!ran) return std::unexpected{ran.error()};
+        return ran->code;
+    }
+
+#ifdef _WIN32
+    // A program of `main_c` in a project of Visual Studio importing the output's otok.props and otok.targets (otok-toml.md
+    // 4.11) with `products` in OtokProducts, built with MSBuild in `configuration` and run: its exit code.
+    result<int> run_msbuild_consumer(std::string const& main_c, std::string const& products, std::string const& configuration)
+    {
+        std::filesystem::path const dir = base_ / ("msbuild-" + configuration + "-" + std::to_string(cmake_consumers_++));
+        std::filesystem::create_directories(dir);
+        std::ofstream{dir / "main.c", std::ios::binary} << main_c;
+        std::string const platform = machine_arch == std::string_view{"arm64"} ? "ARM64" : "x64";
+        std::string const otok = path_to_utf8(output("").make_preferred());
+        std::string project =
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+            "<Project DefaultTargets=\"Build\" xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\">\n"
+            "  <ItemGroup Label=\"ProjectConfigurations\">\n";
+        for (char const* c : {"Debug", "Release"}) {
+            project += std::string{"    <ProjectConfiguration Include=\""} + c + "|" + platform + "\"><Configuration>" + c + "</Configuration><Platform>" + platform
+                + "</Platform></ProjectConfiguration>\n";
+        }
+        project += "  </ItemGroup>\n"
+                   "  <PropertyGroup Label=\"Globals\"><ProjectGuid>{6F0B5A0E-0C36-4E39-9A61-3C2B3C5D9E11}</ProjectGuid><RootNamespace>app</RootNamespace></PropertyGroup>\n"
+                   "  <Import Project=\"" + otok + "otok.props\" />\n"
+                   "  <Import Project=\"$(VCTargetsPath)\\Microsoft.Cpp.Default.props\" />\n"
+                   "  <PropertyGroup Label=\"Configuration\"><ConfigurationType>Application</ConfigurationType><PlatformToolset>$(DefaultPlatformToolset)</PlatformToolset>"
+                   "<UseDebugLibraries Condition=\"'$(Configuration)' == 'Debug'\">true</UseDebugLibraries></PropertyGroup>\n"
+                   "  <Import Project=\"$(VCTargetsPath)\\Microsoft.Cpp.props\" />\n"
+                   "  <PropertyGroup><OtokProducts>" + products + "</OtokProducts></PropertyGroup>\n"
+                   "  <ItemGroup><ClCompile Include=\"main.c\" /></ItemGroup>\n"
+                   "  <Import Project=\"$(VCTargetsPath)\\Microsoft.Cpp.targets\" />\n"
+                   "  <Import Project=\"" + otok + "otok.targets\" />\n"
+                   "</Project>\n";
+        std::ofstream{dir / "app.vcxproj", std::ios::binary} << project;
+        env_vars const env = consumer_env();
+        auto const vs = env.find("VSINSTALLDIR");
+        if (vs == env.end()) return fail("no VSINSTALLDIR in the toolchain's environment");
+        std::filesystem::path const msbuild = path_from_utf8(vs->second) / "MSBuild" / "Current" / "Bin" / "MSBuild.exe";
+        std::filesystem::path const log = dir / "build.log";
+        auto ran = run_process({{path_to_utf8(msbuild), "app.vcxproj", "/nologo", "/v:minimal", "/p:Configuration=" + configuration, "/p:Platform=" + platform}, env,
+            dir, log});
+        if (!ran) return std::unexpected{ran.error()};
+        if (!ran->success()) return fail(read_file(log).value_or("the consumer does not build"));
+        ran = run_process({{path_to_utf8(dir / platform / configuration / "app.exe")}, env, dir, {}});
+        if (!ran) return std::unexpected{ran.error()};
+        return ran->code;
+    }
+#endif
+
     std::ostringstream out, err;
 
 private:
+    int cmake_consumers_ = 0;
+
     // The files of a lib/ directory of the output, under the names their builds gave them
     // (otok-toml.md 4.1); a shared object's links are left to the loader.
     void append_libraries(std::vector<std::string>& argv, std::string const& lib_dir) const
@@ -736,6 +837,159 @@ TEST(host_target, installs_dynamic_libraries_in_both_configurations)
 
     ASSERT_EQ(p.run({"install"}), 0) << p.err.str();
     EXPECT_NE(p.out.str().find("slices: 4 (4 from the cache)\n"), std::string::npos) << p.out.str();
+}
+
+namespace {
+
+// tiny with a system library every machine has: libm on Linux; on Windows ws2_32 only (recipe-toml.md 11)
+void use_system_libraries_of_the_machine(host_project const& p)
+{
+    std::filesystem::path const recipe = p.project_dir() / "recipes" / "tiny-a" / "recipe.toml";
+    std::string text = read_file(recipe).value_or("");
+    std::size_t const at = text.find("[\"z\", ");
+    text.replace(at, 6, std::string_view{host} == "windows" ? "[" : "[\"m\", ");
+    p.write("recipes/tiny-a/recipe.toml", text);
+}
+
+// The consumer of tiny: TinyB holds tiny_a, TinyA's defines and its system libraries.
+constexpr char const* tiny_main = "#include <tiny_b.h>\n#if TINY_A_EXTRA != 5\n#error the defines of TinyA\n#endif\n\nint main(void) { return tiny_b(); }\n";
+
+// A message as CMake prints it, its lines folded: one space for every run of white space.
+std::string flat(std::string const& text)
+{
+    std::string out;
+    for (char c : text) {
+        bool const space = c == ' ' || c == '\n' || c == '\r' || c == '\t';
+        if (!space) out += c;
+        else if (!out.empty() && out.back() != ' ') out += ' ';
+    }
+    return out;
+}
+
+}
+
+// otok-config.cmake, otok.props and otok.targets (otok-toml.md 4.11): consumers with CMake (Ninja; on Windows the Visual Studio
+// generator too) and with MSBuild link the products of static libraries in both configurations.
+TEST(host_target, gives_consumers_static_libraries)
+{
+    host_project p{"tiny"};
+    if (std::string const missing = p.missing_tools(); !missing.empty()) GTEST_SKIP() << missing;
+    use_system_libraries_of_the_machine(p);
+    std::string manifest = p.manifest();
+    manifest.insert(manifest.find("cflags = [\"-DTINY_BONUS=2\"]\n"), "configurations = [\"debug\", \"release\"]\n");
+    p.write("otok.toml", manifest);
+
+    ASSERT_EQ(p.run({"install"}), 0) << p.err.str() << p.out.str();
+    EXPECT_TRUE(std::filesystem::exists(p.output("tiny-a/otok-package.toml")));
+    std::filesystem::path const config = p.output("otok-config.cmake");
+    std::string const text = read_file(config).value_or("");
+    EXPECT_NE(text.find("add_library(otok::tiny-a_tiny_a STATIC IMPORTED)\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("set_property(TARGET otok::tiny-b_tiny_b PROPERTY INTERFACE_LINK_LIBRARIES \"otok::tiny-a_tiny_a\")\n"), std::string::npos) << text;
+    std::vector<std::string> generators{"Ninja"};
+    if (std::string_view{host} == "windows") {
+        EXPECT_TRUE(std::filesystem::exists(p.output("otok.props")));
+        EXPECT_TRUE(std::filesystem::exists(p.output("otok.targets")));
+        generators.emplace_back("Visual Studio 18 2026");
+    } else {
+        EXPECT_NE(text.find("\"-lm\" \"-lstdc++\""), std::string::npos) << text;  // a C consumer of a C++ library (link.runtime)
+    }
+    for (std::string const& generator : generators) {
+        for (char const* configuration : {"Release", "Debug"}) {
+            auto code = p.run_cmake_consumer(tiny_main, "TinyB", configuration, generator);
+            ASSERT_TRUE(code) << generator << " " << configuration << ": " << code.error().message;
+            EXPECT_EQ(*code, 13) << generator << " " << configuration;
+        }
+    }
+#ifdef _WIN32
+    for (char const* configuration : {"Release", "Debug"}) {
+        auto code = p.run_msbuild_consumer(tiny_main, "TinyA;TinyB", configuration);
+        ASSERT_TRUE(code) << configuration << ": " << code.error().message;
+        EXPECT_EQ(*code, 13) << configuration;
+    }
+    // a product the output does not have
+    auto unknown = p.run_msbuild_consumer(tiny_main, "TinyB;Nope", "Release");
+    ASSERT_FALSE(unknown);
+    EXPECT_NE(unknown.error().message.find("has no product 'Nope' of OtokProducts; it has TinyA, TinyB"), std::string::npos) << unknown.error().message;
+#endif
+
+    // nothing changed: the consumer's build sees the same files
+    auto const written = std::filesystem::last_write_time(config);
+    ASSERT_EQ(p.run({"install"}), 0) << p.err.str();
+    EXPECT_EQ(std::filesystem::last_write_time(config), written);
+}
+
+// A configuration of the consumer's build that the project did not build: on Linux the release libraries serve a Debug build;
+// on Windows, whose debug and release CRTs differ, it is refused, when CMake configures a build of one configuration, when a
+// Visual Studio solution links Debug, and by otok.targets (otok-toml.md 4.11).
+TEST(host_target, serves_or_refuses_a_configuration_not_built)
+{
+    host_project p{"tiny"};
+    if (std::string const missing = p.missing_tools(); !missing.empty()) GTEST_SKIP() << missing;
+    use_system_libraries_of_the_machine(p);
+
+    ASSERT_EQ(p.run({"install"}), 0) << p.err.str() << p.out.str();
+    auto code = p.run_cmake_consumer(tiny_main, "TinyB", "Release");
+    ASSERT_TRUE(code) << code.error().message;
+    EXPECT_EQ(*code, 13);
+    auto debug = p.run_cmake_consumer(tiny_main, "TinyB", "Debug");
+    if (std::string_view{host} != "windows") {
+        ASSERT_TRUE(debug) << debug.error().message;
+        EXPECT_EQ(*debug, 13);
+        return;
+    }
+    ASSERT_FALSE(debug);
+    EXPECT_NE(flat(debug.error().message).find("has no libraries of the configuration 'debug', which the build type 'Debug' links with: add \"debug\" to "
+                                         "'configurations' of [windows] in otok.toml and run otok install"),
+        std::string::npos)
+        << debug.error().message;
+    debug = p.run_cmake_consumer(tiny_main, "TinyB", "Debug", "Visual Studio 18 2026");
+    ASSERT_FALSE(debug);
+    EXPECT_NE(debug.error().message.find("otok-has-no-debug-libraries--add-debug-to-configurations-of-windows-in-otok.toml.lib"), std::string::npos)
+        << debug.error().message;
+#ifdef _WIN32
+    debug = p.run_msbuild_consumer(tiny_main, "TinyB", "Debug");
+    ASSERT_FALSE(debug);
+    EXPECT_NE(debug.error().message.find("has no libraries of the configuration 'debug', which 'Debug' links with (the debug CRT): add \"debug\" to "
+                                         "'configurations' of [windows] in otok.toml and run otok install"),
+        std::string::npos)
+        << debug.error().message;
+#endif
+}
+
+// Dynamic libraries for consumers (otok-toml.md 4.11): imported shared libraries, the DLLs beside the program on Windows
+// (otok_copy_runtime_dlls, OtokCopyDlls), each configuration with its own.
+TEST(host_target, gives_consumers_dynamic_libraries)
+{
+    host_project p{"dynamic"};
+    if (std::string const missing = p.missing_tools(); !missing.empty()) GTEST_SKIP() << missing;
+
+    ASSERT_EQ(p.run({"install"}), 0) << p.err.str() << p.out.str();
+    std::string const text = read_file(p.output("otok-config.cmake")).value_or("");
+    EXPECT_NE(text.find("add_library(otok::tiny-c_tiny_c SHARED IMPORTED)\n"), std::string::npos) << text;
+    std::string const main_c = "#include <tiny_c.h>\n\nint main(void) { return tiny_c(); }\n";
+    std::vector<std::string> generators{"Ninja"};
+    if (std::string_view{host} == "windows") generators.emplace_back("Visual Studio 18 2026");
+    for (std::string const& generator : generators) {
+        // tiny_d is 1 in release, 2 in debug
+        for (auto [configuration, expected, lib] : {std::tuple{"Release", 11, ""}, std::tuple{"Debug", 12, "debug/"}}) {
+            env_vars run_env;
+            if (std::string_view{host} != "windows") {
+                // run from the output, not shipped: the shared objects of both recipes on the loader's path (otok-toml.md 4.1)
+                run_env["LD_LIBRARY_PATH"] = path_to_utf8(p.output("tiny-c/" + std::string{lib} + "lib")) + ":"
+                    + path_to_utf8(p.output("tiny-d/" + std::string{lib} + "lib"));
+            }
+            auto code = p.run_cmake_consumer(main_c, "TinyC", configuration, generator, run_env);
+            ASSERT_TRUE(code) << generator << " " << configuration << ": " << code.error().message;
+            EXPECT_EQ(*code, expected) << generator << " " << configuration;
+        }
+    }
+#ifdef _WIN32
+    for (auto [configuration, expected] : {std::pair{"Release", 11}, std::pair{"Debug", 12}}) {
+        auto code = p.run_msbuild_consumer(main_c, "TinyC", configuration);
+        ASSERT_TRUE(code) << configuration << ": " << code.error().message;
+        EXPECT_EQ(*code, expected) << configuration;
+    }
+#endif
 }
 
 // Milestone A: zlib and lz4 from upstream (an archive and a git repository), built at the same time.

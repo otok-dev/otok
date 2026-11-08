@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "otok/core/binary.hpp"
 #include "otok/core/fs.hpp"
 
 namespace otok::target::linux {
@@ -237,6 +238,7 @@ public:
         std::error_code ec;
         fs::create_directories(staging / "include", ec);
         if (ec) return fail("cannot create '" + path_to_utf8(staging) + "': " + ec.message());
+        package_files recorded;  // which file is which library (otok-toml.md 4.11)
         std::set<std::string> configurations;
         for (built_slice const& s : package.slices) {
             if (!configurations.insert(s.spec.configuration).second) return fail("a linux package has one slice per configuration");
@@ -270,7 +272,14 @@ public:
                 if (ec) return fail("cannot copy the library '" + name + "': " + ec.message());
                 return {};
             };
+            std::string const at = s.spec.configuration == "debug" ? "debug/" : "";
             for (auto const& [name, lib] : out.libraries) {
+                package_library_file f{name, s.spec.arch, s.spec.configuration, at + "lib/" + path_to_utf8(lib.filename())};
+                if (binary_kind_of(lib) == binary_kind::elf_shared) {
+                    f.shared = true;
+                    f.soname = load_names_of(lib).id;
+                }
+                recorded.files.push_back(std::move(f));
                 if (auto ok = place(name, lib, "lib"); !ok) return ok;
                 for (auto const* other : {&out.runtimes, &out.symbols}) {
                     if (auto it = other->find(name); it != other->end()) {
@@ -290,10 +299,11 @@ public:
                 }
             }
         }
-        return {};
+        return write_file_atomic(staging / package_files_name, write_package_files(recorded));
     }
 
-    // One file name in the lib/ of two libraries matters to consumers that link through search paths.
+    // otok-config.cmake (otok-toml.md 4.11); and one file name in the lib/ of two libraries, which matters to consumers that link
+    // through search paths.
     result<void> finish_output(fs::path const& dir, std::span<output_package const> packages, std::map<std::string, std::string> const& deployment,
         std::vector<std::string>& warnings) const override
     {
@@ -310,6 +320,9 @@ public:
                 }
             }
         }
+        auto c = consumer_package_of(dir, packages, info().platforms.front().architectures);
+        if (!c) return std::unexpected{c.error()};
+        if (auto ok = write_file_if_changed(dir / "otok-config.cmake", consumer_cmake_config(*c, detail::cmake_parts())); !ok) return std::unexpected{ok.error()};
         return {};
     }
 
@@ -356,6 +369,27 @@ target_info const& info()
 std::unique_ptr<build_target> make_build_target(env_vars environment)
 {
     return std::make_unique<linux_build_target>(std::move(environment));
+}
+
+consumer_cmake_parts detail::cmake_parts()
+{
+    consumer_cmake_parts parts;
+    parts.target = "linux";
+    parts.platform = "linux";
+    parts.detect =
+        "if(NOT CMAKE_SYSTEM_NAME STREQUAL \"Linux\")\n"
+        "  message(FATAL_ERROR \"otok: ${_otok_dir} holds libraries for Linux, not for '${CMAKE_SYSTEM_NAME}'\")\n"
+        "endif()\n"
+        "string(TOLOWER \"${CMAKE_SYSTEM_PROCESSOR}\" _otok_arch)\n"
+        "if(_otok_arch MATCHES \"^(x86_64|amd64)$\")\n"
+        "  set(_otok_arch \"x86_64\")\n"
+        "elseif(_otok_arch MATCHES \"^(aarch64|arm64)$\")\n"
+        "  set(_otok_arch \"arm64\")\n"
+        "endif()\n";
+    parts.arch_cure = "otok builds for Linux on a machine of the architecture it builds for: install the project on one";
+    parts.link_item = [](std::string const& name) { return "-l" + name; };
+    parts.cxx_runtime = "-lstdc++";  // of GCC and of Clang on Linux both (recipe-toml.md 11)
+    return parts;
 }
 
 }

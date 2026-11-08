@@ -10,6 +10,7 @@
 #include <string_view>
 #include <vector>
 
+#include "otok/builder/consumer.hpp"
 #include "otok/builder/target.hpp"
 #include "otok/core/process.hpp"
 #include "otok/core/target_info.hpp"
@@ -64,6 +65,10 @@ struct cmake_inputs
 };
 
 std::string cmake_toolchain(cmake_inputs const& in);
+
+// What the Android target adds to otok-config.cmake (otok-toml.md 4.11): the system, the ABI, `-l<name>` for system libraries, and
+// the C++ runtime the app must use with dynamic libraries (`stl`).
+consumer_cmake_parts cmake_parts(consumer_package const& package);
 
 }
 

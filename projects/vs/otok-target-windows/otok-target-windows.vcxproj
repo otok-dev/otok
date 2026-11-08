@@ -34,6 +34,7 @@
     <ClInclude Include="$(OtokRoot)src\otok\target\windows\windows_target.hpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="$(OtokRoot)src\otok\target\windows\windows_consumer.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\target\windows\windows_target.cpp" />
   </ItemGroup>
   <ItemGroup>

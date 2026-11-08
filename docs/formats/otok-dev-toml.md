@@ -7,7 +7,7 @@ Status: draft. Common rules are in [README.md](README.md); the manifest in [otok
 It names libraries of the project that the developer works on, with the working trees to build them from: the source,
 the resources, the recipe, as they are on disk, with uncommitted changes. otok builds such a library incrementally in a
 work directory it keeps (4), so that a change of a few files recompiles those files only, as the library's own build
-does in its checkout (`docs/PLAN.md` decision 67).
+does in its checkout.
 
 The file changes neither the resolution nor the lock (3): without it, or with `--no-dev`, the project builds exactly
 what `otok.lock` says.
@@ -91,8 +91,8 @@ in the cache's `builds/`, whatever else its key holds.
   change keeps its package, and the output directory takes only what changed (`otok-toml.md` 4.2).
 - **Display.** The output of a dev slice's build is shown as it comes, unless `quiet`: what its commands print, the files
   the build tool compiles, the warnings of the compiler, each line after the slice it comes from,
-  since the slices build at once (`[engine/android-arm64-v8a] [1/3] Building CXX object …`); `-vv` shows it for every slice
-  (`docs/PLAN.md` decision 59). A dev slice is named so: `built engine 0.1.0 for android-arm64-v8a (dev:
+  since the slices build at once (`[engine/android-arm64-v8a] [1/3] Building CXX object …`); `-vv` shows it for every slice.
+  A dev slice is named so: `built engine 0.1.0 for android-arm64-v8a (dev:
   ../../modules/engine)`.
 - **Failure.** A failed dev build keeps its work directory as it is; only the log is copied into `failed/`.
 

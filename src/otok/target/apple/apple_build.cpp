@@ -326,6 +326,7 @@ result<detail::cmake_package> cmake_package_of(fs::path const& dir, std::span<ou
             continue;
         }
         package_dirs[p.library] = p.dir;
+        if (!p.data.empty()) c.data_dirs.emplace_back(p.library, slashed(p.dir / "data"));
         bool const dynamic = p.linkage == "dynamic";
         for (std::string const& library : p.libraries) {
             std::string const name = framework_name(p.library, library);
@@ -1217,11 +1218,14 @@ public:
                  std::pair{"tvos", ".tvOS"}, std::pair{"watchos", ".watchOS"}, std::pair{"visionos", ".visionOS"}}) {
             if (auto it = deployment.find(key); it != deployment.end()) swift.platforms.emplace_back(platform, it->second);
         }
-        if (auto ok = write_file_atomic(dir / "Package.swift", detail::package_swift(swift)); !ok) return ok;
+        // each only when it changes, so Xcode and CMake see no new file (otok-toml.md 4.2)
         auto cmake = cmake_package_of(dir, packages);
         if (!cmake) return std::unexpected{cmake.error()};
-        if (auto ok = write_file_atomic(dir / "otok-config.cmake", detail::cmake_config(*cmake)); !ok) return ok;
-        return write_file_atomic(dir / "Acknowledgements.plist", detail::acknowledgements_plist(packages));
+        for (auto const& [name, text] : {std::pair{"Package.swift", detail::package_swift(swift)}, std::pair{"otok-config.cmake", detail::cmake_config(*cmake)},
+                 std::pair{"Acknowledgements.plist", detail::acknowledgements_plist(packages)}}) {
+            if (auto ok = write_file_if_changed(dir / name, text); !ok) return std::unexpected{ok.error()};
+        }
+        return {};
     }
 
 private:
@@ -1762,6 +1766,9 @@ std::string detail::cmake_config(cmake_package const& p)
         if (!prod.defines.empty()) text += "set_property(TARGET " + target + " PROPERTY INTERFACE_COMPILE_DEFINITIONS" + cmake_list(prod.defines, cmake_string) + ")\n";
     }
     text += "\n# the privacy manifests of the products, which an app puts into its bundle\nset(Otok_PRIVACY_MANIFESTS" + cmake_list(p.privacy_manifests, cmake_path) + ")\n";
+    text += "\n# the data files of the libraries (build-lua-api.md 8), and the notices of their licenses (otok-toml.md 4.2)\n";
+    for (auto const& [library, data] : p.data_dirs) text += "set(Otok_" + library + "_DATA_DIR " + cmake_path(data) + ")\n";
+    text += "set(Otok_ACKNOWLEDGEMENTS \"${_otok_dir}/Acknowledgements.md\")\n";
     text += "\n# the frameworks of the dynamic libraries in the bundle of a target of the Xcode generator, or on the run path of its build\n"
             "function(otok_embed_frameworks target)\n";
     if (!p.frameworks.empty()) {
@@ -1776,7 +1783,9 @@ std::string detail::cmake_config(cmake_package const& p)
         if (!macos.empty()) text += "  elseif(CMAKE_SYSTEM_NAME STREQUAL \"Darwin\")\n    set_property(TARGET ${target} APPEND PROPERTY BUILD_RPATH" + macos + ")\n";
         text += "  endif()\n";
     }
-    text += "endfunction()\n";
+    text += "endfunction()\n"
+            "\n# the DLLs a target loads on Windows (otok-toml.md 4.11): nothing on Apple's platforms, so that a project of several targets calls it alike\n"
+            "function(otok_copy_runtime_dlls target)\nendfunction()\n";
     if (!p.warnings.empty()) text += "\n";
     for (std::string const& w : p.warnings) text += "message(WARNING " + cmake_string("otok: " + w) + ")\n";
     return text + "\nunset(_otok_dir)\nunset(_otok_slice)\nunset(_otok_sysroot)\nunset(_otok_slices)\nunset(_otok_platform)\n";

@@ -104,13 +104,13 @@ The recipe directory is described in section 15.
 |---|---|---|---|
 | `api` | integer | — (required) | Recipe API version: the format of this file and the `build.lua` API. `1` for this document; API 1 is Lua 5.5. |
 | `library` | library name | — (required) | The upstream library this recipe builds. |
-| `name` | recipe name | — (required) | With the publisher, forms the recipe id `<publisher>/<name>`. Usually equal to `library`; a publisher with two recipes of one library names them apart (`openssl`, `openssl-fips`). The publisher is not in the file: it is the GitHub account publishing it (DESIGN 7.2). |
+| `name` | recipe name | — (required) | With the publisher, forms the recipe id `<publisher>/<name>`. Usually equal to `library`; a publisher with two recipes of one library names them apart (`openssl`, `openssl-fips`). The publisher is not in the file: it is the GitHub account publishing it (`index.md` 6). |
 | `variant` | recipe name syntax (common 2) | the target of `[platforms] supported` | One of the recipes of one id, each for its own target and environments (6.1): `apple`, `windows-msvc`, `windows-clang-cl`. Each variant has its own revisions, index entries and advisories (`index.md`). Users name the recipe id only; otok picks the variant by the target and environment it builds for. Required when `supported` spans several targets (a local recipe only, 6.1). |
 | `version` | version (common 3.1) | — (required) | The upstream version built. |
-| `revision` | integer ≥ 1 | — (required) | Recipe revision for this version (DESIGN 4). |
-| `channel` | `"stable"` or `"prerelease"` | `"stable"` | Stability, set from the upstream release (DESIGN 4.1); copied into the index entry. |
+| `revision` | integer ≥ 1 | — (required) | Recipe revision for this version. |
+| `channel` | `"stable"` or `"prerelease"` | `"stable"` | Stability, set from the upstream release (common 3.2); copied into the index entry. |
 | `license` | SPDX expression (common 5) | — (required) | License of the library (not of the recipe). |
-| `license-files` | array of paths or `{ recipe = "<path>" }` | — (required, non-empty) | License texts for acknowledgements (DESIGN 10, item 6): a path inside the unpacked source, or a file of the recipe directory when the source has no license file of its own (Lua's release archive carries its license only in `lua.h`). Each is packaged as `licenses/<path>` (`otok-toml.md` 4.2), so no two entries may have one path. |
+| `license-files` | array of paths or `{ recipe = "<path>" }` | — (required, non-empty) | License texts for acknowledgements: a path inside the unpacked source, or a file of the recipe directory when the source has no license file of its own (Lua's release archive carries its license only in `lua.h`). Each is packaged as `licenses/<path>` (`otok-toml.md` 4.2), so no two entries may have one path. |
 | `description` | string, ≤ 200 characters, one line | — (required) | |
 | `homepage` | URL | — | Upstream project page. |
 | `documentation` | URL | — | Upstream documentation, linked from the catalog. |
@@ -120,7 +120,7 @@ The recipe directory is described in section 15.
 
 ### 3.1 `[tool]`
 
-A tool recipe builds programs that other builds run (`docs/PLAN.md` decision 69): CMake, Ninja, `gn`. It is a
+A tool recipe builds programs that other builds run: CMake, Ninja, `gn`. It is a
 tool dependency of the recipes that use it (10), usually through a toolchain that names it (13).
 
 ```toml
@@ -134,8 +134,7 @@ programs = ["ninja"]
 
 A tool recipe needs no `[[product]]`. Without products it can be a tool dependency only: a recipe or a project that
 has it as a dependency fails to resolve. It may have products too, for a library that is also a tool. `otok publish`
-builds one without products in the tool slice of the machine, where it checks that `programs` are built (`docs/PLAN.md`
-decision 78).
+builds one without products in the tool slice of the machine, where it checks that `programs` are built.
 
 Tool slices are built by the target of the build machine (`otok-toml.md` 7): `macosx` of `apple` on macOS, `linux`,
 `windows`. A tool recipe is of one of them, like any recipe (6.1), so a tool for every machine is three variants:
@@ -181,7 +180,7 @@ Both forms also take:
 | Key | Type | Meaning |
 |---|---|---|
 | `patches` | array of paths in the recipe directory | Applied in this order to every fresh copy of the source, as `git apply` does (`-p1`, no fuzz). A patch that does not apply cleanly fails the build. |
-| `verify-against` | `{ git = "<url>", tag = "<tag>" }` or `{ git, commit }` | Archive form only: `otok publish` and catalog CI compare the archive with the git tree and list files that exist only in the archive or differ (DESIGN 11, item 2). |
+| `verify-against` | `{ git = "<url>", tag = "<tag>" }` or `{ git, commit }` | Archive form only: `otok publish` and catalog CI compare the archive with the git tree and list files that exist only in the archive or differ: a release archive may carry generated files that the history of the repository does not have. |
 
 An archive whose contents are a single top-level directory is unpacked with that directory stripped;
 otherwise the archive root is the source root. Supported archive types: `.tar.gz`/`.tgz`,
@@ -192,8 +191,8 @@ git hashes cover them, so no extra hashes are needed.
 
 ## 5. `[[resource]]`
 
-Additional hashed inputs: data files, sub-projects, generated files an upstream ships separately
-(DESIGN 6.2, 6.5). Nothing else is downloaded for a build.
+Additional hashed inputs: data files, sub-projects, generated files an upstream ships separately.
+Nothing else is downloaded for a build.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -213,7 +212,7 @@ Additional hashed inputs: data files, sub-projects, generated files an upstream 
 
 ### 6.1 Targets and environments
 
-A recipe is written for one target and the environments it names (`docs/PLAN.md` decision 82). Several environments
+A recipe is written for one target and the environments it names. Several environments
 are for one way of building that serves them all (lz4 for Android on every host: `["*/ndk"]`); a different way of
 building is a different recipe of the same id, a **variant** (3):
 
@@ -239,7 +238,7 @@ build-on = ["linux/clang-cl"]
   share no cell (`index.md`): for every platform and environment at most one of them builds.
 - A project builds a library in an environment of its own (`otok-toml.md` 4.9) with the variant whose environments
   cover it (common 4.2) and whose platforms hold every platform of the target the project builds; without one, in an
-  environment of the same system and ABI some variant covers (`docs/PLAN.md` decision 91). A recipe builds where its
+  environment of the same system and ABI some variant covers. A recipe builds where its
   build system works: one that builds with clang-cl only says so, and serves projects of `windows/msvc` all the same.
 - `build.lua` sees the environment of the slice (`slice.environment`, `slice.host`, `build-lua-api.md` 3); the
   machines of `*` differ by `slice.host` and by `when = { host = … }` of resources (5).
@@ -248,7 +247,7 @@ build-on = ["linux/clang-cl"]
 
 ## 7. `[vars]`
 
-Per-slice values for `build.lua` (DESIGN 9.3, item 2), so recipes do not repeat platform tables in
+Per-slice values for `build.lua`, so recipes do not repeat platform tables in
 Lua. Each key is a variable name (`[a-z][a-z0-9_]{0,63}`, a valid Lua identifier); each value is a
 table from selectors to values:
 
@@ -268,7 +267,7 @@ There is deliberately no expression language: anything that needs logic is writt
 
 ## 8. `[options.<name>]`
 
-A typed build parameter set by the user (DESIGN 5.2, 6.2).
+A typed build parameter set by the user.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -295,7 +294,7 @@ so `["json", "filesystem"]` and `["filesystem", "json"]` build once.
 ### 8.1 Merging requests
 
 Several requests for one option — the project's value, `requires-options` of dependents (9),
-profiles — are merged before building (DESIGN 5.2):
+profiles — are merged before building:
 
 - `additive = true`: `bool` values merge by OR (any request for `true` wins); `list` values by
   union. Use it only when the option only adds something (a component, a feature), so a union is
@@ -309,7 +308,7 @@ The project's own value of an additive option is part of the union. An option no
 ### 8.2 In wrappers
 
 Option values reach wrapper sources (11, `apple.wrappers`) as Swift active compilation conditions
-and C preprocessor definitions (DESIGN 6.6). The name is `OTOK_OPTION_` + the option name upper-cased
+and C preprocessor definitions. The name is `OTOK_OPTION_` + the option name upper-cased
 with `-` replaced by `_`:
 
 | Type | Defined |
@@ -336,7 +335,7 @@ build out of the project).
 
 ## 9. `[deps.<library>]`
 
-A library this recipe links against, built for the same slices (DESIGN 5.2).
+A library this recipe links against, built for the same slices.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -365,7 +364,7 @@ A library this recipe links against, built for the same slices (DESIGN 5.2).
 | `not` | the condition it holds (a table of these keys) does not hold: `{ not = { option = "data-filter" } }` |
 
 `arch` and `environment` decide what a slice needs, an input or a tool, never the edges of a graph, which the resolver
-resolves per platform and environment and not per architecture (`docs/PLAN.md` decision 90). The resolver resolves the
+resolves per platform and environment and not per architecture. The resolver resolves the
 tool dependency of a toolchain whose `when` tests them wherever it may hold, its `arch` tests holding there, so the lock
 may name a tool that no slice of the project builds; the builder decides per slice. Under `not` such a test would turn
 "may hold" into "never", so it is not allowed there: list what holds instead.
@@ -384,7 +383,7 @@ may change merged options in turn (`otok-lock.md` describes the fixed point and 
 
 ## 10. `[tool-deps.<library>]`
 
-A library built for the tool slice whose tools, headers or libraries the build uses (DESIGN 6.8).
+A library built for the tool slice whose tools, headers or libraries the build uses.
 Keys as in 9, except that `when` takes only `option` conditions (the tool slice is fixed). Tool
 dependencies never reach the output packages. Its headers and libraries are `deps.tools.<library>` of `build.lua`
 (`build-lua-api.md` 4). A toolchain with `default-recipe` is one too (13.1), and so is a program of a dependency
@@ -393,7 +392,7 @@ dependencies never reach the output packages. Its headers and libraries are `dep
 ## 11. `[[product]]`
 
 What the generated package exposes: a linkable unit built from one or more of the libraries that
-`build.lua` returns (DESIGN 6.2, 10 item 3).
+`build.lua` returns.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -427,12 +426,11 @@ the runtime (`metadata.md`), and a consumer linking with a C++ driver gets its o
 |---|---|---|
 | `module` | module name | Clang module name for the headers (`COpenSSL`). Default: the product name. |
 | `frameworks` | array of strings | System frameworks consumers link (`Security`). |
-| `wrappers` | array of directory names in `wrappers/` | SPM source targets compiled in the consumer's build (DESIGN 6.6). |
-| `privacy-manifest` | path in the recipe directory, or `"none"` | `PrivacyInfo.xcprivacy` packaged as a resource (DESIGN 10.1). `"none"` states that the product neither tracks nor collects data: otok writes that manifest, which declares no required-reason API (the check of `otok-toml.md` 4.4 still applies). Optional for local and git recipes; `otok publish` requires every product to carry one, its own or that of a product it `depends` on, whose shim it holds (`otok-toml.md` 4). |
+| `wrappers` | array of directory names in `wrappers/` | SPM source targets compiled in the consumer's build. |
+| `privacy-manifest` | path in the recipe directory, or `"none"` | `PrivacyInfo.xcprivacy` packaged as a resource. `"none"` states that the product neither tracks nor collects data: otok writes that manifest, which declares no required-reason API (the check of `otok-toml.md` 4.4 still applies). Optional for local and git recipes; `otok publish` requires every product to carry one, its own or that of a product it `depends` on, whose shim it holds (`otok-toml.md` 4). |
 
 `link`, `apple.frameworks` and `apple.privacy-manifest` exist on Apple platforms because a binary target carries neither
-linker settings nor resources; the packager emits a shim target that does (`otok-toml.md` 4, DESIGN 10,
-item 1).
+linker settings nor resources; the packager emits a shim target that does (`otok-toml.md` 4).
 
 ### 11.1 Headers shared by several products
 
@@ -498,7 +496,7 @@ alternatives = "stacktrace"
 
 | Key | Type | Meaning |
 |---|---|---|
-| `xcode` | constraint on the Xcode version (`dotted`) | Checked before building (DESIGN 10, item 12). |
+| `xcode` | constraint on the Xcode version (`dotted`) | Checked before building. |
 | `swift-tools-version` | version | Minimum Swift tools version the wrappers need; the generated `Package.swift` uses at least this. |
 | `swift-package` | `"."` or a directory inside the source | The recipe delivers this SwiftPM package of the source, patched, instead of building anything (12.1). |
 
@@ -549,7 +547,7 @@ name = "Updates"
 
 ## 13. `[toolchains]`
 
-Programs the build runs besides the platform's compiler (DESIGN 6.7). Keys are program names (3.1): one built by a
+Programs the build runs besides the platform's compiler. Keys are program names (3.1): one built by a
 recipe (`default-recipe`, 13.1), or, without it, one of the names below, found installed. Values are a constraint string
 or a table:
 
@@ -570,7 +568,7 @@ in `[toolchains]` or in one dependency's `toolchains`.
 |---|---|
 | `version` | constraint on the tool's version |
 | `targets` | `rust` only: required `rustup` targets |
-| `when` | condition with `option`, `os`, `arch` and `environment` (9.1; toolchains are checked per target, so not `platform`): without it the build always needs the toolchain; a slice where it does not hold gets no `slice.toolchains.<name>` and has none in its key; one whose `option` or `os` test fails is not looked for at all. `os` lets a recipe that builds one target differently need a tool for that target only (`cmake = { version = ">= 3.20", when = { os = ["windows"] } }`, `docs/PLAN.md` decision 77); not with `default-recipe`, whose tool dependency is resolved for the build machine. `arch` and `environment` let a recipe of several environments or architectures need a tool for some of them, also with `default-recipe`: `perl = { version = ">= 5.30", default-recipe = "apotocki/perl", when = { arch = ["arm64"], environment = ["windows/msvc"] } }` (gas-preprocessor of dav1d) |
+| `when` | condition with `option`, `os`, `arch` and `environment` (9.1; toolchains are checked per target, so not `platform`): without it the build always needs the toolchain; a slice where it does not hold gets no `slice.toolchains.<name>` and has none in its key; one whose `option` or `os` test fails is not looked for at all. `os` lets a recipe that builds one target differently need a tool for that target only (`cmake = { version = ">= 3.20", when = { os = ["windows"] } }`); not with `default-recipe`, whose tool dependency is resolved for the build machine. `arch` and `environment` let a recipe of several environments or architectures need a tool for some of them, also with `default-recipe`: `perl = { version = ">= 5.30", default-recipe = "apotocki/perl", when = { arch = ["arm64"], environment = ["windows/msvc"] } }` (gas-preprocessor of dav1d) |
 | `default-recipe` | recipe id: a tool recipe (3.1) that builds the toolchain (13.1). Not with `targets`. Required in a published recipe (13) |
 
 Names otok finds installed in API 1 (without `default-recipe`), with the programs it looks for (in this order) and how
@@ -617,23 +615,22 @@ A newer otok may add names without changing the API.
   part of the slice key (`cache-key.md` 3), so a new version of a tool rebuilds what it built.
 
 A toolchain without `default-recipe` is found installed, as above. Only a recipe not published may name one:
-`otok publish` and `otok index-check` refuse it (`index.md` 9, `docs/PLAN.md` decision 85), so that what builds for the
+`otok publish` and `otok index-check` refuse it (`index.md` 9), so that what builds for the
 publisher builds for everyone, whatever the publisher has installed. The compiler of the build environment is not a toolchain
 (common 4.2): the target finds it (`config.md` 2).
 
 ### 13.1 Toolchains built by recipes
 
 A toolchain with `default-recipe` is also a tool dependency (10) of the recipe on the library of the recipe it names
-(`apotocki/flatbuffers` builds `flatbuffers`), with the toolchain's `version` (any without it) and `when`
-(`docs/PLAN.md` decisions 69, 87). It is resolved for this recipe alone and locked (`[[tool-package]]`, `otok-lock.md`
-5.7) as any tool dependency, so the project chooses another recipe or version for that library in
-`[tool-deps.<library>]` (`otok-toml.md` 7). The recipe chosen is a tool recipe (3.1) whose `programs` list the key;
-otherwise resolution fails. Several keys may name one recipe (`ctest = { default-recipe = "apotocki/cmake" }` beside
+(`apotocki/flatbuffers` builds `flatbuffers`), with the toolchain's `version` (any without it) and `when`.
+It is resolved for this recipe alone and locked (`[[tool-package]]`, `otok-lock.md` 5.7) as any tool dependency, so
+the project chooses another recipe or version for that library in `[tool-deps.<library>]` (`otok-toml.md` 7). The
+recipe chosen is a tool recipe (3.1) whose `programs` list the key; otherwise resolution fails. Several keys may name one recipe (`ctest = { default-recipe = "apotocki/cmake" }` beside
 `cmake`): one tool dependency, with all their constraints. A recipe has one tool dependency on a library: a toolchain
 whose recipe builds a library the recipe also has in `[tool-deps]`, or as a dependency with `toolchains` (13.2), fails
 resolution.
 
-The recipe is built in the tool slice (DESIGN 6.8) before the recipes that need it, and nothing is looked for. Its
+The recipe is built in the tool slice before the recipes that need it, and nothing is looked for. Its
 program is `slice.toolchains.<name>`, its directory is in the `PATH` of the build, and the slice key has the tool
 slice's key (`tool.<library>`) instead of a version found (`cache-key.md` 3). A tool dependency of a toolchain is not in
 `deps.tools` of `build.lua`.
@@ -660,16 +657,16 @@ builds its programs where `slice.is_tool` holds (`build-lua-api.md` 3).
 
 | Key | Type | Meaning |
 |---|---|---|
-| `check` | array of tables `{ options = { … } }` (written `[[publish.check]]`) | Option sets `otok publish` builds in addition to the defaults (DESIGN 7.4); no `file` option (8.3). |
+| `check` | array of tables `{ options = { … } }` (written `[[publish.check]]`) | Option sets `otok publish` builds in addition to the defaults; no `file` option (8.3). |
 | `<target>` (`apple`, `android`, `windows`, `linux`) | table | Keys of the target table of the project `otok publish` builds with (`otok-toml.md` 4), over the target's defaults below: `deployment` for `apple`, `cflags`, `configurations`, `linkage`, … `platforms`, `architectures`, `build-on` and `output` are not allowed: publication builds every supported platform and architecture in the environments this machine has. |
 
-`otok publish` builds the recipe as the only dependency of a project of its own (DESIGN 7.4), whose
+`otok publish` builds the recipe as the only dependency of a project of its own, whose
 dependencies come from the index and from the recipes published with it. Its target table holds every supported
 platform, architectures as `[platforms] architectures` restricts them, and as `build-on` one environment of the recipe
 that the publishing machine has (common 4.2): a project for each of them, since a machine builds a target in one; with
 none, publication fails before building (`--no-build` publishes without a build). A tool recipe is built in the tool
 slice of its target, the environment as `[otok] tool-build-on`. The build is the publisher's own check: the entry records
-nothing of it (`docs/PLAN.md` decision 82). The defaults of the target tables:
+nothing of it. The defaults of the target tables:
 
 | Target | Defaults |
 |---|---|
@@ -695,9 +692,9 @@ openssl/
         └── TLSContext.swift
 ```
 
-What a recipe directory holds is text: `recipe.toml`, `build.lua`, patches, wrapper sources (6.6 in
-DESIGN), a privacy manifest, a hand-written module map, build files for a library without a usable
-build system (`CMakeLists.txt`, `Makefile`), helper scripts run through `otok.run`, a README.
+What a recipe directory holds is text: `recipe.toml`, `build.lua`, patches, wrapper sources
+(11, `apple.wrappers`), a privacy manifest, a hand-written module map, build files for a library without a
+usable build system (`CMakeLists.txt`, `Makefile`), helper scripts run through `otok.run`, a README.
 
 Limits, checked by `otok publish` and index CI (warnings for local and git recipes):
 
@@ -710,7 +707,7 @@ Limits, checked by `otok publish` and index CI (warnings for local and git recip
 Binary data belongs to the library, never to the recipe: it comes with the source or as a
 `[[resource]]` with a URL and a hash. A library that has to be patched with binary data before
 building is forked, the data is committed to the fork, and a text recipe builds the fork. This keeps
-every recipe readable on the catalog page (DESIGN principle 1) and closes the gap of a prebuilt
+every recipe readable on the catalog page (common 1.6) and closes the gap of a prebuilt
 library shipped inside a recipe and copied into `slice.prefix`.
 
 All of these files, and only these, are covered by `recipe-sha256` (`recipe-hash.md`).
@@ -735,7 +732,7 @@ unique; directory limits (15).
 
 Names of platforms, architectures, environments and targets are checked against those this otok knows in a recipe by
 `path` and when publishing. In a recipe read from an index or a git repository, which a newer otok may have written,
-an unknown one is a name that never matches (README 1.5, 4.1; `docs/PLAN.md` decision 98): `supported` and `archs`
+an unknown one is a name that never matches (README 1.5, 4.1): `supported` and `archs`
 keep the known ones, a `when` or `not` testing it is false, `build-on` cannot build there. An unknown `api` is an error
 in a recipe by `path` or from a git repository, saying that it needs a newer otok; an index entry of an unknown `api`
 is left aside (`index.md` 3.2).

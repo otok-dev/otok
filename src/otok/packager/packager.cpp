@@ -27,7 +27,7 @@ namespace {
 // Bumped when the meaning of a package key changes (cache-key.md 4), and the packager version, bumped
 // when otok changes how it packages.
 constexpr char const* key_format = "1";
-constexpr char const* packager_version = "8";
+constexpr char const* packager_version = "9";
 
 constexpr int output_state_format = 1;
 
@@ -398,7 +398,7 @@ result<output_changes> write_output(fs::path const& dir, build_target const& tar
         }
         outputs.push_back(std::move(o));
     }
-    if (auto ok = write_file_atomic(dir / "Acknowledgements.md", acknowledgements_markdown(outputs)); !ok) return std::unexpected{ok.error()};
+    if (auto ok = write_file_if_changed(dir / "Acknowledgements.md", acknowledgements_markdown(outputs)); !ok) return std::unexpected{ok.error()};
     if (auto ok = target.finish_output(dir, outputs, deployment, changes.warnings); !ok) return fail("the output '" + name + "': " + ok.error().message);
     return changes;
 }

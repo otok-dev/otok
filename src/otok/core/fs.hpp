@@ -31,6 +31,10 @@ result<std::string> read_file(std::filesystem::path const& path);
 // so readers see the old or the new file, never a partial one.
 result<void> write_file_atomic(std::filesystem::path const& path, std::string_view content);
 
+// Writes `content` to `path` unless the file has it already, so that the builds reading it see no new file (the consumer files
+// of an output, otok-toml.md 4.2); true when it was written.
+result<bool> write_file_if_changed(std::filesystem::path const& path, std::string_view content);
+
 // Copies the directory tree `from` to `to`, which must not exist (its parents are created): files with their times and
 // permissions, symbolic links as links. On macOS a `clonefile` (APFS copy-on-write) when the file
 // system supports it (docs/formats/cache.md 5).

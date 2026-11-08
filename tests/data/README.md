@@ -13,3 +13,6 @@ exercising `defines`, `link`, `apple.frameworks`, a privacy manifest and a Swift
 that differs between architectures; tiny-b has a license file in its recipe directory), `dynamic`
 (two libraries built dynamic, the one linked against the other, in the debug and release
 configurations, run by consumers of both) and `zlib-lz4` (zlib from its release archive, lz4 from git, built only with `OTOK_TEST_NETWORK=1`).
+
+`consumer/otok-package.toml` is the example of `docs/formats/otok-toml.md` 4.11, the file naming the files of a library's
+directory in the outputs of `windows`, `linux` and `android`.

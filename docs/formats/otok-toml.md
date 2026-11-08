@@ -4,8 +4,8 @@ Status: draft. Common rules (strictness, names, versions, platforms, paths) are 
 [README.md](README.md); this document refers to its sections as "common 1.2" and so on.
 
 `otok.toml` lies in the project root. It is data: otok never executes anything from it
-(DESIGN principle 2). Everything that changes what is built for the project is in this file or in
-the files it includes (DESIGN principle 8); machine settings (`config.md`) never change the output.
+(common 1.6). Everything that changes what is built for the project is in this file or in the files it
+includes; machine settings (`config.md`) never change the output.
 
 ## 1. Example
 
@@ -79,8 +79,8 @@ Any other top-level key is an error.
 
 The Apple target settings. A project builds for the targets whose tables its manifest has (common 4): `[apple]`,
 `[android]` (4.7), `[windows]` (4.8) and `[linux]` (4.1). Every target
-table takes the keys below, with the target's platforms, architectures, deployment keys and environments. DESIGN.md's
-shorthand (`[otok] platforms`, top-level `[deployment]`) is not part of the format: there is one way to write it.
+table takes the keys below, with the target's platforms, architectures, deployment keys and environments. There
+is no shorthand (`[otok] platforms`, a top-level `[deployment]`): there is one way to write it.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
@@ -88,7 +88,7 @@ shorthand (`[otok] platforms`, top-level `[deployment]`) is not part of the form
 | `build-on` | array of environments (common 4.2) | the target's only environment (`["macos/xcode"]`), `["*/ndk"]` for `[android]`; required for `[windows]` and `[linux]` | The environments the project is built in (4.9): a machine builds the target only in one of them. |
 | `architectures` | table: platform → array of architectures | the full list of common 4 | Restricts the architectures of a platform, e.g. `{ iossim = ["arm64"] }` to skip Intel simulators. Each array must be a non-empty subset of the platform's architectures. |
 | `deployment` | table (below) | — | Minimum OS versions. |
-| `output` | path | `"Otok"` | Directory of the generated packages (DESIGN 5.5), relative to the manifest; must stay inside the project. The outputs of two targets must not overlap (the same directory, or one inside the other, compared ignoring case). |
+| `output` | path | `"Otok"` | Directory of the generated packages, relative to the manifest; must stay inside the project. The outputs of two targets must not overlap (the same directory, or one inside the other, compared ignoring case). |
 | `cflags`, `cxxflags`, `ldflags` | array of strings | `[]` | Compiler and linker flags for every library built for this target (4.3). |
 | `configurations` | array of `"release"`, `"debug"` | `["release"]` | The configurations every library is built in (5). `[apple]` takes one. |
 | `linkage` | `"static"` or `"dynamic"` | the target's: `"static"` | How libraries are built unless a dependency says otherwise (5). `[apple]` makes dynamic libraries frameworks (4.10). |
@@ -115,7 +115,7 @@ version is required for every platform in the effective platform set (12) — th
 default, because Xcode's default changes with every Xcode release and would silently change the
 output. Keys for platforms that are not used are allowed (a profile may add the platform).
 
-The output (DESIGN 5.5) is one SwiftPM package: `<output>/Package.swift` and, per library,
+The output is one SwiftPM package: `<output>/Package.swift` and, per library,
 `<output>/Packages/<library>/` with one XCFramework per library output name:
 
 - An XCFramework, its binary target and the archive inside are named `<library>_<output name>`
@@ -153,7 +153,7 @@ The output (DESIGN 5.5) is one SwiftPM package: `<output>/Package.swift` and, pe
   gives the targets depending on it (`#include <boost/…>` from C, C++ and Objective-C), never built into
   a Clang module, which C++ headers of that size could not be. Swift does not see them. A product holds
   the shims of the products of headers only it depends on, and of those of its dependencies.
-- Each wrapper of a product (`apple.wrappers`, DESIGN 6.6) is copied to
+- Each wrapper of a product (`apple.wrappers`, `recipe-toml.md` 11) is copied to
   `Packages/<library>/wrappers/<name>/` and declared as a `target` (SwiftPM picks the language from the
   files; `Resources/` is processed as resources) that depends on every target of the products listing
   it, with the recipe's option values as `swiftSettings` and `cSettings` defines (`recipe-toml.md` 8.2).
@@ -177,7 +177,7 @@ The output (DESIGN 5.5) is one SwiftPM package: `<output>/Package.swift` and, pe
   Settings.bundle page (a `PSGroupSpecifier` per library with `Title`, `License` and `FooterText`).
 
 Beside `Package.swift` the output has `<output>/otok-config.cmake`, the same products for builds with CMake 3.28
-or later, which links XCFrameworks and takes the headers of the slice it links (`docs/PLAN.md` decision 92):
+or later, which links XCFrameworks and takes the headers of the slice it links:
 
 ```cmake
 find_package(Otok CONFIG REQUIRED PATHS "${CMAKE_SOURCE_DIR}/Otok" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
@@ -213,13 +213,16 @@ target_link_libraries(app PRIVATE otok::OpenSSL)
 - `Otok_PRIVACY_MANIFESTS` lists the privacy manifests of the products of static libraries
   (`shims/<product>/PrivacyInfo.xcprivacy`): an app built with CMake puts them into its bundle itself. Those of dynamic
   libraries are in their frameworks.
+- As for the other targets (4.11), `Otok_ACKNOWLEDGEMENTS` names `Acknowledgements.md` and `Otok_<library>_DATA_DIR` the
+  `data/` of a library with data files, and `otok_copy_runtime_dlls(<target>)` is defined, doing nothing here, so that a
+  project of several targets calls it alike.
 - What only SwiftPM builds is missing, and the file warns of each when CMake reads it: wrappers, the target of
   `bundle-data` with its `otok_<library>_data_directory()` (the data files stay in `data/`), and the packages
   of recipes delivering a SwiftPM package (4.6).
 
 ### 4.1 `[linux]`
 
-The Linux target (`docs/PLAN.md` decision 82; until then the development target `native` built for the build
+The Linux target (it replaces the development target `native` of earlier versions, which built for the build
 machine): libraries for programs of the build machine's Linux, with its glibc and GNU C++ runtime.
 
 ```toml
@@ -228,9 +231,9 @@ build-on = ["linux/gcc"]
 configurations = ["debug", "release"]
 ```
 
-It has one platform, `linux`, whose architecture is the build machine's (a sysroot for others is open item 32 of
-`docs/PLAN.md`), and no deployment versions. It takes `build-on` (`"linux/gcc"` or `"linux/clang"`: the compiler is
-the project's choice), `output`, `cflags`, `cxxflags`, `ldflags`, `configurations` (any of the two) and `linkage`
+It has one platform, `linux`, whose architecture is the build machine's (a sysroot for other architectures is not
+supported yet), and no deployment versions. It takes `build-on` (`"linux/gcc"` or `"linux/clang"`: the compiler
+is the project's choice), `output`, `cflags`, `cxxflags`, `ldflags`, `configurations` (any of the two) and `linkage`
 (default `"static"`) as `[apple]` does. Its builds start from nothing of the user's environment (`build-lua-api.md` 5).
 A manifest needs at least one target table.
 
@@ -253,8 +256,7 @@ one recipe find each other in its `lib/` wherever it is copied. Libraries of dif
 other the same way once the consumer puts their shared objects into one directory, as an application
 does when it ships them; a consumer that runs them from the output directories sets `LD_LIBRARY_PATH`.
 
-Tool dependencies have no output. Product `defines` and `link` are not written, and nothing picks
-`lib/` or `debug/lib/` for the consumer's build yet (a CMake config comes later, `docs/PLAN.md` decision 31).
+Tool dependencies have no output. `otok-config.cmake` gives the libraries and products to a consumer's CMake (4.11).
 
 ### 4.2 The output directory
 
@@ -273,7 +275,9 @@ zlib = "3f5c…"   # 64 hex digits
 ```
 
 A library whose package key has not changed is not copied again, so the consumer's build sees the same
-files with the same times.
+files with the same times. The files otok writes beside the libraries on every run (`Acknowledgements.md`,
+`Package.swift`, `otok-config.cmake`, `otok.props`, …) are written only when their contents change, for the same
+reason.
 
 Every library's directory has `licenses/` with the recipe's `license-files` (`recipe-toml.md` 3) at
 their paths in the source or the recipe directory. otok writes `<output>/Acknowledgements.md` on every run, for an about screen
@@ -285,7 +289,7 @@ product.
 
 `cflags`, `cxxflags` and `ldflags` pass flags to the builds of dependencies without the recipe
 declaring them as options: macros such as `-D_CRT_SECURE_NO_WARNINGS`, a library's own configuration
-macros, `-fno-omit-frame-pointer`, sanitizers in a profile (`docs/PLAN.md` decision 24). They are
+macros, `-fno-omit-frame-pointer`, sanitizers in a profile. They are
 arrays of strings, one argument each:
 
 ```toml
@@ -330,7 +334,7 @@ product `defines` (`recipe-toml.md` 11).
 The Apple target lists the undefined symbols of every library it packages (as `nm -u` does, over all
 slices of all platforms) into the package entry, `Packages/<library>/undefined-symbols/<output name>.txt`, one
 Mach-O symbol per line, sorted. Every install matches them against the required-reason API list
-(`index.md` 10.1) and the privacy manifests of the products (DESIGN 10.1), so a newer list needs no rebuild:
+(`index.md` 10.1) and the privacy manifests of the products, so a newer list needs no rebuild:
 
 - A library uses a category when one of its undefined symbols is listed under it: `_stat` and
   `_stat$INODE64` are `stat`, `_OBJC_CLASS_$_NSUserDefaults` is the class `NSUserDefaults`.
@@ -389,7 +393,7 @@ A recipe that delivers a SwiftPM package (`recipe-toml.md` 12.1) is a dependency
 
 ### 4.7 `[android]`
 
-The Android target (`docs/PLAN.md` decision 56): native libraries for an app's shared objects, built with the
+The Android target: native libraries for an app's shared objects, built with the
 NDK.
 
 ```toml
@@ -425,13 +429,13 @@ The output is one directory per library, `<output>/<library>/`, with:
 
 A shared object has no `RUNPATH`: Android's loader finds the libraries of an app by name. Its `SONAME`
 must be its file name, unversioned (`libfoo.so`), the only names Gradle packs; packaging checks it. As
-in 4.1, one file name in the `lib/<abi>/` of two recipes is a warning, product `defines` and `link`
-are not written, and nothing yet tells the consumer's build where the libraries are (a CMake package
-and Prefab come later).
+in 4.1, one file name in the `lib/<abi>/` of two recipes is a warning. `otok-config.cmake` gives the libraries to the
+app's CMake, which Gradle's `externalNativeBuild` runs, and Gradle packs their shared objects (4.11). Prefab is not
+made.
 
 ### 4.8 `[windows]`
 
-The Windows target (`docs/PLAN.md` decisions 75, 82): libraries for programs built with MSVC, in one of its
+The Windows target: libraries for programs built with MSVC, in one of its
 environments (common 4.2):
 
 - `windows/msvc`: `cl.exe` and `link.exe` of Visual Studio (`visual-studio` of `config.md` 2) on Windows;
@@ -466,14 +470,14 @@ The output is one directory per library, `<output>/<library>/`, with:
 
 Packaging checks that every object of a library is for the slice's architecture (the COFF machine), and that a static
 library calls none of the helpers of compiler-rt for 128-bit integers (`__udivti3`, `__divti3`, …): clang has
-`__int128`, MSVC has not, nor do its runtime libraries, so a program linked by MSVC would not link (`docs/PLAN.md`
-decision 76). As in 4.1, one file name in the `lib/<arch>/` of two recipes is a warning, product `defines` and `link`
-are not written, and nothing yet tells the consumer's build where the libraries are.
+`__int128`, MSVC has not, nor do its runtime libraries, so a program linked by MSVC would not link. As
+in 4.1, one file name in the `lib/<arch>/` of two recipes is a warning. `otok-config.cmake`, and
+`otok.props` with `otok.targets` for projects of Visual Studio, give the libraries to the consumer's build (4.11).
 
 ### 4.9 Build environments
 
-A target table's `build-on` names the environments (common 4.2) the project may be built in (`docs/PLAN.md` decision 82); the
-lock, the systems it is built on (decision 88).
+A target table's `build-on` names the environments (common 4.2) the project may be built in; the lock,
+the systems it is built on.
 Recipes of one id may be variants for different environments (`recipe-toml.md` 6.1), so the environment chooses what
 is built, not only where:
 
@@ -481,9 +485,9 @@ is built, not only where:
   library, the graph takes the variant of its recipe whose `build-on` covers the environment (common 4.2) and whose
   `supported` holds every platform of the table. When none covers it, the variant of the first environment that
   substitutes for it (common 4.2), in the target's order, that one covers: the library is built there, on the same
-  machine, and links with the rest, whose ABI it shares (`docs/PLAN.md` decision 91). Skia, which builds with clang-cl
-  only, is built in `windows/clang-cl` in a project that builds in `windows/msvc`. The machine must have that
-  environment too; `install` checks it before fetching, and `otok tree` names it beside the library. No variant in the
+  machine, and links with the rest, whose ABI it shares. Skia, which builds with clang-cl
+  only, is built in `windows/clang-cl` in a project that builds in `windows/msvc`. A machine without
+  that environment does not build the target (the last item), and `otok tree` names it beside the library. No variant in the
   environment or its substitutes is a resolution error naming the library, the target and the environment. `*/ndk`
   is one graph, of variants that build on every host (`["*/ndk"]` in the recipe).
 - A library has one version in every graph of the project; its variants differ in revisions only. A version some
@@ -495,14 +499,20 @@ is built, not only where:
   with the dependencies of each. What otok prints names them `<library>@<target>` when the project has several target
   tables (`zlib@android`); `otok tree` shows the graph of each target this machine builds, under `[<target>]
   <environment>`.
-- A machine builds a target in the first environment of `build-on` it has (common 4.2); with none, `install` fails
-  before fetching, naming the environments and the machine's system (`this project builds 'windows' in windows/msvc;
-  this machine is linux-x86_64`). Adding an environment is a change of the manifest, which `otok update` resolves.
+- A machine builds a target in the first environment of `build-on` it has (common 4.2). `install` and `update` build
+  every target table the machine can build and skip the others, each with a note naming
+  the target and why: this otok does not build the target on this machine (`[apple]` off a Mac); the machine has none
+  of its environments, named with the machine's system (`this project builds 'windows' in windows/msvc; this machine
+  is linux-x86_64`); or a library of its graph is built in a substituting environment the machine does not have. The
+  output directory of a skipped table is left as it is. A machine that can build none of the project's target tables
+  is an error naming each with its reason, after the lock is written and the inputs are fetched. The lock does not
+  change with the machine: it holds the graphs of every system of `systems`, and `--locked` checks all of it. Adding
+  an environment is a change of the manifest, which `otok update` resolves.
 
 ### 4.10 Dynamic libraries on Apple
 
 With `linkage = "dynamic"` (5) a library of the Apple target is a framework, the only form of a dynamic library
-App Store takes in an app (`docs/PLAN.md` decision 93):
+App Store takes in an app:
 
 - Its XCFramework `<library>_<output name>.xcframework` holds a framework `<library>_<output name>.framework` per
   platform: the binary of that name (the slices of the platform combined with `lipo`), `Info.plist` and the privacy
@@ -536,13 +546,114 @@ App Store takes in an app (`docs/PLAN.md` decision 93):
   otherwise (xcodegen for several platforms) may need `LD_RUNPATH_SEARCH_PATHS` for macOS. SwiftPM from the command
   line gives `@loader_path` to an executable only through a target of its own depending on the products.
 
+### 4.11 Consumer files of `[windows]`, `[linux]` and `[android]`
+
+The outputs of these targets tell the consumer's build where the libraries are, as
+`Package.swift` and `otok-config.cmake` do on Apple (4). The files do not depend on the machine or the environment the
+libraries were built in: a Windows output of `windows/msvc`, `windows/clang-cl` or `linux/clang-cl` has the same ones.
+
+Each library's directory has `otok-package.toml`, written while packaging: which of its files is which library output
+name in each architecture and configuration (the files keep the names their builds gave them), and what the target
+records of them: `crt`, the toolset of MSVC whose CRT the Windows libraries were built with (the newest of the slices);
+`stl`, the C++ runtime of Android's dynamic libraries. It is otok's own file; consumers read the files below.
+
+```toml
+# Generated by otok; do not edit. Which file is which library output name (otok-toml.md 4.11).
+format = 1
+
+[properties]
+crt = "14.44"
+
+[[library]]
+name = "lz4"
+arch = "x86_64"
+configuration = "release"
+link = "lib/x86_64/lz4.lib"
+runtime = "bin/x86_64/lz4.dll"
+symbols = "bin/x86_64/lz4.pdb"
+shared = true
+```
+
+`<output>/otok-config.cmake`, for CMake 3.28 or later, is found as on Apple:
+
+```cmake
+find_package(Otok CONFIG REQUIRED PATHS "${CMAKE_SOURCE_DIR}/Otok" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+target_link_libraries(app PRIVATE otok::LZ4)
+otok_copy_runtime_dlls(app)
+```
+
+- Each library output name is an imported library `otok::<library>_<output name>`, the names of the Apple target:
+  `STATIC IMPORTED`, or `SHARED IMPORTED` for a dynamic library, with the file of each configuration built
+  (`IMPORTED_LOCATION_RELEASE`, `IMPORTED_LOCATION_DEBUG`); a DLL with its import library (`IMPORTED_IMPLIB_*`), so that
+  `$<TARGET_RUNTIME_DLLS>` finds it; a shared object with its `SONAME` (`IMPORTED_SONAME_*`); the `include/` of its
+  library. A static library links after it the libraries the products holding it list after it (linkers that read an
+  archive once need the order) and the system libraries of those products.
+- Each product whose `when` holds is an interface target `otok::<product>` holding what it holds on Apple: its libraries,
+  those of the products it `depends` on and of the recipe's dependencies; the products of headers only it holds, with
+  their `include/` and system libraries; and, as `INTERFACE_COMPILE_DEFINITIONS`, the `defines` of itself, of the products
+  whose headers its libraries carry and of the products of headers only it holds. A system library of `link` is
+  `<name>.lib` on Windows, `-l<name>` elsewhere. `link.runtime = "c++"` adds `-lstdc++` on Linux to a static library, for
+  a consumer linking with the C driver (a shared object names its runtime itself); nothing with MSVC, whose objects name
+  their STL; nothing on Android, whose app chooses the runtime (`ANDROID_STL`). A product named as a library's target
+  is an error.
+- The architecture the consumer builds for: on Windows the generator platform (`CMAKE_VS_PLATFORM_NAME`, `x64` is
+  `x86_64` and `ARM64` `arm64`), or the compiler's (`CMAKE_<LANG>_COMPILER_ARCHITECTURE_ID`) with the other generators;
+  on Android the ABI (`CMAKE_ANDROID_ARCH_ABI`, as the NDK's toolchain file and Gradle set it); on Linux
+  `CMAKE_SYSTEM_PROCESSOR`.
+- The configuration: `Debug` links the debug libraries, the other configurations the release ones. One the project did
+  not build is served by the other on Linux and Android. On Windows the CRTs of the two do not mix: a build of one
+  configuration (Ninja, `CMAKE_BUILD_TYPE`) is refused when CMake configures it, and a build of several (the Visual
+  Studio generator) fails when it links that configuration, on a library named
+  `otok-has-no-debug-libraries--add-debug-to-configurations-of-windows-in-otok.toml.lib`.
+- The file refuses, when CMake configures, with the cure in the message: CMake older than 3.28; another system, and on
+  Windows a compiler without MSVC's ABI; an architecture the output has no libraries for, named as `architectures`
+  names it; on Windows `cl` older than the toolset of `crt` (`cl` 19.<n> is the toolset 14.<n>, `14.44` libraries link
+  into a `14.51` program, 4.8); on Android, dynamic libraries of `stl = "shared"` (4.7) in an app whose `ANDROID_STL` is
+  not `c++_shared`, or of `stl = "static"` in one whose is.
+- `otok_copy_runtime_dlls(<target>)` copies the DLLs a target loads beside it once it is built
+  (`$<TARGET_RUNTIME_DLLS>`). It does nothing on the other targets, so a project of several targets calls it alike.
+- `Otok_<library>_DATA_DIR` is the `data/` of a library with data files; `Otok_ACKNOWLEDGEMENTS` is
+  `Acknowledgements.md`. Paths are relative to the file, so the output may be moved.
+
+On Windows the output also has `otok.props` and `otok.targets`, for projects of Visual Studio without CMake: a
+`.vcxproj` imports `otok.props` before its settings and `otok.targets` after them, or every project of a solution gets
+them from `Directory.Build.props` and `Directory.Build.targets`:
+
+```xml
+<Import Project="..\Otok\otok.props" />
+<!-- … the project's configurations, Microsoft.Cpp.props … -->
+<PropertyGroup>
+  <OtokProducts>LZ4;Boost.JSON</OtokProducts>
+</PropertyGroup>
+<!-- … its items, Microsoft.Cpp.targets … -->
+<Import Project="..\Otok\otok.targets" />
+```
+
+- Every project gets the include directories of all libraries, and the library directories of its platform (`x64`,
+  `ARM64`) and configuration: the debug libraries when it uses the debug CRT (`UseDebugLibraries`), the release ones
+  otherwise, so that auto-linking (`#pragma comment(lib, …)`) finds them.
+- A project links the products it names in `OtokProducts` (`;`-separated, case does not matter): their libraries and
+  system libraries in `AdditionalDependencies`, their `defines` in `PreprocessorDefinitions`. Without it a project links
+  nothing by itself, since some products exclude each other (`recipe-toml.md` 11.2).
+- After `Build` of an `Application`, the target `OtokCopyDlls` copies beside it (`$(OutDir)`) the DLLs of the products it
+  names, or every DLL of its platform and configuration when it names none.
+- Before a `.vcxproj` builds, `OtokCheck` stops it with an error naming the cure for a platform or a configuration the
+  output has no libraries for, a toolset older than `crt` (`VCToolsVersion`), and a product of `OtokProducts` it does not
+  have.
+- `OtokDir`, `OtokAcknowledgements` and `OtokDataDir_<library>` (every character of the name other than a letter or a
+  digit as `_`) name the output, `Acknowledgements.md` and a library's `data/`.
+
+Gradle's `externalNativeBuild { cmake { … } }` runs the app's CMake for each ABI, which finds the output as above. The
+Android Gradle Plugin packs into the app the shared objects of the imported libraries its own link, and
+`libc++_shared.so` when it uses `c++_shared` (`arguments += "-DANDROID_STL=c++_shared"`, which dynamic libraries of
+`stl = "shared"` need): no `jniLibs` (checked with AGP 9.5.1 and NDK r30).
+
 ## 5. Configurations and linkage
 
-`configurations` of a target table lists the build configurations of its libraries (DESIGN 10, item
-4): each one is a set of slices of its own, built with the configuration's flags (`build-lua-api.md`
-3.1), and a `debug` slice links the `debug` slices of its dependencies. On Windows the libraries of a
-consumer must match its CRT (`/MDd` and `_ITERATOR_DEBUG_LEVEL=2` in debug builds, `/MD` in release),
-so a project builds both and its build picks `lib/` or `debug/lib/` (4.1). `[apple]` takes one
+`configurations` of a target table lists the build configurations of its libraries: each one is a set of slices
+of its own, built with the configuration's flags (`build-lua-api.md` 3.1), and a `debug` slice links the `debug`
+slices of its dependencies. On Windows the libraries of a consumer must match its CRT (`/MDd` and
+`_ITERATOR_DEBUG_LEVEL=2` in debug builds, `/MD` in release), so a project builds both and its build picks `lib/` or `debug/lib/` (4.1). `[apple]` takes one
 configuration: a SwiftPM binary target cannot vary by configuration, and apps link release libraries
 in their debug builds. Tool dependencies are always built `release`: they run during the build.
 
@@ -572,7 +683,7 @@ table.
 
 `cxx-standard` (an integer: `11`, `14`, `17`, `20`, `23` or `26`) chooses the C++ standard the libraries are
 compiled with, and `c-standard` (`89`, `99`, `11`, `17` or `23`) the C standard, so that they match the
-consumer's code (`docs/PLAN.md` decision 58): a project compiled with C++23 gets libraries compiled with
+consumer's code: a project compiled with C++23 gets libraries compiled with
 C++23. Each is a key of the target table (and of a profile's target table, which wins), one for every
 library of the target: the standard changes what headers declare (`__cplusplus`, `<version>`,
 `__STDC_VERSION__`), and libraries built with different ones may not link together, or link with
@@ -603,7 +714,7 @@ resolution fails, naming them. With a standard, given or chosen:
 ## 6. `[deps.<library>]`
 
 A direct dependency. The table key is the library name (common 2); the recipe that builds it is
-chosen with `recipe`. Transitive dependencies of the same library resolve to this entry (DESIGN 5.2).
+chosen with `recipe`. Transitive dependencies of the same library resolve to this entry.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
@@ -630,7 +741,7 @@ libraries = ["json", "program_options"]
 |---|---|---|
 | `"publisher/name"` | A recipe from the index. | Required. |
 | `{ git = "<url>", rev = "<commit>", tag = "<tag>", path = "<dir>" }` | A recipe in a git repository, pinned to a full 40-character commit SHA (`rev`). `path` is the recipe directory inside the repository (default: the root). Branches, tags and short SHAs are errors as `rev`: they move or are ambiguous. `tag` is optional and only helps, as in `recipe-toml.md` 4: the tag of that commit, fetched first; one pointing elsewhere is an error. | Optional; if given, the recipe's own version must satisfy it. |
-| `{ path = "<dir>" }` | A recipe in a local directory, for developing a recipe or patching a library (DESIGN 5.6). May point outside the project (common 6). | Optional, as for `git`. |
+| `{ path = "<dir>" }` | A recipe in a local directory, for developing a recipe or patching a library. May point outside the project (common 6). | Optional, as for `git`. |
 
 A table form accepts no other keys. The library name in the recipe (`[recipe] library`) must equal
 the table key.
@@ -639,8 +750,8 @@ the table key.
 
 Keys are option names declared by the recipe's `[options.*]` (`recipe-toml.md`); values must match
 the declared type. Unknown options and type mismatches are errors reported before anything is
-fetched or built (DESIGN 6.2). Options not given take the recipe's default, unless a dependent
-requires a value (DESIGN 5.2).
+fetched or built. Options not given take the recipe's default, unless a dependent
+requires a value (`recipe-toml.md` 8.1).
 
 A `file` option (`recipe-toml.md` 8.3) takes a path relative to the manifest that stays inside the
 project, also in a profile or a fragment (11): `options = { data-filter = "icu/filter.json" }`. The file must
@@ -650,7 +761,7 @@ build gets no file. Only the project gives one: a dependent recipe cannot.
 ### 6.3 `source`
 
 `source = { path = "<dir>" }` builds the library from a local checkout instead of the recipe's
-`[source]` (DESIGN 10, item 8). The recipe, its patches and its options still apply. The path may
+`[source]`. The recipe, its patches and its options still apply. The path may
 point outside the project (common 6):
 
 - **inside the project** (vendored sources, committed with it): `otok.lock` records the path and the
@@ -666,7 +777,7 @@ In both cases the build cache key uses the hash of the directory contents at bui
 
 A recipe id (`"publisher/name"`, in `recipe` and in the `default-recipe` of every recipe of the graph) is looked up in
 the indexes of the project: the one `config.toml` names, called `default` here (the public index unless the machine
-says otherwise, `config.md` 2), and those the manifest adds (`docs/PLAN.md` decision 95):
+says otherwise, `config.md` 2), and those the manifest adds:
 
 ```toml
 [indexes.corp]
@@ -704,8 +815,8 @@ and its mirror (`config.md` 2), not other indexes.
 
 ## 7. `[tool-deps.<library>]`
 
-Chooses the recipe, versions and options of a library when recipes use it as a tool dependency
-(DESIGN 6.8). It never causes a tool build on its own: an entry that no recipe uses is reported as
+Chooses the recipe, versions and options of a library when recipes use it as a tool dependency.
+It never causes a tool build on its own: an entry that no recipe uses is reported as
 unused (a warning). Tool dependencies are resolved separately from `[deps.*]`; the same library may
 appear in both with different recipes, versions and options. A toolchain that names a tool recipe is a tool dependency
 on the library of its name (`recipe-toml.md` 13.1), so `[tool-deps.cmake]` chooses the CMake recipes use.
@@ -714,13 +825,13 @@ Keys: `recipe`, `version`, `prerelease`, `options`, `source`, `cflags`, `cxxflag
 meaning of section 6.
 `platforms` is not allowed: a tool dependency is built for the tool slice only.
 
-The tool slice is built for the build machine by the target of its system (`docs/PLAN.md` decision 82): on macOS the
+The tool slice is built for the build machine by the target of its system: on macOS the
 `macosx` platform of `apple`, on Linux `linux`, on Windows `windows`, in the environment `[otok] tool-build-on` names
 for that system (3). The tool recipes are those variants (`recipe-toml.md` 3.1). Tool dependencies are resolved for
 every system a project's environment (4.9) may run on: one host system for `windows/msvc`, every system for `*/ndk`.
 
 A library whose recipe does not build in that environment is built in another environment of the same system that it
-builds in, the first of those the target lists (`docs/PLAN.md` decision 86): on Windows `windows/msvc`, then
+builds in, the first of those the target lists: on Windows `windows/msvc`, then
 `windows/clang-cl`; on Linux `linux/gcc`, then `linux/clang`. A tool that builds in `windows/clang-cl` thus runs a
 ninja whose recipe builds in `windows/msvc` only. Each library is built in one environment of a system, for every tool
 that uses it: the environments of one system share its ABI, so a tool links the libraries it depends on whichever of
@@ -728,7 +839,7 @@ them built each.
 
 ## 8. `[profile.<name>]`
 
-A named set of overrides selected with `--profile <name>` (DESIGN 5.4). Without `--profile` no profile
+A named set of overrides selected with `--profile <name>`. Without `--profile` no profile
 applies. A profile may contain:
 
 | Key | Contents |
@@ -759,7 +870,7 @@ set (12).
 At most one of the two keys may be present. Entries are license ids, optionally with an exception
 (`"GPL-2.0-only WITH Classpath-exception-2.0"`). A dependency's license expression is evaluated as in
 common 5: `MIT OR GPL-3.0-only` passes `deny-licenses = ["GPL-3.0-only"]`, because MIT can be chosen.
-`otok audit` checks the same policy against `otok.lock` (DESIGN 5.4).
+`otok audit` checks the same policy against `otok.lock`.
 
 ## 10. `[fetch]`
 
@@ -795,7 +906,7 @@ lock or a cache key. The same lock on a machine without these locations fetches 
 
 ## 11. Includes
 
-`[otok] include` lists fragment files, for dependency lists generated by other tools (DESIGN 5.6):
+`[otok] include` lists fragment files, for dependency lists generated by other tools:
 
 - Paths are relative to the manifest and must stay inside the project. A missing file is an error.
 - A fragment is TOML with only `[deps.*]` and `[tool-deps.*]` tables (and `[metadata]`), with the
@@ -843,7 +954,8 @@ Reported before resolution, all at once rather than one per run:
   does not have or `*` with another compiler than `ndk` (4.9); `tool-build-on` with two environments of one system or
   one of another target (3).
 
-Reported before building: a machine that has none of the environments of a target table (4.9).
+Reported before building: a target table this machine cannot build, a note, and an error when it can build none of
+them (4.9).
 
 Reported during resolution: options against recipe schemas, version and platform availability,
 deployment versions, option conflicts between dependents, license policy, a `linkage` the recipe cannot

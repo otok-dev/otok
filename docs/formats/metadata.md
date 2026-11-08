@@ -4,7 +4,7 @@ Status: draft. Common rules are in [README.md](README.md).
 
 `otok metadata` prints what otok knows about a project without building anything: the resolved graph,
 the targets as the selected profile has them, and where each library lands in the output. It is for
-IDEs and scripts, as `cargo metadata` is (DESIGN 5.4).
+IDEs and scripts, as `cargo metadata` is.
 
 ## 1. The command
 
@@ -150,7 +150,7 @@ The values in effect for the selected profile (`otok-toml.md` 5, 8):
 | Key | Type | Meaning |
 |---|---|---|
 | `name` | string | `"apple"`, `"android"`, `"windows"`, `"linux"`. |
-| `output` | path | The output directory (`otok-toml.md` 4.2). |
+| `output` | path | The output directory (`otok-toml.md` 4.2). Its consumer files are there under fixed names: `otok-config.cmake` on every target, `Package.swift` on Apple, `otok.props` and `otok.targets` on Windows (`otok-toml.md` 4, 4.11); `otok metadata` does not list them. |
 | `platforms` | array of strings | The platforms built. |
 | `architectures` | object: platform → array of strings | The architectures of each platform built. |
 | `deployment` | object: key → version | The deployment versions the project sets. |
@@ -166,7 +166,7 @@ and what the resolution adds:
 | Key | Type | Meaning |
 |---|---|---|
 | `library` | string | The library name. |
-| `tool` | boolean | A tool package: built for the tool slice (DESIGN 6.8); it has no outputs. |
+| `tool` | boolean | A tool package: built for the tool slice (`otok-toml.md` 7); it has no outputs. |
 | `target` | string | The target of its graph; for a tool package the target that builds the tools of the machine (`otok-toml.md` 7). |
 | `environment` | string | The environment of its graph, as the project writes it (`*/ndk`), or of `[otok] tool-build-on` for a tool package. |
 | `variant` | string or null | The variant of its recipe (`recipe-toml.md` 3); `null` for a git or path recipe. |

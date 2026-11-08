@@ -339,8 +339,14 @@ public:
         std::error_code ec;
         fs::create_directories(staging / "include", ec);
         if (ec) return fail("cannot create '" + path_to_utf8(staging) + "': " + ec.message());
+        package_files recorded;  // which file is which library (otok-toml.md 4.11)
         for (built_slice const& s : package.slices) {
             build_output const& out = s.output;
+            // the C++ runtime of dynamic libraries, which the app uses too (otok-toml.md 4.7)
+            if (s.spec.linkage == "dynamic") {
+                auto const stl = s.spec.choices.find("stl");
+                recorded.properties["stl"] = stl != s.spec.choices.end() ? stl->second : "shared";
+            }
             std::set<fs::path> headers;
             if (out.headers) headers.insert(*out.headers);
             for (auto const& [name, dir] : out.library_headers) headers.insert(dir);
@@ -357,12 +363,20 @@ public:
                 // the file itself under the name the build gave it, a link or not
                 fs::copy_file(fs::canonical(lib, ec), dir / lib.filename(), ec);
                 if (ec) return fail("cannot copy the library '" + name + "': " + ec.message());
+                package_library_file f{name, s.spec.arch, s.spec.configuration,
+                    (s.spec.configuration == "debug" ? "debug/lib/" : "lib/") + s.spec.arch + "/" + path_to_utf8(lib.filename())};
+                if (binary_kind_of(lib) == binary_kind::elf_shared) {
+                    f.shared = true;
+                    f.soname = load_names_of(lib).id;
+                }
+                recorded.files.push_back(std::move(f));
             }
         }
-        return {};
+        return write_file_atomic(staging / package_files_name, write_package_files(recorded));
     }
 
-    // One file name in the lib/<abi>/ of two libraries matters to consumers that link through search paths.
+    // otok-config.cmake (otok-toml.md 4.11); and one file name in the lib/<abi>/ of two libraries, which matters to consumers that link
+    // through search paths.
     result<void> finish_output(fs::path const& dir, std::span<output_package const> packages, std::map<std::string, std::string> const& deployment,
         std::vector<std::string>& warnings) const override
     {
@@ -385,6 +399,9 @@ public:
                 }
             }
         }
+        auto c = consumer_package_of(dir, packages, info().platforms.front().architectures);
+        if (!c) return std::unexpected{c.error()};
+        if (auto ok = write_file_if_changed(dir / "otok-config.cmake", consumer_cmake_config(*c, detail::cmake_parts(*c))); !ok) return std::unexpected{ok.error()};
         return {};
     }
 
@@ -431,6 +448,54 @@ target_info const& info()
 std::unique_ptr<build_target> make_build_target(std::string ndk, env_vars environment)
 {
     return std::make_unique<android_build_target>(std::move(ndk), std::move(environment));
+}
+
+consumer_cmake_parts detail::cmake_parts(consumer_package const& package)
+{
+    consumer_cmake_parts parts;
+    parts.target = "android";
+    parts.platform = "android";
+    parts.detect =
+        "if(NOT CMAKE_SYSTEM_NAME STREQUAL \"Android\")\n"
+        "  message(FATAL_ERROR \"otok: ${_otok_dir} holds libraries for Android, not for '${CMAKE_SYSTEM_NAME}'\")\n"
+        "endif()\n"
+        "if(CMAKE_ANDROID_ARCH_ABI)\n"
+        "  set(_otok_arch \"${CMAKE_ANDROID_ARCH_ABI}\")\n"
+        "elseif(ANDROID_ABI)\n"
+        "  set(_otok_arch \"${ANDROID_ABI}\")\n"
+        "else()\n"
+        "  set(_otok_arch \"${CMAKE_SYSTEM_PROCESSOR}\")\n"
+        "endif()\n";
+    // the C++ runtime is the app's: static libraries take the one it links; dynamic ones were linked with that of `stl`
+    bool const shared = std::ranges::any_of(package.libraries, &consumer_library::shared);
+    auto const stl = package.properties.find("stl");
+    if (shared && stl != package.properties.end()) {
+        parts.checks =
+            "\n# the C++ runtime of the app (ANDROID_STL of the NDK's toolchain file, c++_static by default), and that of the dynamic libraries\n"
+            "if(ANDROID_STL)\n"
+            "  set(_otok_stl \"${ANDROID_STL}\")\n"
+            "elseif(CMAKE_ANDROID_STL_TYPE)\n"
+            "  set(_otok_stl \"${CMAKE_ANDROID_STL_TYPE}\")\n"
+            "else()\n"
+            "  set(_otok_stl \"c++_static\")\n"
+            "endif()\n";
+        if (stl->second == "shared") {
+            parts.checks +=
+                "if(NOT _otok_stl STREQUAL \"c++_shared\")\n"
+                "  message(FATAL_ERROR \"otok: the dynamic libraries of ${_otok_dir} use the C++ runtime c++_shared (stl = \\\"shared\\\" of [android]), \"\n"
+                "    \"which the app must use and ship too, not ${_otok_stl}: set ANDROID_STL to c++_shared (Gradle: arguments \\\"-DANDROID_STL=c++_shared\\\")\")\n"
+                "endif()\n";
+        } else {
+            parts.checks +=
+                "if(_otok_stl STREQUAL \"c++_shared\")\n"
+                "  message(FATAL_ERROR \"otok: the dynamic libraries of ${_otok_dir} each have the C++ runtime c++_static in them (stl = \\\"static\\\" of [android]), \"\n"
+                "    \"and an app using c++_shared would have one more: set ANDROID_STL to c++_static, or stl = \\\"shared\\\" of [android] in otok.toml and run otok install\")\n"
+                "endif()\n";
+        }
+        parts.checks += "unset(_otok_stl)\n";
+    }
+    parts.link_item = [](std::string const& name) { return "-l" + name; };
+    return parts;
 }
 
 std::optional<detail::abi_names> detail::names_of(std::string_view abi)

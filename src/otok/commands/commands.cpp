@@ -126,11 +126,13 @@ using environment_choice = std::function<std::optional<std::size_t>(target_setti
 
 // The graphs this machine builds (otok-toml.md 4.9, otok-lock.md 2): of each target table the environment `chosen` gives,
 // else the first of `build-on` that covers the machine, else its first (what tree and metadata show; a build refuses
-// such a table before fetching); the tool graphs of the machine's system.
-resolution machine_graphs(resolution const& r, manifest const& m, environment_choice const& chosen)
+// such a table before fetching); the tool graphs of the machine's system. None of the target tables in `skipped`, which this
+// machine does not build (docs/PLAN.md decision 100).
+resolution machine_graphs(resolution const& r, manifest const& m, environment_choice const& chosen, std::set<std::string> const& skipped)
 {
     std::vector<std::size_t> graphs;
     for (target_settings const& ts : m.targets) {
+        if (skipped.contains(ts.target)) continue;
         std::optional<std::size_t> k = chosen ? chosen(ts) : std::nullopt;
         for (std::size_t i = 0; !k && i < ts.build_on.size(); ++i) {
             if (covers(ts.build_on[i], machine_environment(ts.build_on[i].compiler))) k = i;
@@ -151,10 +153,10 @@ resolution machine_graphs(resolution const& r, manifest const& m, environment_ch
 
 // Chooses the graphs of this machine (machine_graphs) and fetches the recipe trees of their index versions (index.md 3.1).
 // False after an error.
-bool choose_graphs(project& p, environment_choice const& chosen, diagnostics& diags)
+bool choose_graphs(project& p, environment_choice const& chosen, diagnostics& diags, std::set<std::string> const& skipped = {})
 {
-    p.r = machine_graphs(p.full, p.m, chosen);
-    if (p.dev_full) p.dev_r = machine_graphs(*p.dev_full, p.m, chosen);
+    p.r = machine_graphs(p.full, p.m, chosen, skipped);
+    if (p.dev_full) p.dev_r = machine_graphs(*p.dev_full, p.m, chosen, skipped);
     for (auto [r, provider] : {std::pair{&p.r, p.provider}, std::pair{p.dev_r ? &*p.dev_r : nullptr, p.dev_provider.get()}}) {
         if (!r) continue;
         for (auto* packages : {&r->packages, &r->tool_packages}) {
@@ -516,10 +518,22 @@ std::string recipe_label(candidate const& c)
     return "?";
 }
 
-std::string package_label(resolved_package const& p)
+// What messages call a package: its id (`zlib`, `zlib@android`). A tool package's id holds its version (`cmake@4.4.5`,
+// otok-lock.md 2), so it is called by its library, or by its id when `tools`, the tool packages of its resolution, has
+// another of that library.
+std::string package_name(resolved_package const& p, bool tool, std::span<resolved_package const> tools)
+{
+    if (!tool || std::ranges::count(tools, p.library, &resolved_package::library) > 1) return p.id;
+    return p.library;
+}
+
+// The name with the version, unless the name holds it, and the revision: `zlib 1.3.1 (r1)`, `cmake@4.4.5 (r1)`.
+std::string package_label(resolved_package const& p, bool tool, std::span<resolved_package const> tools)
 {
     recipe const& r = *p.chosen.recipe;
-    return p.id + " " + r.version->str() + " (r" + std::to_string(r.revision) + ")";
+    std::string const name = package_name(p, tool, tools);
+    bool const holds_version = tool && name != p.library;
+    return name + (holds_version ? "" : " " + r.version->str()) + " (r" + std::to_string(r.revision) + ")";
 }
 
 // Merged options that differ from the defaults, `{a = 1, b = true}`; empty when there are none.
@@ -616,7 +630,7 @@ void check_advisories(project const& p, parsed_command const& cmd, diagnostics& 
     // of every graph, which the lock holds; a merged entry is in several
     std::set<std::string> said;
     auto const check = [&](resolved_package const& pkg, bool tool) {
-        std::string const label = (tool ? "tool " : "") + package_label(pkg) + " from " + in_quotes(recipe_label(pkg.chosen));
+        std::string const label = (tool ? "tool " : "") + package_label(pkg, tool, p.full.tool_packages) + " from " + in_quotes(recipe_label(pkg.chosen));
         for (candidate_advisory const& a : pkg.chosen.advisories) {
             std::string const text = label + " has advisory " + a.id + " (" + std::string{severity_name(a.severity)} + "): " + a.summary
                 + unknown_note(a.unknown);
@@ -657,7 +671,7 @@ std::optional<std::map<std::string, package_inputs>> fetch_project_inputs(projec
     std::map<std::string, std::pair<std::string, recipe const*>> licensed;  // package key → label, recipe
     auto const add = [&](resolved_package const& pkg, locked_package const* locked, bool tool) {
         if (!locked || (!everything && pkg.configurations[p.configuration].platforms.empty())) return;
-        std::string const name = (tool ? "tool " : "") + package_label(pkg);
+        std::string const name = (tool ? "tool " : "") + package_label(pkg, tool, p.built().tool_packages);
         std::string const key = package_key(pkg.id, tool);
         package_inputs& in = inputs[key];
         in.recipe_dir = pkg.chosen.dir;
@@ -746,16 +760,25 @@ std::optional<std::map<std::string, package_inputs>> fetch_project_inputs(projec
     return inputs;
 }
 
-// The targets that build the project (docs/PLAN.md decision 19), or none when this machine has no
-// target for one of the project's, which is `missing`.
-std::optional<std::vector<std::unique_ptr<build_target>>> project_targets(project& p, command_context& ctx, std::string& missing)
+// The target tables of the project this machine does not build (docs/PLAN.md decision 100): target → why.
+using skipped_targets = std::map<std::string, std::string>;
+
+std::set<std::string> names_of(skipped_targets const& skipped)
+{
+    std::set<std::string> names;
+    for (auto const& [target, why] : skipped) names.insert(target);
+    return names;
+}
+
+// The targets of this machine that build projects (docs/PLAN.md decision 19); the target tables of the project it has no
+// target for are added to `skipped`.
+std::vector<std::unique_ptr<build_target>> project_targets(project& p, command_context& ctx, skipped_targets& skipped)
 {
     std::vector<std::unique_ptr<build_target>> owned;
     if (ctx.make_build_targets) owned = ctx.make_build_targets(p.config);
     for (target_settings const& ts : p.m.targets) {
         if (std::ranges::none_of(owned, [&](auto const& t) { return t->info().name == ts.target; })) {
-            missing = ts.target;
-            return std::nullopt;
+            skipped.emplace(ts.target, "this otok does not build it on this machine");
         }
     }
     return owned;
@@ -772,14 +795,18 @@ std::optional<toolchain_choice> project_toolchains(project& p, std::span<build_t
     return std::nullopt;
 }
 
-// Builds the selected configuration (docs/PLAN.md decision 19) with the targets of project_targets.
-// False after an error.
+// Builds the selected configuration (docs/PLAN.md decision 19) with the targets of project_targets, for the target tables
+// not in `skipped` (decision 100): the outputs of those are left as they are. False after an error.
 bool build_project(parsed_command const& cmd, project& p, lock_file const& lock, std::map<std::string, package_inputs> inputs,
-    std::span<build_target* const> targets, toolchain_choice toolchains, command_context& ctx, diagnostics& diags)
+    std::span<build_target* const> targets, toolchain_choice toolchains, skipped_targets const& skipped, command_context& ctx,
+    diagnostics& diags)
 {
+    manifest built_m = p.m;
+    std::erase_if(built_m.targets, [&](target_settings const& ts) { return skipped.contains(ts.target); });
     // standards the project does not set, chosen by the recipes (otok-toml.md 5.1)
     if (p.configuration < p.built().standards.size()) {
         for (auto const& [target, standards] : p.built().standards[p.configuration]) {
+            if (skipped.contains(target)) continue;
             target_info const* info = nullptr;
             for (target_info const* t : ctx.targets) {
                 if (t->name == target) info = t;
@@ -814,7 +841,7 @@ bool build_project(parsed_command const& cmd, project& p, lock_file const& lock,
     if (ctx.display) {
         // the command running this build shows it, and ctx.err reaches its display already (docs/PLAN.md decision 60)
         if (ctx.display->live()) settings.display = ctx.display;
-        builder b{p.built(), p.m, lock, ctx.project_dir, std::move(inputs), targets, *p.cache, std::move(settings), ctx.err};
+        builder b{p.built(), built_m, lock, ctx.project_dir, std::move(inputs), targets, *p.cache, std::move(settings), ctx.err};
         built = b.build_all();
     } else {
         std::optional<progress_display::terminal> live;
@@ -828,7 +855,7 @@ bool build_project(parsed_command const& cmd, project& p, lock_file const& lock,
             std::streambuf* buffer;
             ~restore() { stream.rdbuf(buffer); }
         } const restored{ctx.err, display.live() ? ctx.err.rdbuf(&display.lines()) : ctx.err.rdbuf()};
-        builder b{p.built(), p.m, lock, ctx.project_dir, std::move(inputs), targets, *p.cache, std::move(settings), ctx.err};
+        builder b{p.built(), built_m, lock, ctx.project_dir, std::move(inputs), targets, *p.cache, std::move(settings), ctx.err};
         built = b.build_all();
     }
     if (!built) {
@@ -873,7 +900,7 @@ bool build_project(parsed_command const& cmd, project& p, lock_file const& lock,
         return false;
     }
     shown.stage("output");
-    for (target_settings const& ts : p.m.targets) {
+    for (target_settings const& ts : built_m.targets) {
         auto const target = std::ranges::find_if(targets, [&](build_target* t) { return t->info().name == ts.target; });
         // the deployment versions in effect: the target table's, those of the profile over them
         std::map<std::string, std::string> deployment{ts.deployment.begin(), ts.deployment.end()};
@@ -956,56 +983,74 @@ int install_pipeline(parsed_command const& cmd, command_context& ctx, bool use_l
             write_changes(*p, *fresh, ctx, diags);
         }
     }
-    // the targets and the toolchains before anything is fetched (docs/PLAN.md decision 38)
-    std::optional<std::vector<std::unique_ptr<build_target>>> owned;
-    std::string missing;
+    // the targets and the toolchains before anything is fetched (docs/PLAN.md decision 38); the target tables this machine
+    // cannot build are skipped (decision 100)
+    std::vector<std::unique_ptr<build_target>> owned;
+    skipped_targets skipped;
     std::vector<build_target*> targets;
     std::optional<toolchain_choice> toolchains;
-    if (!diags.has_errors() && !everything) {
-        owned = project_targets(*p, ctx, missing);
-        if (owned) {
-            for (auto const& t : *owned) targets.push_back(t.get());
-            // an environment of each target table this machine has (otok-toml.md 4.9): the graph it builds
-            std::map<std::string, std::size_t> environments;  // target → index in its build-on
-            for (target_settings const& ts : p->m.targets) {
+    bool const building = !diags.has_errors() && !everything;
+    auto const none_built = [&] { return !p->m.targets.empty() && skipped.size() == p->m.targets.size(); };
+    if (building) {
+        owned = project_targets(*p, ctx, skipped);
+        for (auto const& t : owned) targets.push_back(t.get());
+        // an environment of each target table this machine has (otok-toml.md 4.9): the graph it builds
+        std::map<std::string, std::size_t> environments;  // target → index in its build-on
+        for (target_settings const& ts : p->m.targets) {
+            for (build_target* t : targets) {
+                if (t->info().name != ts.target) continue;
+                std::size_t index = 0;
+                if (auto e = machine_environment_of(*t, ts.build_on, &index); !e) skipped.emplace(ts.target, e.error().message);
+                else environments[ts.target] = index;
+            }
+        }
+        environment_choice const chosen = [&](target_settings const& ts) -> std::optional<std::size_t> {
+            auto it = environments.find(ts.target);
+            return it == environments.end() ? std::nullopt : std::optional{it->second};
+        };
+        bool chose = false;  // graphs other than load_project's
+        if (!none_built()) {
+            choose_graphs(*p, chosen, diags, names_of(skipped));
+            chose = true;
+        }
+        // and the environments of packages built in another than their graph's (docs/PLAN.md decision 91)
+        if (!diags.has_errors() && !none_built()) {
+            std::set<std::string> checked;
+            std::size_t const before = skipped.size();
+            for (resolved_package const& rp : p->built().packages) {
+                build_environment const& graph = p->built().graphs[rp.graph].environment;
+                if (rp.environment.compiler.empty() || rp.environment.compiler == graph.compiler) continue;
                 for (build_target* t : targets) {
-                    if (t->info().name != ts.target) continue;
-                    std::size_t index = 0;
-                    if (auto e = machine_environment_of(*t, ts.build_on, &index); !e) diags.error({}, e.error().message);
-                    else environments[ts.target] = index;
-                }
-            }
-            if (!diags.has_errors()) {
-                choose_graphs(*p, [&](target_settings const& ts) -> std::optional<std::size_t> {
-                    auto it = environments.find(ts.target);
-                    return it == environments.end() ? std::nullopt : std::optional{it->second};
-                }, diags);
-            }
-            // and the environments of packages built in another than their graph's (docs/PLAN.md decision 91)
-            if (!diags.has_errors()) {
-                std::set<std::string> checked;
-                for (resolved_package const& rp : p->built().packages) {
-                    build_environment const& graph = p->built().graphs[rp.graph].environment;
-                    if (rp.environment.compiler.empty() || rp.environment.compiler == graph.compiler) continue;
-                    for (build_target* t : targets) {
-                        if (t->info().name != rp.target) continue;
-                        build_environment machine = machine_environment(rp.environment.compiler);
-                        machine.arch.clear();
-                        if (!checked.insert(rp.target + " " + machine.text()).second) continue;
-                        if (auto found = t->find_compiler(machine); !found) {
-                            diags.error({}, rp.id + " is built in " + machine.text() + " (its recipe does not build in " + graph.text()
-                                + "), which this machine does not have: " + found.error().message);
-                        }
+                    if (t->info().name != rp.target) continue;
+                    build_environment machine = machine_environment(rp.environment.compiler);
+                    machine.arch.clear();
+                    if (!checked.insert(rp.target + " " + machine.text()).second) continue;
+                    if (auto found = t->find_compiler(machine); !found) {
+                        skipped.emplace(rp.target, rp.id + " is built in " + machine.text() + " (its recipe does not build in " + graph.text()
+                            + "), which this machine does not have: " + found.error().message);
                     }
                 }
             }
-            if (!diags.has_errors()) toolchains = project_toolchains(*p, targets, ctx, diags);
+            if (skipped.size() != before && !none_built()) choose_graphs(*p, chosen, diags, names_of(skipped));
         }
+        // nothing to build: the graphs of load_project, whose inputs are fetched as before (otok-toml.md 4.9)
+        if (none_built() && chose) choose_graphs(*p, {}, diags);
+        if (!diags.has_errors() && !none_built()) toolchains = project_toolchains(*p, targets, ctx, diags);
     }
     std::optional<std::map<std::string, package_inputs>> inputs;
     if (!diags.has_errors()) inputs = fetch_project_inputs(*p, *fresh, previous, unlocked, everything, ctx, diags);
-    if (inputs && !missing.empty()) ctx.out << "note: this machine cannot build for '" << missing << "'\n";
-    bool const ok = inputs && (everything || !owned || build_project(cmd, *p, *fresh, std::move(*inputs), targets, std::move(*toolchains), ctx, diags));
+    if (inputs && building) {
+        std::string none = "this machine can build none of the target tables of this project:";
+        for (target_settings const& ts : p->m.targets) {
+            auto const why = skipped.find(ts.target);
+            if (why == skipped.end()) continue;
+            if (none_built()) none += "\n  '" + ts.target + "': " + why->second;
+            else ctx.out << "note: not building for '" << ts.target << "': " << why->second << "\n";
+        }
+        if (none_built()) diags.error({}, none);
+    }
+    bool const ok = inputs && (everything
+        || (!none_built() && build_project(cmd, *p, *fresh, std::move(*inputs), targets, std::move(*toolchains), skipped, ctx, diags)));
     report(diags, ctx.err);
     collect_garbage_if_due(*p, ctx);
     return ok ? 0 : 1;
@@ -1043,7 +1088,7 @@ int tree(parsed_command const& cmd, command_context& ctx)
         // a target package built in another environment than its graph's (docs/PLAN.md decision 91)
         build_environment const& graph = r.graphs[pkg.graph].environment;
         bool const elsewhere = !tool && !pkg.environment.compiler.empty() && pkg.environment.compiler != graph.compiler;
-        ctx.out << prefix << branch << package_label(pkg) << " " << recipe_label(pkg.chosen) << (tool ? " (tool)" : "")
+        ctx.out << prefix << branch << package_label(pkg, tool, r.tool_packages) << " " << recipe_label(pkg.chosen) << (tool ? " (tool)" : "")
                 << (elsewhere ? " (" + pkg.environment.text() + ")" : std::string{})
                 << " [" << platform_list(c) << "]" << changed_options(pkg, c)
                 << (p->dev.find(pkg.library) ? " (dev)" : "");
@@ -1281,7 +1326,7 @@ int metadata(parsed_command const& cmd, command_context& ctx)
 void explain(resolved_package const& pkg, bool tool, project const& p, std::ostream& out)
 {
     package_configuration const& c = pkg.configurations[p.configuration];
-    out << (tool ? "tool dependency " : "") << package_label(pkg) << " " << recipe_label(pkg.chosen) << configuration_note(p) << "\n";
+    out << (tool ? "tool dependency " : "") << package_label(pkg, tool, p.r.tool_packages) << " " << recipe_label(pkg.chosen) << configuration_note(p) << "\n";
     out << "  required by:\n";
     for (package_requirement const& r : pkg.required_by) {
         out << "    " << r.requester << ": " << (r.constraint.empty() ? std::string{"any version"} : r.constraint) << "\n";
@@ -1732,38 +1777,84 @@ int info(parsed_command const& cmd, command_context& ctx)
             "needs a newer otok: " + u.reason});
     }
     print_columns(rows, out);
-    std::string platforms;
-    for (std::string const& p : r.platforms) platforms += (platforms.empty() ? "" : ", ") + p;
-    out << "platforms: " << platforms << "\n";
-    if (!r.options.empty()) {
-        out << "options of " << version_text(r) << ":\n";
-        rows.clear();
-        for (option_schema const& o : r.options) {
+
+    // the variants of the newest version (recipe-toml.md 6.1), each its newest revision, in the order of their names
+    std::vector<index_entry const*> variants;
+    for (index_entry const* e : *list) {
+        if (e->projection.version->str() != r.version->str()) continue;
+        if (std::ranges::none_of(variants, [&](index_entry const* v) { return v->projection.variant == e->projection.variant; })) variants.push_back(e);
+    }
+    std::ranges::sort(variants, {}, [](index_entry const* e) { return e->projection.variant; });
+    auto const joined = [](auto const& list, auto const& text) {
+        std::string out;
+        for (auto const& item : list) out += (out.empty() ? "" : ", ") + text(item);
+        return out;
+    };
+    auto const same_source = [&](index_entry const* e) {
+        // one repository however its URL is written (with '.git' or without), as the cache tells repositories apart
+        return git_url_key(e->recipe_source.git) == git_url_key(newest.recipe_source.git) && e->recipe_source.commit == newest.recipe_source.commit;
+    };
+    bool const one_source = std::ranges::all_of(variants, same_source);
+    out << "variants of " << r.version->str() << ":\n";
+    rows.clear();
+    for (index_entry const* e : variants) {
+        recipe const& v = e->projection;
+        std::string location = e->recipe_source.path;
+        if (!one_source) location = e->recipe_source.git + " " + e->recipe_source.commit + (location.empty() ? "" : " (" + location + ")");
+        rows.push_back({"  " + v.variant, "(r" + std::to_string(v.revision) + ")", joined(v.platforms, [](std::string const& p) { return p; }),
+            joined(v.build_on, [](build_environment const& b) { return b.text(); }), location});
+    }
+    print_columns(rows, out);
+
+    // a section of each group of variants whose text of it is the same, headed by the variants unless it is all of them
+    auto const section = [&](std::string const& title, auto const& text_of) {
+        std::vector<std::pair<std::string, std::vector<std::string>>> groups;  // text → variants
+        for (index_entry const* e : variants) {
+            std::string const text = text_of(e->projection);
+            auto const group = std::ranges::find(groups, text, &std::pair<std::string, std::vector<std::string>>::first);
+            if (group == groups.end()) groups.push_back({text, {e->projection.variant}});
+            else group->second.push_back(e->projection.variant);
+        }
+        for (auto const& [text, names] : groups) {
+            if (text.empty()) continue;
+            std::string const which = variants.size() == 1 ? version_text(r)
+                : names.size() == variants.size() ? r.version->str() + " (every variant)"
+                : r.version->str() + " (" + joined(names, [](std::string const& n) { return n; }) + ")";
+            out << title << " of " << which << ":\n" << text;
+        }
+    };
+    section("options", [](recipe const& v) {
+        std::vector<std::vector<std::string>> lines;
+        for (option_schema const& o : v.options) {
             static constexpr char const* types[] = {"bool", "int", "string", "enum", "list", "file"};
             std::string type = types[static_cast<int>(o.type)];
             if (!o.values.empty()) {
                 std::string values;
-                for (std::string const& v : o.values) values += (values.empty() ? "" : "|") + v;
+                for (std::string const& value : o.values) values += (values.empty() ? "" : "|") + value;
                 type += " (" + values + ")";
             }
-            rows.push_back({"  " + o.name, type, o.type == option_type::file ? "no file by default" : "default " + format_option_value(o.default_value)});
+            lines.push_back({"  " + o.name, type, o.type == option_type::file ? "no file by default" : "default " + format_option_value(o.default_value)});
         }
-        print_columns(rows, out);
+        std::ostringstream text;
+        if (!lines.empty()) print_columns(lines, text);
+        return text.str();
+    });
+    for (auto [deps, title] : {std::pair{&recipe::dependencies, "dependencies"}, std::pair{&recipe::tool_dependencies, "tool dependencies"}}) {
+        section(title, [deps](recipe const& v) {
+            std::vector<std::vector<std::string>> lines;
+            for (recipe_dependency const& d : v.*deps) {
+                // a toolchain names its programs; its library is that of its recipe (recipe-toml.md 13.1)
+                std::string label = d.library;
+                for (std::string const& program : d.library.empty() ? d.programs : std::vector<std::string>{}) label += (label.empty() ? "" : ", ") + program;
+                lines.push_back({"  " + label, d.from_dependency ? std::string{"its dependency's"} : d.version.str(), d.default_recipe.str(),
+                    d.when ? "when " + condition_text(*d.when) : ""});
+            }
+            std::ostringstream text;
+            if (!lines.empty()) print_columns(lines, text);
+            return text.str();
+        });
     }
-    for (auto [deps, title] : {std::pair{&r.dependencies, "dependencies"}, std::pair{&r.tool_dependencies, "tool dependencies"}}) {
-        if (deps->empty()) continue;
-        out << title << " of " << version_text(r) << ":\n";
-        rows.clear();
-        for (recipe_dependency const& d : *deps) {
-            // a toolchain names its programs; its library is that of its recipe (recipe-toml.md 13.1)
-            std::string label = d.library;
-            for (std::string const& program : d.library.empty() ? d.programs : std::vector<std::string>{}) label += (label.empty() ? "" : ", ") + program;
-            rows.push_back({"  " + label, d.from_dependency ? std::string{"its dependency's"} : d.version.str(), d.default_recipe.str(), d.when ? "when " + condition_text(*d.when) : ""});
-        }
-        print_columns(rows, out);
-    }
-    out << "recipe source: " << newest.recipe_source.git << " " << newest.recipe_source.commit
-        << (newest.recipe_source.path.empty() ? "" : " (" + newest.recipe_source.path + ")") << "\n";
+    if (one_source) out << "recipe source: " << newest.recipe_source.git << " " << newest.recipe_source.commit << "\n";
     return 0;
 }
 
@@ -1886,14 +1977,16 @@ int outdated(parsed_command const& cmd, command_context& ctx)
     for (auto [packages, tool] : {std::pair{&current->r.packages, false}, std::pair{&current->r.tool_packages, true}}) {
         for (resolved_package const& pkg : *packages) {
             locked_package const* locked = locked_entry(*current->lock, current->r, pkg, tool);
-            resolved_package const* fresh = tool ? compatible->r.find_tool(pkg.library) : compatible->r.find(pkg.library, pkg.target);
+            // a tool package by its id, which several of one library have (otok-lock.md 5.7), else by its library
+            resolved_package const* fresh = !tool ? compatible->r.find(pkg.library, pkg.target)
+                : compatible->r.find_tool(pkg.id) ? compatible->r.find_tool(pkg.id) : compatible->r.find_tool(pkg.library);
             std::string const now = locked && locked->version ? locked->version->str() + " (r" + std::to_string(locked->revision) + ")" : "-";
             std::string const update = fresh ? version_text(*fresh->chosen.recipe) : "-";
             std::string const latest = latest_of(pkg);
             if (update != now || (latest != "-" && latest != now)) ++behind;
             std::string recipe = recipe_label(pkg.chosen);
             if (!pkg.chosen.deprecation.empty()) recipe += " (" + pkg.chosen.deprecation + ")";
-            rows.push_back({(tool ? "tool " : "") + pkg.id, now, update, latest, recipe});
+            rows.push_back({(tool ? "tool " : "") + package_name(pkg, tool, current->r.tool_packages), now, update, latest, recipe});
         }
     }
     report(diags, ctx.err);
@@ -2610,11 +2703,11 @@ std::span<option_spec const> global_options()
 std::span<command_spec const> command_specs()
 {
     static command_spec const commands[] = {
-        {"install", "", "Resolve the dependencies (keeping locked versions), write otok.lock and fetch the inputs",
+        {"install", "", "Resolve the dependencies (keeping locked versions), write otok.lock, fetch the inputs and build the libraries into the output",
             {build_profile_option, locked_option, offline_option, frozen_option, allow_advisory_option, verbose_option, keep_build_dirs_option, progress_option, no_dev_option}, 0, 0},
         {"update", "[LIBRARY...]", "Move every library (or the named ones) to the newest allowed version, then as install",
             {build_profile_option, offline_option, allow_advisory_option, verbose_option, keep_build_dirs_option, progress_option, no_dev_option, drop_option}, 0, any_number},
-        {"fetch", "", "As install, but fetch the inputs of every package in otok.lock (all profiles)",
+        {"fetch", "", "Resolve and write otok.lock as install does, then fetch the inputs of every package in it (all profiles); build nothing",
             {locked_option, offline_option, frozen_option, allow_advisory_option, no_dev_option}, 0, 0},
         {"tree", "", "Print the resolved graph with versions, recipes, platforms and changed options", {profile_option, offline_option, no_dev_option}, 0, 0},
         {"why", "LIBRARY", "Show who requires a library and who asked for each of its option values", {profile_option, offline_option}, 1, 1},

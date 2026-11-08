@@ -5,7 +5,7 @@ Status: draft.
 Everything otok downloads, unpacks and builds lives in `cache-dir` (`config.md`; macOS
 `~/Library/Caches/otok`). It is shared by every project and every otok process on the machine, and it
 can be deleted at any time: otok fetches and builds again what is missing. Nothing in it is an input
-of its own; every entry is derived from hashed inputs (DESIGN principle 8), which is what makes
+of its own; every entry is derived from hashed inputs (common 1.6), which is what makes
 sharing safe.
 
 ## 1. Layout
@@ -118,8 +118,8 @@ line-ending conversion, no filters (Git LFS), no `export-ignore` or `export-subs
 
 ## 5. Unpacked sources
 
-Each source is unpacked once and kept; every slice gets a fresh copy of it (DESIGN 6.3 "fresh
-inputs"):
+Each source is unpacked once and kept; every slice gets a fresh copy of it (`build-lua-api.md` 2,
+"fresh inputs"):
 
 | Entry | Contents |
 |---|---|
@@ -192,7 +192,7 @@ The work directory is removed afterwards. When the build fails, what it left is 
 `-2`, `-3`, … after a failure within the same second; `<library>-sources-<time>/` when the patches of a delivered
 source fail), and the error names it: the log (`build.log`, `patch.log`) and `key.txt`, the key it was built for;
 with `keep-build-dirs` (`config.md`) or `--keep-build-dirs`, the whole work directory, `key.txt` added. `otok log`
-shows these logs and those of the slices (DESIGN 5.4).
+shows these logs and those of the slices.
 
 ## 8. Cleaning
 
@@ -220,8 +220,7 @@ other otok processes to finish with the cache"), and a process started meanwhile
 
 ## 9. Garbage collection
 
-Entries unused for `cache-max-age` days (`config.md`, default 30) are removed (`docs/PLAN.md`
-decision 21).
+Entries unused for `cache-max-age` days (`config.md`, default 30) are removed.
 
 - **Last use** is the modification time of the entry itself (the directory, or the file in
   `downloads/`). otok sets it to the current time when it uses an entry: found in the cache, copied

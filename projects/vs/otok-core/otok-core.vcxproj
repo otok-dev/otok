@@ -32,6 +32,7 @@
   </ImportGroup>
   <ItemGroup>
     <ClInclude Include="$(OtokRoot)src\otok\builder\builder.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\builder\consumer.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\builder\dev_tree.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\builder\target.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\builder\toolchains.hpp" />
@@ -91,6 +92,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="$(OtokRoot)src\otok\builder\builder.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\builder\consumer.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\builder\dev_tree.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\builder\toolchains.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\cache\inputs.cpp" />

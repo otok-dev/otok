@@ -108,6 +108,23 @@ protected:
         return run_command(*parsed, ctx);
     }
 
+    // install or update of a project none of whose target tables this machine has a target for (none is injected): all but
+    // the build, which ends in the error naming each table (docs/PLAN.md decision 100). 0 when that error, and no other, ends
+    // err, which is left without it; else the exit code (100 for a success).
+    int run_unbuilt(std::vector<std::string> const& args, std::vector<std::string> const& tables = {"apple"})
+    {
+        int const code = run(args);
+        std::string expected = "error: this machine can build none of the target tables of this project:";
+        for (std::string const& t : tables) expected += "\n  '" + t + "': this otok does not build it on this machine";
+        expected += "\n";
+        std::string const text = err.str();
+        if (code != 1 || !text.ends_with(expected)) return code == 0 ? 100 : code;
+        std::string const rest = text.substr(0, text.size() - expected.size());
+        if (rest.find("error:") != std::string::npos) return code;
+        err.str(rest);
+        return 0;
+    }
+
     std::string lock_text() const { return read_file(project.path() / "otok.lock").value_or("<missing>"); }
     std::string dev_file() const { return path_to_utf8(project.path() / "otok.dev.toml"); }
 
@@ -125,14 +142,12 @@ protected:
     std::ostringstream err;
 };
 
-std::string const not_built = "note: this machine cannot build for 'apple'\n";
-
 }
 
 TEST_F(commands, install_writes_the_lock_and_fetches)
 {
-    ASSERT_EQ(run({"install"}), 0) << err.str();
-    EXPECT_EQ(out.str(), "otok.lock created:\n  added a 1.0 (r1)\n  added b 2.0 (r1)\ninputs in the cache: 2 sources\n" + not_built);
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
+    EXPECT_EQ(out.str(), "otok.lock created:\n  added a 1.0 (r1)\n  added b 2.0 (r1)\ninputs in the cache: 2 sources\n");
     // in the order of the hashes
     EXPECT_NE(err.str().find("downloading " + urls["a"] + "\n"), std::string::npos) << err.str();
     EXPECT_NE(err.str().find("downloading " + urls["b"] + "\n"), std::string::npos) << err.str();
@@ -149,8 +164,8 @@ TEST_F(commands, install_writes_the_lock_and_fetches)
     std::string const first = lock_text();
     std::filesystem::remove_all(upstream.path() / "a-1.0.tar.gz");
     std::filesystem::remove_all(upstream.path() / "b-1.0.tar.gz");
-    ASSERT_EQ(run({"install"}), 0) << err.str();
-    EXPECT_EQ(out.str(), "otok.lock is up to date\ninputs in the cache: 2 sources\n" + not_built);
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
+    EXPECT_EQ(out.str(), "otok.lock is up to date\ninputs in the cache: 2 sources\n");
     EXPECT_EQ(err.str(), "");
     EXPECT_EQ(lock_text(), first);
     EXPECT_FALSE(std::filesystem::exists(project.path() / "otok.lock.tmp"));
@@ -171,7 +186,7 @@ TEST_F(commands, fetch_locations_of_the_project)
     EXPECT_NE(err.str().find("no asset-mirror or url-rewrite covers " + urls["a"] + ", and mirrors-only is set"), std::string::npos) << err.str();
     env_vars.clear();
 
-    ASSERT_EQ(run({"install"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
     EXPECT_NE(err.str().find("downloading " + file_url(moved) + "\n"), std::string::npos) << err.str();
     EXPECT_NE(err.str().find("warning: 'mirrors-only' in fetch names 'zzz', which is not a dependency of the project"), std::string::npos) << err.str();
     EXPECT_EQ(read_file(unpacked("a") / "a.c").value_or("?"), "int a;\n");
@@ -187,9 +202,9 @@ TEST_F(commands, locked)
     EXPECT_EQ(run({"install", "--locked"}), 1);
     EXPECT_NE(err.str().find("error: --locked needs otok.lock, and there is none"), std::string::npos) << err.str();
 
-    ASSERT_EQ(run({"install"}), 0) << err.str();
-    EXPECT_EQ(run({"install", "--locked"}), 0) << err.str();
-    EXPECT_EQ(out.str(), "otok.lock is up to date\ninputs in the cache: 2 sources\n" + not_built);
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
+    EXPECT_EQ(run_unbuilt({"install", "--locked"}), 0) << err.str();
+    EXPECT_EQ(out.str(), "otok.lock is up to date\ninputs in the cache: 2 sources\n");
 
     project.write("recipes/b/recipe.toml", recipe_of("b", "2.1", options_of_b));
     std::string const before = lock_text();
@@ -198,7 +213,7 @@ TEST_F(commands, locked)
         std::string::npos) << err.str();
     EXPECT_EQ(lock_text(), before);  // --locked never writes
 
-    ASSERT_EQ(run({"install"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
     EXPECT_NE(out.str().find("otok.lock updated:\n  b: 2.0 (r1) -> 2.1 (r1)\n"), std::string::npos) << out.str();
 }
 
@@ -211,7 +226,7 @@ TEST_F(commands, locked_refuses_local_inputs)
     text.replace(text.find("recipes/b"), 9, outside);
     project.write("otok.toml", text);
 
-    ASSERT_EQ(run({"install"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
     EXPECT_NE(err.str().find("warning: 'b' has local inputs outside the project"), std::string::npos) << err.str();
     EXPECT_EQ(run({"install", "--locked"}), 1);
     EXPECT_NE(err.str().find("error: --locked refuses local inputs outside the project, which cannot be reproduced: 'b'"),
@@ -224,7 +239,7 @@ TEST_F(commands, profiles_fetch_what_they_build)
     project.write("recipes/c/recipe.toml", recipe_of("c", "1.0"));
 
     // the profile builds only for iossim, where c is not built
-    ASSERT_EQ(run({"install", "--profile", "ci"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install", "--profile", "ci"}), 0) << err.str();
     EXPECT_NE(out.str().find("inputs in the cache: 2 sources\n"), std::string::npos) << out.str();
     EXPECT_FALSE(std::filesystem::exists(unpacked("c")));
 
@@ -247,7 +262,7 @@ TEST_F(commands, resources)
         + "[[resource]]\nname = \"data\"\nurl = \"" + data_url + "\"\nsha256 = \"" + abc_sha256 + "\"\nunpack = false\n"
         + "[[resource]]\nname = \"extra\"\nurl = \"" + urls["c"] + "\"\nsha256 = \"" + hashes["c"] + "\"\n"));
 
-    ASSERT_EQ(run({"install"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
     EXPECT_NE(out.str().find("inputs in the cache: 2 sources, 2 resources\n"), std::string::npos) << out.str();
     EXPECT_EQ(read_file(cache.path() / "downloads" / "sha256" / abc_sha256).value_or("?"), "abc");
     EXPECT_FALSE(std::filesystem::exists(cache.path() / "sources" / ("archive-" + abc_sha256)));  // kept packed
@@ -260,10 +275,10 @@ TEST_F(commands, offline)
     EXPECT_NE(err.str().find("error: a 1.0 (r1) source: " + urls["a"] + " is not in the cache (--offline)"), std::string::npos) << err.str();
     EXPECT_NE(err.str().find("error: b 2.0 (r1) source: " + urls["b"] + " is not in the cache (--offline)"), std::string::npos) << err.str();
 
-    ASSERT_EQ(run({"install"}), 0) << err.str();
-    EXPECT_EQ(run({"install", "--offline"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
+    EXPECT_EQ(run_unbuilt({"install", "--offline"}), 0) << err.str();
     EXPECT_EQ(err.str(), "");
-    EXPECT_EQ(run({"install", "--frozen"}), 0) << err.str();
+    EXPECT_EQ(run_unbuilt({"install", "--frozen"}), 0) << err.str();
 
     // an archive downloaded but not unpacked is unpacked offline
     std::filesystem::remove_all(unpacked("a"));
@@ -278,7 +293,7 @@ TEST_F(commands, offline)
 
 TEST_F(commands, refuses_a_contradicting_lock)
 {
-    ASSERT_EQ(run({"install"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
     std::string edited = lock_text();
     edited.replace(edited.find(hashes["b"]), 64, std::string(64, '0'));
     project.write("otok.lock", edited);
@@ -299,9 +314,9 @@ TEST_F(commands, local_sources_keep_the_locked_hash)
     std::string text = manifest_toml;
     text.insert(text.find("[profile.ci]"), "source = { path = \"vendor/b\" }\n");
     project.write("otok.toml", text);
-    ASSERT_EQ(run({"install"}), 0) << err.str();
-    EXPECT_EQ(out.str(), "otok.lock created:\n  added a 1.0 (r1)\n  added b 2.0 (r1)\ninputs in the cache: 1 source\n" + not_built);
-    EXPECT_EQ(run({"install", "--locked"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
+    EXPECT_EQ(out.str(), "otok.lock created:\n  added a 1.0 (r1)\n  added b 2.0 (r1)\ninputs in the cache: 1 source\n");
+    EXPECT_EQ(run_unbuilt({"install", "--locked"}), 0) << err.str();
 
     // the changed directory is found before the build, and the lock is not rewritten
     project.write("vendor/b/b.c", "int b = 2;\n");
@@ -315,30 +330,30 @@ TEST_F(commands, local_sources_keep_the_locked_hash)
     }
     EXPECT_EQ(run({"tree"}), 0) << err.str();  // reads no source
 
-    ASSERT_EQ(run({"update", "b"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"update", "b"}), 0) << err.str();
     EXPECT_NE(out.str().find("otok.lock updated:\n  b: inputs changed\n"), std::string::npos) << out.str();
-    EXPECT_EQ(run({"install", "--locked"}), 0) << err.str();
+    EXPECT_EQ(run_unbuilt({"install", "--locked"}), 0) << err.str();
 }
 
 // otok.dev.toml (otok-dev-toml.md 3): its working trees are fetched nothing, and the lock stays as it was
 TEST_F(commands, dev_working_trees_leave_the_lock)
 {
-    ASSERT_EQ(run({"install"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
     std::string const before = lock_text();
     project.write("work/b/b.c", "int b = 2;\n");
     project.write("work/b/LICENSE", "MIT\n");
     project.write("otok.dev.toml", "[deps.b]\nsource = \"work/b\"\n");
-    ASSERT_EQ(run({"install", "--locked"}), 0) << err.str();
-    EXPECT_EQ(out.str(), "otok.lock is up to date\ninputs in the cache: 1 source\n" + not_built);
-    ASSERT_EQ(run({"install"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install", "--locked"}), 0) << err.str();
+    EXPECT_EQ(out.str(), "otok.lock is up to date\ninputs in the cache: 1 source\n");
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
     EXPECT_EQ(lock_text(), before);
     ASSERT_EQ(run({"tree"}), 0) << err.str();
     EXPECT_EQ(out.str(),
         "a 1.0 (r1) path recipes/a [ios, iossim]\n"
         "└── b 2.0 (r1) path recipes/b [ios, iossim] {shared = true} (dev)\n"
         "b 2.0 (r1) path recipes/b [ios, iossim] {shared = true} (dev) (*)\n");
-    ASSERT_EQ(run({"install", "--no-dev"}), 0) << err.str();
-    EXPECT_EQ(out.str(), "otok.lock is up to date\ninputs in the cache: 2 sources\n" + not_built);
+    ASSERT_EQ(run_unbuilt({"install", "--no-dev"}), 0) << err.str();
+    EXPECT_EQ(out.str(), "otok.lock is up to date\ninputs in the cache: 2 sources\n");
     ASSERT_EQ(run({"tree", "--no-dev"}), 0) << err.str();
     EXPECT_EQ(out.str().find("(dev)"), std::string::npos) << out.str();
 }
@@ -374,26 +389,26 @@ TEST_F(commands, dev_source_replaces_the_manifests)
     std::string text = manifest_toml;
     text.insert(text.find("[profile.ci]"), "source = { path = \"vendor/b\" }\n");
     project.write("otok.toml", text);
-    ASSERT_EQ(run({"install"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
     project.write("vendor/b/b.c", "int b = 2;\n");
     EXPECT_EQ(run({"install", "--locked"}), 1);
     project.write("work/b/b.c", "int b = 3;\n");
     project.write("work/b/LICENSE", "MIT\n");
     project.write("otok.dev.toml", "[deps.b]\nsource = \"work/b\"\n");
-    EXPECT_EQ(run({"install", "--locked"}), 0) << err.str();
+    EXPECT_EQ(run_unbuilt({"install", "--locked"}), 0) << err.str();
 }
 
 // A recipe of otok.dev.toml builds the same graph: another revision does, another default of an option does not.
 TEST_F(commands, dev_recipes_keep_the_graph)
 {
-    ASSERT_EQ(run({"install"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
     std::string const before = lock_text();
     std::string recipe = recipe_of("b", "2.0", options_of_b);
     recipe.replace(recipe.find("revision = 1"), 12, "revision = 2");
     project.write("work/recipe-b/recipe.toml", recipe);
     project.write("otok.dev.toml", "[deps.b]\nrecipe = \"work/recipe-b\"\n");
-    ASSERT_EQ(run({"install", "--locked"}), 0) << err.str();
-    ASSERT_EQ(run({"install"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install", "--locked"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
     EXPECT_EQ(lock_text(), before);
 
     recipe.replace(recipe.find("default = 1"), 11, "default = 2");
@@ -403,7 +418,7 @@ TEST_F(commands, dev_recipes_keep_the_graph)
                          "  'b': options\n"
                          "  'b': options in profile 'ci'\n");
     EXPECT_EQ(lock_text(), before);
-    EXPECT_EQ(run({"install", "--no-dev"}), 0) << err.str();
+    EXPECT_EQ(run_unbuilt({"install", "--no-dev"}), 0) << err.str();
 }
 
 TEST_F(commands, reports_download_errors)
@@ -488,7 +503,7 @@ TEST_F(commands, several_targets)
     EXPECT_NE(lock_text().find("library = \"a\"\ntarget = \"windows\"\nbuild-on = [\"linux/clang-cl\", \"windows/msvc\"]\nrecipe = \"path\"\n"),
         std::string::npos) << lock_text();
     EXPECT_NE(lock_text().find("library = \"b\"\ntarget = \"apple\"\nbuild-on = [\"macos/xcode\"]\n"), std::string::npos) << lock_text();
-    ASSERT_EQ(run({"install", "--locked"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install", "--locked"}, {"apple", "windows"}), 0) << err.str();
 
     ASSERT_EQ(run({"metadata"}), 0) << err.str();
     auto const doc = nlohmann::json::parse(out.str());
@@ -527,10 +542,10 @@ TEST_F(commands, systems_the_project_is_built_on)
 
     // another system of the lock stays; --drop removes it, never this machine's
     project.write("otok.lock", "# Generated by otok. Do not edit.\nformat = 1\nsystems = [\"" + std::min(machine, other) + "\", \"" + std::max(machine, other) + "\"]\n");
-    ASSERT_EQ(run({"install"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install"}, {"apple", "windows"}), 0) << err.str();
     EXPECT_NE(lock_text().find("systems = [\"" + std::min(machine, other) + "\", \"" + std::max(machine, other) + "\"]\n"), std::string::npos) << lock_text();
-    ASSERT_EQ(run({"install", "--locked"}), 0) << err.str();
-    ASSERT_EQ(run({"update", "--drop", other}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install", "--locked"}, {"apple", "windows"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"update", "--drop", other}, {"apple", "windows"}), 0) << err.str();
     EXPECT_NE(out.str().find("removed the system " + other), std::string::npos) << out.str();
     EXPECT_NE(lock_text().find("systems = [\"" + machine + "\"]\n"), std::string::npos) << lock_text();
     EXPECT_EQ(run({"update", "--drop", machine}), 1);
@@ -540,7 +555,7 @@ TEST_F(commands, systems_the_project_is_built_on)
 
     // a lock without this machine's system is out of date for --locked
     project.write("otok.lock", "# Generated by otok. Do not edit.\nformat = 1\nsystems = [\"" + other + "\"]\n");
-    ASSERT_EQ(run({"install"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install"}, {"apple", "windows"}), 0) << err.str();
     std::string const both = "systems = [\"" + std::min(machine, other) + "\", \"" + std::max(machine, other) + "\"]\n";
     EXPECT_NE(lock_text().find(both), std::string::npos) << lock_text();
     project.write("otok.lock", "# Generated by otok. Do not edit.\nformat = 1\nsystems = [\"" + other + "\"]\n");
@@ -568,11 +583,11 @@ TEST_F(commands, why)
 
 TEST_F(commands, update)
 {
-    ASSERT_EQ(run({"install"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
     project.write("recipes/c/recipe.toml", recipe_of("c", "1.0"));
     project.write("otok.toml", manifest_toml + "[deps.c]\nrecipe = { path = \"recipes/c\" }\n");
-    ASSERT_EQ(run({"update", "b"}), 0) << err.str();
-    EXPECT_EQ(out.str(), "otok.lock updated:\n  added c 1.0 (r1)\ninputs in the cache: 3 sources\n" + not_built);
+    ASSERT_EQ(run_unbuilt({"update", "b"}), 0) << err.str();
+    EXPECT_EQ(out.str(), "otok.lock updated:\n  added c 1.0 (r1)\ninputs in the cache: 3 sources\n");
     EXPECT_EQ(err.str(), "downloading " + urls["c"] + "\n");
     EXPECT_EQ(run({"update", "zlib"}), 1);
     EXPECT_NE(err.str().find("error: 'zlib' is not a dependency of this project"), std::string::npos) << err.str();
@@ -580,7 +595,7 @@ TEST_F(commands, update)
 
 TEST_F(commands, clean)
 {
-    ASSERT_EQ(run({"install"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
     std::uintmax_t const downloads = std::filesystem::file_size(upstream.path() / "a-1.0.tar.gz")
         + std::filesystem::file_size(upstream.path() / "b-1.0.tar.gz");
     std::string const where = " in '" + path_to_utf8(cache.path()) + "'\n";
@@ -596,7 +611,7 @@ TEST_F(commands, clean)
     EXPECT_TRUE(std::filesystem::exists(cache.path() / "downloads"));
 
     // a clean cache works as before; the project is not needed
-    ASSERT_EQ(run({"install", "--offline"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install", "--offline"}), 0) << err.str();
     ASSERT_EQ(run({"clean"}), 0) << err.str();
     EXPECT_FALSE(std::filesystem::exists(cache.path() / "downloads"));
     std::filesystem::remove(project.path() / "otok.toml");
@@ -620,12 +635,25 @@ TEST_F(commands, reports_project_errors)
     EXPECT_EQ(run({"tree", "--locked"}), 2);  // tree takes --offline only
 }
 
+// The summaries of help say what the commands do: install builds, fetch only fetches
+TEST_F(commands, help_says_what_install_and_fetch_do)
+{
+    ASSERT_EQ(run({"help", "install"}), 0);
+    EXPECT_NE(out.str().find("Resolve the dependencies (keeping locked versions), write otok.lock, fetch the inputs and build the libraries "
+                             "into the output\n"), std::string::npos) << out.str();
+    ASSERT_EQ(run({"help", "fetch"}), 0);
+    EXPECT_NE(out.str().find("Resolve and write otok.lock as install does, then fetch the inputs of every package in it (all profiles); "
+                             "build nothing\n"), std::string::npos) << out.str();
+    ASSERT_EQ(run({"help"}), 0);
+    EXPECT_NE(out.str().find("then as install"), std::string::npos) << out.str();
+}
+
 TEST_F(commands, collects_unused_cache_entries)
 {
     auto const age = [](std::filesystem::path const& p, int days) {
         std::filesystem::last_write_time(p, std::filesystem::file_time_type::clock::now() - std::chrono::hours{24 * days});
     };
-    ASSERT_EQ(run({"install"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
     EXPECT_TRUE(std::filesystem::exists(cache.path() / "gc-stamp"));  // collected, nothing to remove
     std::filesystem::path const old = cache.path() / "sources" / "archive-old";
     std::filesystem::create_directories(old);
@@ -634,16 +662,16 @@ TEST_F(commands, collects_unused_cache_entries)
     age(unpacked("a"), 40);  // used by the install below
 
     // at most once a day; turned off with 0
-    ASSERT_EQ(run({"install"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
     EXPECT_TRUE(std::filesystem::exists(old));
     age(cache.path() / "gc-stamp", 2);
     env_vars["OTOK_CACHE_MAX_AGE"] = "0";
-    ASSERT_EQ(run({"install"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
     EXPECT_TRUE(std::filesystem::exists(old));
 
     env_vars.clear();
     age(unpacked("a"), 40);
-    ASSERT_EQ(run({"install"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
     EXPECT_NE(out.str().find("removed 1 cache entry unused for 30 days (5 B)\n"), std::string::npos) << out.str();
     EXPECT_FALSE(std::filesystem::exists(old));
     EXPECT_TRUE(std::filesystem::exists(unpacked("a")));
@@ -756,8 +784,8 @@ TEST_F(commands, installs_recipes_from_the_index)
     EXPECT_NE(err.str().find("the recipe 'p/a' of 'a' needs the index: no recipe index: 'index' in config.toml (or OTOK_INDEX) is empty"), std::string::npos) << err.str();
 
     env_vars["OTOK_INDEX"] = file_url(index);
-    ASSERT_EQ(run({"install"}), 0) << err.str();
-    EXPECT_EQ(out.str(), "otok.lock created:\n  added a 1.0 (r1)\n  added b 2.0 (r1)\ninputs in the cache: 2 sources\n" + not_built);
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
+    EXPECT_EQ(out.str(), "otok.lock created:\n  added a 1.0 (r1)\n  added b 2.0 (r1)\ninputs in the cache: 2 sources\n");
     diagnostics d;
     auto lock = parse_lock(lock_text(), "otok.lock", d);
     ASSERT_TRUE(lock.has_value());
@@ -771,8 +799,8 @@ TEST_F(commands, installs_recipes_from_the_index)
     ASSERT_NE(test::locked(*lock, "b"), nullptr);
     EXPECT_EQ(test::locked(*lock, "b")->id.str(), "p/b");
 
-    ASSERT_EQ(run({"install", "--frozen"}), 0) << err.str();
-    EXPECT_EQ(out.str(), "otok.lock is up to date\ninputs in the cache: 2 sources\n" + not_built);
+    ASSERT_EQ(run_unbuilt({"install", "--frozen"}), 0) << err.str();
+    EXPECT_EQ(out.str(), "otok.lock is up to date\ninputs in the cache: 2 sources\n");
 }
 
 // docs/PLAN.md decision 95: the index of config.toml (`default`) and one of the project (otok-toml.md 6.4).
@@ -829,8 +857,8 @@ TEST_F(commands, takes_recipes_from_several_indexes)
 
     // the project chooses, for the dependency of a recipe too; the lock records it
     project.write("otok.toml", head + "[index-of]\n\"p/b\" = \"corp\"\n");
-    ASSERT_EQ(run({"install"}), 0) << err.str();
-    EXPECT_EQ(out.str(), "otok.lock created:\n  added a 1.0 (r1)\n  added b 2.0 (r1)\n  added c 1.0 (r1)\ninputs in the cache: 3 sources\n" + not_built);
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
+    EXPECT_EQ(out.str(), "otok.lock created:\n  added a 1.0 (r1)\n  added b 2.0 (r1)\n  added c 1.0 (r1)\ninputs in the cache: 3 sources\n");
     diagnostics d;
     auto lock = parse_lock(lock_text(), "otok.lock", d);
     ASSERT_TRUE(lock.has_value());
@@ -838,14 +866,14 @@ TEST_F(commands, takes_recipes_from_several_indexes)
     EXPECT_EQ(test::locked(*lock, "b")->index, "corp");
     EXPECT_EQ(test::locked(*lock, "c")->index, "corp");
     EXPECT_NE(lock_text().find("recipe = \"p/b\"\nvariant = \"apple\"\nindex = \"corp\"\n"), std::string::npos) << lock_text();
-    ASSERT_EQ(run({"install", "--locked"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install", "--locked"}), 0) << err.str();
     ASSERT_EQ(run({"tree"}), 0) << err.str();
     EXPECT_NE(out.str().find("p/b (index corp)"), std::string::npos) << out.str();
 
     // choosing the other index changes the lock
     project.write("otok.toml", head + "[index-of]\n\"p/b\" = \"default\"\n");
     EXPECT_EQ(run({"install", "--locked"}), 1);
-    ASSERT_EQ(run({"install"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
     EXPECT_NE(out.str().find("b: index corp -> default"), std::string::npos) << out.str();
     EXPECT_EQ(test::locked(*parse_lock(lock_text(), "otok.lock", d), "b")->index, "");
 
@@ -856,7 +884,7 @@ TEST_F(commands, takes_recipes_from_several_indexes)
 
     // audit reads the advisories of the package's index
     project.write("otok.toml", head + "[index-of]\n\"p/b\" = \"corp\"\n");
-    ASSERT_EQ(run({"install"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
     upstream.write("corp/advisories/2026-0009.toml", "id = \"2026-0009\"\nrecipes = [\"p/b\"]\nversions = [\"2.0\"]\nseverity = \"security\"\n"
                                                     "status = \"confirmed\"\nsummary = \"Leaks.\"\npublished = 2026-11-05T10:00:00Z\n");
     git_in(index["corp"], {"add", "."});
@@ -915,8 +943,8 @@ TEST_F(commands, checks_advisories_and_queries_the_index)
     env_vars["OTOK_INDEX_MIRROR"] = index_arg;
     project.write("otok.toml", "[otok]\nformat = 1\n[apple]\nplatforms = [\"ios\"]\ndeployment = { ios = \"15.0\" }\n"
                                "[deps.a]\nrecipe = \"p/a\"\nversion = \">= 1\"\n");
-    ASSERT_EQ(run({"install"}), 0) << err.str();
-    EXPECT_EQ(out.str(), "otok.lock created:\n  added a 1.1 (r1)\n  added b 2.0 (r1)\ninputs in the cache: 2 sources\n" + not_built);
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
+    EXPECT_EQ(out.str(), "otok.lock created:\n  added a 1.1 (r1)\n  added b 2.0 (r1)\ninputs in the cache: 2 sources\n");
 
     // a withdrawn version stops install, which keeps the lock (index.md 7.1)
     upstream.write("index/advisories/2026-0001.toml", "id = \"2026-0001\"\nrecipes = [\"p/a\"]\nversions = [\"1.1\"]\nseverity = \"withdrawn\"\n"
@@ -926,7 +954,7 @@ TEST_F(commands, checks_advisories_and_queries_the_index)
                              "--allow-advisory=2026-0001 installs it all the same"), std::string::npos) << err.str();
     EXPECT_EQ(run({"audit"}), 1);
     EXPECT_NE(err.str().find("error: a 1.1 (r1) from 'p/a' has advisory 2026-0001 (withdrawn): Builds the wrong thing."), std::string::npos) << err.str();
-    ASSERT_EQ(run({"install", "--allow-advisory=2026-0001"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install", "--allow-advisory=2026-0001"}), 0) << err.str();
     EXPECT_NE(err.str().find("warning: a 1.1 (r1) from 'p/a' has advisory 2026-0001 (withdrawn)"), std::string::npos) << err.str();
 
     // outdated: update would move away from the avoided version
@@ -934,7 +962,7 @@ TEST_F(commands, checks_advisories_and_queries_the_index)
     EXPECT_EQ(out.str(), "library  current   compatible  latest    recipe\n"
                          "a        1.1 (r1)  1.0 (r1)    1.1 (r1)  p/a\n"
                          "b        2.0 (r1)  2.0 (r1)    2.0 (r1)  p/b\n");
-    ASSERT_EQ(run({"update"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"update"}), 0) << err.str();
     EXPECT_NE(out.str().find("a: 1.1 (r1) -> 1.0 (r1)"), std::string::npos) << out.str();
 
     // broken warns; deprecated warns
@@ -944,7 +972,7 @@ TEST_F(commands, checks_advisories_and_queries_the_index)
     EXPECT_EQ(run({"audit"}), 0) << err.str();
     EXPECT_NE(err.str().find("warning: b 2.0 (r1) from 'p/b' has advisory 2026-0002 (broken): Slow."), std::string::npos) << err.str();
     EXPECT_NE(err.str().find("warning: b 2.0 (r1) from 'p/b' is deprecated: unmaintained; use 'q/b' instead"), std::string::npos) << err.str();
-    ASSERT_EQ(run({"install"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
     EXPECT_NE(err.str().find("warning: b 2.0 (r1) from 'p/b' is deprecated: unmaintained; use 'q/b' instead"), std::string::npos) << err.str();
 
     // a refused license
@@ -1009,7 +1037,7 @@ TEST_F(commands, checks_advisories_and_queries_the_index)
     EXPECT_NE(out.str().find("  1.0 (r1)  apple  inputs unavailable since 2026-10-26\n"), std::string::npos) << out.str();
     project.write("otok.toml", "[otok]\nformat = 1\n[apple]\nplatforms = [\"ios\"]\ndeployment = { ios = \"15.0\" }\n"
                                "[deps.a]\nrecipe = \"p/a\"\nversion = \">= 1\"\n");
-    ASSERT_EQ(run({"install", "--allow-advisory=2026-0001"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install", "--allow-advisory=2026-0001"}), 0) << err.str();
     EXPECT_EQ(run({"publish", "--no-build", "--index", "view+https://view.example.com", path_to_utf8(recipes / "a")}), 1);
     EXPECT_EQ(err.str(), "error: the index.toml of the view https://view.example.com names no 'repository' to publish to\n");
     env_vars["OTOK_INDEX_MIRROR"] = path_to_utf8(site);  // a view on disk
@@ -1017,6 +1045,155 @@ TEST_F(commands, checks_advisories_and_queries_the_index)
     ASSERT_EQ(run({"info", "b"}), 0) << err.str();
     EXPECT_EQ(out.str(), "recipes of 'b':\np/b  2.0 (apple)  Test.\n");
     EXPECT_TRUE(requested.empty());
+}
+
+// A tool package's id holds its version (`t@2.0`, otok-lock.md 2): what otok prints calls it by its library, and by its id
+// only beside another tool package of that library (otok-lock.md 5.7), never with the version twice.
+TEST_F(commands, names_tool_packages)
+{
+    auto git = find_git(current_environment());
+    if (!git) GTEST_SKIP() << "git is not in PATH";
+    auto const git_in = [&](std::filesystem::path const& dir, std::vector<std::string> args) {
+        std::vector<std::string> full{"-c", "user.name=otok test", "-c", "user.email=test@otok.invalid", "-c", "core.autocrlf=false"};
+        full.insert(full.end(), args.begin(), args.end());
+        auto done = run_git(*git, full, dir, upstream.path() / "setup.log");
+        EXPECT_TRUE(done.has_value()) << (done ? "" : done.error().message);
+    };
+    target_info const* const native_only[] = {&test::native_info()};
+    targets = native_only;
+    std::filesystem::path const recipes = upstream.path() / "recipes";
+    std::filesystem::path const index = upstream.path() / "index";
+    std::string const index_arg = path_to_utf8(index);
+    auto const publish = [&](std::string const& dir) {
+        git_in(recipes, {"add", "."});
+        git_in(recipes, {"commit", "-q", "-m", dir});
+        ASSERT_EQ(run({"publish", "--no-build", "--no-push", "--index", index_arg, "--publisher", "p", path_to_utf8(recipes / dir)}), 0) << err.str();
+    };
+    upstream.write("index/index.toml", "format = 1\n");
+    git_in(upstream.path(), {"init", "-q", "index"});
+    git_in(index, {"add", "."});
+    git_in(index, {"commit", "-q", "-m", "index"});
+    git_in(index, {"config", "user.name", "otok test"});
+    git_in(index, {"config", "user.email", "test@otok.invalid"});
+    git_in(upstream.path(), {"init", "-q", "recipes"});
+    git_in(recipes, {"remote", "add", "origin", file_url(recipes)});
+    // the tool t in two versions; a needs the newer, b the older
+    auto const tool_recipe = [&](std::string const& version) {
+        return "[recipe]\napi = 1\nlibrary = \"t\"\nname = \"t\"\nversion = \"" + version + "\"\nrevision = 1\nlicense = \"MIT\"\n"
+            "license-files = [\"LICENSE\"]\ndescription = \"Test.\"\n[tool]\nprograms = [\"t\"]\n[source]\n" + source_of("c")
+            + "[platforms]\nsupported = [\"native\"]\nbuild-on = [\"*/cc\"]\n";
+    };
+    auto const native_recipe = [&](std::string const& library, std::string const& toolchain) {
+        std::string text = recipe_of(library, "1.0", "[toolchains]\nt = { version = \"" + toolchain + "\", default-recipe = \"p/t\" }\n");
+        std::string const apple = "supported = [\"ios\", \"iossim\", \"macosx\"]\nbuild-on = [\"macos/xcode\"]\n";
+        return text.replace(text.find(apple), apple.size(), "supported = [\"native\"]\nbuild-on = [\"*/cc\"]\n");
+    };
+    upstream.write("recipes/t/recipe.toml", tool_recipe("1.0"));
+    publish("t");
+    upstream.write("recipes/t/recipe.toml", tool_recipe("2.0"));
+    publish("t");
+    upstream.write("recipes/a/recipe.toml", native_recipe("a", ">= 2"));
+    publish("a");
+    upstream.write("recipes/b/recipe.toml", native_recipe("b", "< 2"));
+    publish("b");
+    env_vars["OTOK_INDEX_MIRROR"] = index_arg;
+
+    std::string const head = "[otok]\nformat = 1\n[native]\nplatforms = [\"native\"]\n[deps.a]\nrecipe = \"p/a\"\nversion = \">= 1\"\n";
+    // one tool package of t: its library
+    project.write("otok.toml", head);
+    ASSERT_EQ(run({"tree"}), 0) << err.str();
+    EXPECT_EQ(out.str(), "a 1.0 (r1) p/a [native]\n└── t 2.0 (r1) p/t (tool) [native]\n");
+    ASSERT_EQ(run({"why", "t"}), 0) << err.str();
+    EXPECT_NE(out.str().find("tool dependency t 2.0 (r1) p/t\n"), std::string::npos) << out.str();
+    ASSERT_EQ(run_unbuilt({"install"}, {"native"}), 0) << err.str();
+    ASSERT_EQ(run({"outdated"}), 0) << err.str();
+    EXPECT_NE(out.str().find("\ntool t   2.0 (r1)  2.0 (r1)    2.0 (r1)  p/t\n"), std::string::npos) << out.str();
+
+    // two: their ids
+    project.write("otok.toml", head + "[deps.b]\nrecipe = \"p/b\"\nversion = \">= 1\"\n");
+    ASSERT_EQ(run({"tree"}), 0) << err.str();
+    EXPECT_EQ(out.str(), "a 1.0 (r1) p/a [native]\n└── t@2.0 (r1) p/t (tool) [native]\n"
+                         "b 1.0 (r1) p/b [native]\n└── t@1.0 (r1) p/t (tool) [native]\n");
+    ASSERT_EQ(run({"why", "t"}), 0) << err.str();
+    EXPECT_NE(out.str().find("tool dependency t@1.0 (r1) p/t\n"), std::string::npos) << out.str();
+    EXPECT_NE(out.str().find("tool dependency t@2.0 (r1) p/t\n"), std::string::npos) << out.str();
+    ASSERT_EQ(run_unbuilt({"install"}, {"native"}), 0) << err.str();
+    ASSERT_EQ(run({"outdated"}), 0) << err.str();
+    // each tool package compared with its own version
+    EXPECT_EQ(out.str(), "library     current   compatible  latest    recipe\n"
+                         "a           1.0 (r1)  1.0 (r1)    1.0 (r1)  p/a\n"
+                         "b           1.0 (r1)  1.0 (r1)    1.0 (r1)  p/b\n"
+                         "tool t@1.0  1.0 (r1)  1.0 (r1)    2.0 (r1)  p/t\n"
+                         "tool t@2.0  2.0 (r1)  2.0 (r1)    2.0 (r1)  p/t\n");
+}
+
+// otok info shows every variant of the newest version (recipe-toml.md 6.1), and options and dependencies per group of
+// variants that have the same
+TEST_F(commands, info_shows_the_variants)
+{
+    auto git = find_git(current_environment());
+    if (!git) GTEST_SKIP() << "git is not in PATH";
+    auto const git_in = [&](std::filesystem::path const& dir, std::vector<std::string> args) {
+        std::vector<std::string> full{"-c", "user.name=otok test", "-c", "user.email=test@otok.invalid", "-c", "core.autocrlf=false"};
+        full.insert(full.end(), args.begin(), args.end());
+        auto done = run_git(*git, full, dir, upstream.path() / "setup.log");
+        EXPECT_TRUE(done.has_value()) << (done ? "" : done.error().message);
+    };
+    targets = all_targets;
+    std::filesystem::path const recipes = upstream.path() / "recipes";
+    std::filesystem::path const index = upstream.path() / "index";
+    std::string const index_arg = path_to_utf8(index);
+    auto const publish = [&](std::string const& dir) {
+        ASSERT_EQ(run({"publish", "--no-build", "--no-push", "--index", index_arg, "--publisher", "p", path_to_utf8(recipes / dir)}), 0) << err.str();
+    };
+    upstream.write("index/index.toml", "format = 1\n");
+    git_in(upstream.path(), {"init", "-q", "index"});
+    git_in(index, {"add", "."});
+    git_in(index, {"commit", "-q", "-m", "index"});
+    git_in(index, {"config", "user.name", "otok test"});
+    git_in(index, {"config", "user.email", "test@otok.invalid"});
+    git_in(upstream.path(), {"init", "-q", "recipes"});
+    git_in(recipes, {"remote", "add", "origin", file_url(recipes)});
+    auto const variant = [](std::string text, std::string const& name) {
+        return text.replace(text.find("description = \"Test.\"\n"), 22, "description = \"Test.\"\nvariant = \"" + name + "\"\n");
+    };
+    // b; c for apple with b and two options, c for native with one
+    upstream.write("recipes/b/recipe.toml", recipe_of("b", "2.0", privacy + options_of_b));
+    upstream.write("recipes/b/PrivacyInfo.xcprivacy", privacy_manifest);
+    upstream.write("recipes/c/apple/recipe.toml", variant(recipe_of("c", "1.0", privacy + options_of_b + "[deps.b]\nversion = \">= 1\"\ndefault-recipe = \"p/b\"\n"), "apple"));
+    upstream.write("recipes/c/apple/PrivacyInfo.xcprivacy", privacy_manifest);
+    std::string native = variant(recipe_of("c", "1.0", "[options.level]\ntype = \"int\"\ndefault = 1\ndoc = \"d\"\n"), "native");
+    std::string const apple_platforms = "supported = [\"ios\", \"iossim\", \"macosx\"]\nbuild-on = [\"macos/xcode\"]\n";
+    native.replace(native.find(apple_platforms), apple_platforms.size(), "supported = [\"native\"]\nbuild-on = [\"*/cc\"]\n");
+    upstream.write("recipes/c/native/recipe.toml", native);
+    git_in(recipes, {"add", "."});
+    git_in(recipes, {"commit", "-q", "-m", "recipes"});
+    publish("b");
+    publish("c/apple");
+    // the same repository written otherwise by another machine's remote: still one source
+    git_in(recipes, {"remote", "set-url", "origin", file_url(recipes) + "/"});
+    publish("c/native");
+    env_vars["OTOK_INDEX_MIRROR"] = index_arg;
+
+    ASSERT_EQ(run({"info", "p/c"}), 0) << err.str();
+    std::string const text = out.str();
+    std::size_t const variants = text.find("variants of 1.0:\n");
+    ASSERT_NE(variants, std::string::npos) << text;
+    std::string const commit = text.substr(text.find("recipe source: ") + 15);
+    EXPECT_EQ(text.substr(variants),
+        "variants of 1.0:\n"
+        "  apple   (r1)  ios, iossim, macosx  macos/xcode  c/apple\n"
+        "  native  (r1)  native               */cc         c/native\n"
+        "options of 1.0 (apple):\n  level   int   default 1\n  shared  bool  default false\n"
+        "options of 1.0 (native):\n  level  int  default 1\n"
+        "dependencies of 1.0 (apple):\n  b  >= 1  p/b\n"
+        "recipe source: " + commit);
+    EXPECT_TRUE(commit.starts_with(file_url(recipes) + " ")) << commit;
+
+    // one variant: the version and revision head the sections, as before
+    ASSERT_EQ(run({"info", "p/b"}), 0) << err.str();
+    EXPECT_NE(out.str().find("variants of 2.0:\n  apple  (r1)  ios, iossim, macosx  macos/xcode  b\noptions of 2.0 (r1):\n"), std::string::npos)
+        << out.str();
 }
 
 // docs/PLAN.md decision 98: an index holding entries and advisories of a newer otok (index.md 3.2, 7.2)
@@ -1057,7 +1234,7 @@ TEST_F(commands, reads_an_index_written_for_a_newer_otok)
     env_vars["OTOK_INDEX_MIRROR"] = index_arg;
     project.write("otok.toml", "[otok]\nformat = 1\n[apple]\nplatforms = [\"ios\"]\ndeployment = { ios = \"15.0\" }\n"
                                "[deps.a]\nrecipe = \"p/a\"\nversion = \">= 1\"\n");
-    ASSERT_EQ(run({"install"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
     EXPECT_NE(out.str().find("added a 1.1 (r1)"), std::string::npos) << out.str();
     std::string const locked = lock_text();
 
@@ -1076,7 +1253,7 @@ TEST_F(commands, reads_an_index_written_for_a_newer_otok)
     ASSERT_EQ(run({"info", "p/a"}), 0) << err.str();
     EXPECT_NE(out.str().find("  1.0 (r1)  apple\n  1.1-r1    apple  needs a newer otok: recipe API 2 needs a newer otok: this one reads API 1\n"),
         std::string::npos) << out.str();
-    ASSERT_EQ(run({"update", "a"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"update", "a"}), 0) << err.str();
     EXPECT_NE(err.str().find("warning: otok.lock has a 1.1 (r1, apple) from 'p/a', which this otok cannot read: "), std::string::npos) << err.str();
     EXPECT_NE(out.str().find("a: 1.1 (r1) -> 1.0 (r1)"), std::string::npos) << out.str();
 
@@ -1145,7 +1322,7 @@ TEST_F(commands, metadata)
     EXPECT_EQ(b["outputs"][0]["package-key"], nullptr);
 
     // after install the lock is current; a changed manifest makes it stale
-    ASSERT_EQ(run({"install"}), 0) << err.str();
+    ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
     j = metadata_of(dir, cache.path(), {}, code);
     EXPECT_EQ(j["project"]["lock"]["state"], "current");
     project.write("otok.toml", manifest_toml + "[deps.c]\nrecipe = { path = \"recipes/c\" }\n");

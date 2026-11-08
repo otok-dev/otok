@@ -55,6 +55,7 @@
     <ClCompile Include="$(OtokRoot)tests\unit\lua_test.cpp" />
     <ClCompile Include="$(OtokRoot)tests\unit\apple_target_test.cpp" />
     <ClCompile Include="$(OtokRoot)tests\unit\builder_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\consumer_test.cpp" />
     <ClCompile Include="$(OtokRoot)tests\unit\host_target_test.cpp" />
     <ClCompile Include="$(OtokRoot)tests\unit\android_target_test.cpp" />
     <ClCompile Include="$(OtokRoot)tests\unit\windows_target_test.cpp" />

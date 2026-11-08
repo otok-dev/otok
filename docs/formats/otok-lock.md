@@ -4,18 +4,18 @@ Status: draft. Common rules are in [README.md](README.md); the manifest in [otok
 
 `otok.lock` is written by otok next to `otok.toml` and committed to the project. It records **what to
 fetch**: for every library the exact recipe, version, revision and the hashes of every input. With it,
-teammates and CI build from exactly the same inputs (DESIGN 5.3).
+teammates and CI build from exactly the same inputs.
 
 It does not record options, platforms, deployment versions or the configuration. Those are computed
 from `otok.toml` (and the selected profile) together with the locked recipes, deterministically, every
 time. This is what lets one lock serve every profile (`otok-toml.md` 8).
 
-It holds the graphs of the systems the project is built on, `systems` (`docs/PLAN.md` decision 88): of each target and
+It holds the graphs of the systems the project is built on, `systems`: of each target and
 environment of the project (`otok-toml.md` 4.9) whose system is one of them or any (`*/ndk`), and the tool graphs of those
 systems (one per environment of a system its tools are built in, `otok-toml.md` 7). `build-on` says where the project may
 be built; the lock, where it is. A machine of a system the lock does not name adds it: `otok install` there resolves its
 graphs too, keeping the locked versions where they qualify, and the lock is committed with them. Which graphs a lock holds
-depends on the lock and the project, never on the machine resolving them (decision 82).
+depends on the lock and the project, never on the machine resolving them.
 
 ## 1. Example
 
@@ -85,10 +85,10 @@ license = "BSD-3-Clause"
 
 | Key | Type | Meaning |
 |---|---|---|
-| `format` | integer | Lock format version; `1`. A lock of another format is a newer otok's: every command reading it fails, saying that it needs a newer otok, and none writes over it (common 1.4). (Drafts before the first release had higher numbers, `docs/PLAN.md` decision 88; such a lock is deleted by hand.) |
-| `systems` | array of `windows`, `linux`, `macos`, sorted | The systems of the machines the project is built on, whose graphs the lock holds (`docs/PLAN.md` decision 88); omitted when empty. `otok install` adds the system of its machine when the project is built on it (an environment of that system or `*`); `otok update --drop <system>` removes one. Without a lock, on a machine the project is not built on, every system is resolved, for `tree`, `audit` and the like. |
+| `format` | integer | Lock format version; `1`. A lock of another format is a newer otok's: every command reading it fails, saying that it needs a newer otok, and none writes over it (common 1.4). (Drafts before the first release had higher numbers; such a lock is deleted by hand.) |
+| `systems` | array of `windows`, `linux`, `macos`, sorted | The systems of the machines the project is built on, whose graphs the lock holds; omitted when empty. `otok install` adds the system of its machine when the project is built on it (an environment of that system or `*`); `otok update --drop <system>` removes one. Without a lock, on a machine the project is not built on, every system is resolved, for `tree`, `audit` and the like. |
 | `package` | array of tables | Libraries built for the target slices (`[deps.*]` and their dependencies), each for the graphs of its `target` and `build-on`. |
-| `tool-package` | array of tables | Libraries built for the tool slice (DESIGN 6.8), each for the tool graphs of its `build-on` (`otok-toml.md` 7). Resolved separately: a library may appear in both arrays with different recipes and versions, and in this one with several versions (5.7). |
+| `tool-package` | array of tables | Libraries built for the tool slice, each for the tool graphs of its `build-on` (`otok-toml.md` 7). Resolved separately: a library may appear in both arrays with different recipes and versions, and in this one with several versions (5.7). |
 
 A **graph** is a target and an environment of a target table of the project (`otok-toml.md` 4.9), or for tools an
 environment of `[otok] tool-build-on` (`otok-toml.md` 3). An entry is in the graphs its `target` and `build-on`
@@ -145,7 +145,7 @@ lock (common 6):
   only real changes.
 - The file is rewritten only when its content changes.
 - A hash mismatch between the lock and a fetched input is an error, never a reason to rewrite the
-  lock: a moved tag or a replaced archive must not pass silently (DESIGN 11, item 1). In every
+  lock: a moved tag or a replaced archive must not pass silently. In every
   command (`install`, `update`, `fetch`, …) this means:
   - a recipe taken from git at the locked commit and path whose tree hash differs from
     `recipe-sha256` is an error;
@@ -167,7 +167,7 @@ same.
 
 The manifest with its fragments (its target tables' `build-on` and `[otok] tool-build-on` give the graphs), every
 profile of the manifest, the index (or the git/path recipes), the advisories, and the current lock (as a preference, and its
-`systems`, 2). Of the machine resolving, its system only, which it adds to `systems` (`docs/PLAN.md` decision 88): the graphs
+`systems`, 2). Of the machine resolving, its system only, which it adds to `systems`: the graphs
 of the other systems of the lock are resolved like its own, whether the machine has their environments or not.
 
 ### 5.2 One graph for all profiles
@@ -201,7 +201,7 @@ it is built in follows from its variant, so the lock does not repeat it.
 
 For each library of the target graphs (tools: 5.7), the chosen version satisfies every constraint on it (project and
 dependents, in any profile and any graph), honors the pre-release rules (common 3.2), is not withdrawn by an advisory, and has a variant
-for every graph the library is in: **one version in every graph** (`docs/PLAN.md` decision 82). Among
+for every graph the library is in: **one version in every graph**. Among
 those, the locked version and revision are kept when they still qualify; otherwise the highest
 version is chosen, with, per variant, its highest revision that is not withdrawn. A version left out because a graph
 has no variant of it is named when resolution fails, with the graph (`1.93.0 (r1): for 'windows' in linux/clang-cl: no
@@ -228,11 +228,11 @@ the edge was ever "seen" active never matters. Exclusive options that receive di
 `recipe-toml.md` 8.1 says.
 
 The computed options and linkages are not stored in the lock; they are recomputed on every run and enter the build
-cache key (`cache-key.md`). `otok tree` and `otok why` show them (DESIGN 5.4).
+cache key (`cache-key.md`). `otok tree` and `otok why` show them.
 
 ### 5.7 Tools
 
-A tool is a detail of the build that uses it (`docs/PLAN.md` decision 87): every tool dependency of a package (its
+A tool is a detail of the build that uses it: every tool dependency of a package (its
 toolchains and `[tool-deps]`, `recipe-toml.md` 10, 13) is resolved for that edge alone, as a graph of its own rooted at
 the edge, holding the tool and what it links (`dependencies`, unified there as in a target graph, one version each) in the
 tool graphs of the system (`otok-toml.md` 7). The tool dependencies of the packages of that graph are edges of their own
@@ -251,7 +251,7 @@ constrains another's.
 ### 5.6 Checks
 
 After resolution: license policy (`otok-toml.md` 9) for every package in either array, advisories
-(DESIGN 7.3), recipe `[apple] xcode` constraints and toolchains (checked before building).
+(`index.md` 7), recipe `[apple] xcode` constraints and toolchains (checked before building).
 
 ## 6. Staleness and updates
 
@@ -269,5 +269,5 @@ version, a machine whose system the project is built on and `systems` does not n
 | `otok update --drop <system>` | as `otok update`, without the graphs of that system, which the lock no longer names (not this machine's) | same |
 
 A version withdrawn by an advisory makes the lock stale, but `install` does not silently replace it:
-it stops with the advisory, unless `--allow-advisory=<id>` is given (DESIGN 7.3), and `otok update`
+it stops with the advisory, unless `--allow-advisory=<id>` is given (`index.md` 7.1), and `otok update`
 moves to another version.

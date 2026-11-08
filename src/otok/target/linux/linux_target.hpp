@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 
+#include "otok/builder/consumer.hpp"
 #include "otok/builder/target.hpp"
 #include "otok/core/process.hpp"
 #include "otok/core/target_info.hpp"
@@ -21,5 +22,13 @@ target_info const& info();
 
 // The target for builds. The compilers are looked up in the PATH of `environment`; its builds get nothing else of it.
 std::unique_ptr<build_target> make_build_target(env_vars environment);
+
+namespace detail {
+
+// What the Linux target adds to otok-config.cmake (otok-toml.md 4.11): the system and the one architecture, `-l<name>` for system
+// libraries, libstdc++ for static libraries of C++.
+consumer_cmake_parts cmake_parts();
+
+}
 
 }

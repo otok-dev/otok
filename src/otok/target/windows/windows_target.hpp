@@ -10,6 +10,7 @@
 #include <string_view>
 #include <vector>
 
+#include "otok/builder/consumer.hpp"
 #include "otok/builder/target.hpp"
 #include "otok/core/process.hpp"
 #include "otok/core/target_info.hpp"
@@ -77,6 +78,18 @@ struct cmake_inputs
 };
 
 std::string cmake_toolchain(cmake_inputs const& in);
+
+// The toolset of MSVC whose CRT a slice was built with, "14.44", from the `toolchain.crt` of its key.txt (cache-key.md 3); empty
+// when it has none.
+std::string crt_of_key(std::string_view key_text);
+
+// What the Windows target adds to otok-config.cmake (otok-toml.md 4.11): the system, the architecture of the generator
+// platform or of the compiler, the toolset of MSVC.
+consumer_cmake_parts cmake_parts(consumer_package const& package);
+
+// otok.props and otok.targets of the output, for projects of Visual Studio (otok-toml.md 4.11).
+std::string msbuild_props(consumer_package const& package);
+std::string msbuild_targets(consumer_package const& package);
 
 }
 

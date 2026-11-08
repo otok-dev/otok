@@ -1,8 +1,15 @@
 # Otok formats
 
-Normative specifications of the files otok reads and writes. [DESIGN.md](../../DESIGN.md) explains
-why; these documents say exactly what. Where they disagree, these documents win and DESIGN.md is
-corrected.
+Normative specifications of the files otok reads and writes. Otok is a dependency manager that builds native
+libraries from source on the user's machine, following recipes published in an index, and hands them to the
+consumer's build. These documents say exactly what each file holds, what it means and how otok checks it, with as
+much of the reason as a reader needs to apply a rule; the principles they rely on are in 1.6. Where other
+descriptions of otok disagree with them, these documents win.
+
+These documents are licensed under the Creative Commons Attribution 4.0 International License
+([LICENSE-CC-BY-4.0.txt](LICENSE-CC-BY-4.0.txt)), not under otok's license, so that other programs may implement
+them and their text may be published with the documentation; their examples may be copied without any condition
+(CC0 1.0).
 
 | Document | File | Written by |
 |---|---|---|
@@ -46,19 +53,19 @@ dependents involved.
 ### 1.4 Format versions
 
 Each format has a version number declared in the file (`[otok] format` in `otok.toml`,
-`[recipe] api` in `recipe.toml`) or implied by the containing file. Rules (DESIGN 5.9):
+`[recipe] api` in `recipe.toml`) or implied by the containing file. Rules:
 
 - Any change after the first public release bumps the number, including additions; there are no
   minor versions.
 - A newer otok reads every older version exactly as it was defined.
 - An otok that does not know a version fails with a message saying that the file needs a newer otok,
   instead of reporting unknown keys. It cannot name the version: which otok brought a format number is known only
-  after it (`docs/PLAN.md` decision 98).
+  after it.
 
 ### 1.5 Data written for a newer otok
 
-What an index holds is read for years by every otok released before it (`docs/PLAN.md` decision 98), so readers of
-the index and of published recipes do not fail on what a newer otok writes:
+What an index holds is read for years by every otok released before it, so readers of the index and of published
+recipes do not fail on what a newer otok writes:
 
 - A version entry this otok cannot read (an unknown `format` or `api`, a library of an unknown version scheme) is
   not there for it, and is an error only when a lock or a constraint needs that version (`index.md` 3).
@@ -69,6 +76,24 @@ the index and of published recipes do not fail on what a newer otok writes:
 
 Everything a person writes (`otok.toml`, `config.toml`, a recipe by `path`, what `otok publish` and index CI check)
 stays strict.
+
+### 1.6 Principles
+
+The formats rely on these rules of otok as a whole:
+
+1. **No prebuilt binaries are distributed.** An index holds recipes and the hashes of their inputs only; everything
+   that runs on the user's machine is readable on the catalog page.
+2. **Project configuration is data.** `otok.toml` is never executed; the logic of a build is in recipes, which are
+   reviewed, versioned and hashed.
+3. **Published versions are immutable.** A version entry pins a recipe commit and the hashes of its inputs and is
+   never edited; a version is withdrawn by an advisory, not by an edit.
+4. **Builds are offline.** otok downloads every input and checks it against its hash before any build; build processes
+   get no network.
+5. **One place for each concern, and machine settings never change what is built.** Everything that changes what is
+   built for a project is in its `otok.toml` (and the files it includes) or in recipes. Machine settings
+   (`config.md`) choose where inputs come from, how many jobs run and which installed toolchain is used (whose own
+   version is part of the cache key); they enter no cache key themselves, and anything that would change the output
+   is accepted only in `otok.toml` or a recipe.
 
 ## 2. Names
 
@@ -89,7 +114,7 @@ Library names contain neither `.` nor uppercase, so they never need quoting as T
 
 ### 3.1 Version strings
 
-A version is the upstream version, verbatim (DESIGN 4.1): one or more characters of
+A version is the upstream version, verbatim: one or more characters of
 `[A-Za-z0-9._+-]`, starting and ending with a letter or digit, at most 64 characters. Examples:
 `3.5.4`, `1.1.1w`, `78.3`, `1.91.0-1`, `2026.10.01`.
 
@@ -135,7 +160,7 @@ operator    = "=" / ">=" / ">" / "<=" / "<" / "~>"
   explicitly: `>= 3`.
 - In the `explicit` scheme only `=` and bare versions are allowed.
 - Pre-releases (`channel = "prerelease"` in the index) match only when the constraint names one with
-  `=` or the dependency sets `prerelease = true` (DESIGN 4.1).
+  `=` or the dependency sets `prerelease = true`.
 
 Examples: `"~> 3.5"`, `"~> 3"`, `">= 3.0, < 3.6"`, `"= 1.92.0.beta1"`, `">= 1.1.1"`.
 
@@ -143,7 +168,7 @@ Examples: `"~> 3.5"`, `"~> 3"`, `">= 3.0, < 3.6"`, `"= 1.92.0.beta1"`, `">= 1.1.
 
 A **target** is a unit of delivery: one output, one way of packaging, one integration with consumers. A
 **platform** is a unit of binary compatibility inside a target: what a binary runs on. Every platform belongs to
-one target. A **build environment** is where and with what a slice is built (4.2). `docs/PLAN.md` decision 82.
+one target. A **build environment** is where and with what a slice is built (4.2).
 
 | Target | Platforms | Environments (4.2) |
 |---|---|---|
@@ -169,20 +194,20 @@ The platforms of `apple`:
 | `xros` | visionOS devices | `arm64` |
 | `xrossim` | visionOS Simulator | `arm64` |
 
-The target `android` (`docs/PLAN.md` decision 56) has one platform, `android`, whose architectures
+The target `android` has one platform, `android`, whose architectures
 are the Android ABIs: `arm64-v8a` (the default), `armeabi-v7a`, `x86_64`, `x86`. Its deployment key
 `android` is the API level.
 
-The target `windows` (`docs/PLAN.md` decisions 75, 82) has one platform, `windows`, with the architectures `x86_64`
+The target `windows` has one platform, `windows`, with the architectures `x86_64`
 (the default) and `arm64`: the MSVC ABI, whether built with MSVC or clang-cl; it has no deployment versions.
 
 The target `linux` has one platform, `linux`, with the architectures `x86_64` (the default) and `arm64`: glibc and
-the GNU C++ runtime of the build machine; it has no deployment versions. (Until decision 82 the development target
-`native` with the platform `native` built for the machine otok ran on; it is gone.)
+the GNU C++ runtime of the build machine; it has no deployment versions. (The development target `native`
+of earlier versions, whose platform `native` built for the machine otok ran on, is gone.)
 
 A slice is `<platform>-<arch>`: `iossim-arm64`, `watchos-arm64_32`, `android-arm64-v8a`, `windows-arm64`,
 `linux-x86_64`.
-Platform names of later targets never change the existing ones (DESIGN 12).
+Platform names of later targets never change the existing ones.
 
 The tables are maintained by the targets, not by the formats: a newer otok may add platforms,
 architectures or environments without a format change, since accepting a new name changes nothing for existing
@@ -220,7 +245,7 @@ and its compiler is the same: `windows/msvc` covers `windows-arm64/msvc`; `*/ndk
 `linux/ndk` does not cover `*/ndk`. A machine **has** an environment it is covered by, when the target finds the
 compiler there.
 
-Each compiler of a target builds libraries of an **ABI**, which the target says (`docs/PLAN.md` decision 91): the
+Each compiler of a target builds libraries of an **ABI**, which the target says: the
 `windows` target's `msvc` and `clang-cl` build MSVC's (one C++ ABI, one CRT), the `linux` target's `gcc` and `clang`
 the system's (glibc and libstdc++). Libraries of one ABI link together whatever compiler built them. An environment
 **substitutes** for another of the same target when its system and architecture are the same and its compiler is
