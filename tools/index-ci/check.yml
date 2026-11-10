@@ -163,7 +163,11 @@ jobs:
           if [ -n "$PUSH_KEY" ]; then
             host=${GITHUB_SERVER_URL#https://}
             printf '%s\n' "$PUSH_KEY" > "$RUNNER_TEMP/push-key" && chmod 600 "$RUNNER_TEMP/push-key"
-            curl -fsSL "$GITHUB_API_URL/meta" | jq -r --arg h "$host" '.ssh_keys[] | "\($h) \(.)"' > "$RUNNER_TEMP/known_hosts"
+            # GitHub's host keys, asked with the token: the API refuses (403) the runners' shared addresses past their limit of
+            # anonymous requests; two commands, so that a failure stops the step here and not at ssh's host key check
+            curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -o "$RUNNER_TEMP/meta.json" "$GITHUB_API_URL/meta"
+            jq -r --arg h "$host" '.ssh_keys[] | "\($h) \(.)"' "$RUNNER_TEMP/meta.json" > "$RUNNER_TEMP/known_hosts"
+            [ -s "$RUNNER_TEMP/known_hosts" ]
             export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/push-key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
             remote="git@$host:$GITHUB_REPOSITORY.git"
           else

@@ -425,10 +425,28 @@ constexpr char const* undefined_symbols_dir = "undefined-symbols";
 // The directory of a package entry listing the external symbols each library defines (otok-toml.md 4.5).
 constexpr char const* defined_symbols_dir = "defined-symbols";
 
+// The categories the privacy manifests in the frameworks of a dynamic library's XCFramework declare (otok-toml.md 4.10):
+// beside Info.plist, in `<name>.framework/` or, versioned, in `Versions/A/Resources/`.
+std::set<std::string> framework_api_categories(fs::path const& xcframework, std::string const& name)
+{
+    std::set<std::string> declared;
+    std::error_code ec;
+    for (auto it = fs::directory_iterator{xcframework, ec}; !ec && it != fs::directory_iterator{}; it.increment(ec)) {
+        fs::path const framework = it->path() / path_from_utf8(name + ".framework");
+        for (fs::path const& plist : {framework / "PrivacyInfo.xcprivacy", framework / "Versions" / "A" / "Resources" / "PrivacyInfo.xcprivacy"}) {
+            auto text = read_file(plist);
+            if (!text) continue;
+            if (auto categories = declared_api_categories(*text)) declared.insert(categories->begin(), categories->end());
+        }
+    }
+    return declared;
+}
+
 // Warnings about the required-reason APIs a package's libraries use and none of the privacy manifests
-// of their products declares (otok-toml.md 4.4).
+// of their products declares (otok-toml.md 4.4): those of the shims, or of a dynamic library's frameworks.
 void check_required_reasons(fs::path const& dir, output_package const& p, std::vector<std::string>& warnings)
 {
+    bool const dynamic = p.linkage == "dynamic";
     for (std::string const& library : p.libraries) {
         auto text = read_file(dir / p.dir / undefined_symbols_dir / path_from_utf8(library + ".txt"));
         if (!text) continue;  // nothing to match
@@ -439,9 +457,15 @@ void check_required_reasons(fs::path const& dir, output_package const& p, std::v
             product_settings const* s = settings_of(prod);
             if (!s || !s->privacy_manifest || std::ranges::find(prod.libraries, library) == prod.libraries.end()) continue;
             manifest = true;
+            if (!manifest_in_shim(prod, dynamic)) continue;  // in the frameworks, read below
             auto plist = read_file(dir / p.dir / "shims" / path_from_utf8(prod.name) / "PrivacyInfo.xcprivacy");
             if (!plist) continue;
             if (auto categories = declared_api_categories(*plist)) declared.insert(categories->begin(), categories->end());
+        }
+        if (dynamic && manifest) {
+            std::string const name = framework_name(p.library, library);
+            std::set<std::string> const in_frameworks = framework_api_categories(dir / p.dir / path_from_utf8(name + ".xcframework"), name);
+            declared.insert(in_frameworks.begin(), in_frameworks.end());
         }
         std::vector<std::string> const undefined = parse_undefined_symbols(*text);
         std::vector<api_use> const uses = undeclared_uses(undefined, builtin_required_reason_apis(), declared);
@@ -644,7 +668,10 @@ public:
         t.strip = x.strip;
         t.nm = x.nm;
         t.install_name_tool = x.install_name_tool;  // @rpath/ install names of dynamic libraries (build-lua-api.md 6.2)
-        t.cflags = {"-target", names->triple, "-isysroot", sdk->path};
+        // the target and the SDK, part of the compiler's command too: libtool links dynamic libraries without -target
+        // (build-lua-api.md 3.1)
+        t.driver_flags = {"-target", names->triple, "-isysroot", sdk->path};
+        t.cflags = t.driver_flags;
         t.ldflags = t.cflags;
         // room for the install names of frameworks, which the target gives dynamic libraries (otok-toml.md 4.10)
         if (slice.linkage == "dynamic") t.ldflags.push_back("-Wl,-headerpad_max_install_names");
@@ -1086,8 +1113,6 @@ public:
         }
         if (auto ok = check_symbol_overlaps(dir, statics); !ok) return ok;
         mixed_linkage(packages, warnings);
-        for (output_package const& p : packages) check_required_reasons(dir, p, warnings);
-        check_private_libraries(dir, packages, deployment, warnings);
         // the source targets: a name is a binary target's, a shim's or a wrapper's (shared by the products
         // of one recipe)
         std::map<std::string, std::string> source_owners;   // target name → what it is
@@ -1228,6 +1253,16 @@ public:
         return {};
     }
 
+    // The required-reason APIs no manifest declares (otok-toml.md 4.4) and the symbols of private system libraries (4.5)
+    std::vector<std::string> output_problems(fs::path const& dir, std::span<output_package const> packages,
+        std::map<std::string, std::string> const& deployment, std::vector<std::string>& warnings) const override
+    {
+        std::vector<std::string> problems;
+        for (output_package const& p : packages) check_required_reasons(dir, p, problems);
+        check_private_libraries(dir, packages, deployment, problems, warnings);
+        return problems;
+    }
+
 private:
     // The framework of a dynamic library for one platform (otok-toml.md 4.10), whose binary is in `contents` already:
     // Info.plist, the privacy manifest, the links of a versioned one, the signature.
@@ -1284,10 +1319,10 @@ private:
         return out;
     }
 
-    // Warnings about libraries that define symbols exported by private system libraries (otok-toml.md 4.5),
-    // read from the text stubs of the SDKs of the output's platforms.
+    // The libraries that define symbols exported by private system libraries (otok-toml.md 4.5), read from the text
+    // stubs of the SDKs of the output's platforms. A stub otok cannot read is a warning: the check is not done.
     void check_private_libraries(fs::path const& dir, std::span<output_package const> packages, std::map<std::string, std::string> const& deployment,
-        std::vector<std::string>& warnings) const
+        std::vector<std::string>& problems, std::vector<std::string>& warnings) const
     {
         std::map<std::string, std::string> owners;  // exported symbol → the private library's name
         for (auto [family, sdk_name] : {std::pair{"ios", "iphoneos"}, std::pair{"macos", "macosx"}, std::pair{"catalyst", "macosx"},
@@ -1321,7 +1356,7 @@ private:
                     std::string list;
                     for (std::size_t i = 0; i < symbols.size() && i < 10; ++i) list += (list.empty() ? "" : ", ") + symbols[i];
                     if (symbols.size() > 10) list += " and " + std::to_string(symbols.size() - 10) + " more";
-                    warnings.push_back("the library '" + library + "' of '" + p.library + "' defines " + std::to_string(symbols.size())
+                    problems.push_back("the library '" + library + "' of '" + p.library + "' defines " + std::to_string(symbols.size())
                         + (symbols.size() == 1 ? " symbol" : " symbols") + " that " + name
                         + " exports, a private system library, and App Store review rejects such an app (ITMS-90338): " + list);
                 }

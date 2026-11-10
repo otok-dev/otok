@@ -866,11 +866,54 @@ TEST(apple_target, warns_of_undeclared_required_reason_apis)
     auto target = target::apple::make_build_target("", {});
     std::vector<std::string> warnings;
 
-    auto ok = target->finish_output(dir.path(), packages, {}, warnings);
-    ASSERT_TRUE(ok) << ok.error().message;
-    EXPECT_EQ(warnings, (std::vector<std::string>{
+    EXPECT_EQ(target->output_problems(dir.path(), packages, {}, warnings), (std::vector<std::string>{
         "the library 'a' of 'p' uses required-reason APIs that no privacy manifest of its products declares: mach_absolute_time "
         "(NSPrivacyAccessedAPICategorySystemBootTime)",
+        "the library 'b' of 'p' uses required-reason APIs that need a privacy manifest, which none of its products has: statfs "
+        "(NSPrivacyAccessedAPICategoryDiskSpace)"}));
+    EXPECT_TRUE(warnings.empty());
+}
+
+TEST(apple_target, reads_the_privacy_manifests_of_dynamic_frameworks)
+{
+    test::temp_dir dir;
+    recipe rec;
+    product declared, silent;
+    declared.name = "A";
+    declared.libraries = {"a", "v"};
+    target::apple::product_settings with_manifest;
+    with_manifest.privacy_manifest = "PrivacyInfo.xcprivacy";
+    declared.target_settings["apple"] = with_manifest;
+    silent.name = "B";
+    silent.libraries = {"b"};
+    std::vector<output_package> packages(1);
+    packages[0] = {"p", &rec, {"a", "v", "b"}, {{&declared, {{"p", "a"}, {"p", "v"}}, {}}, {&silent, {{"p", "b"}}, {}}}, {}, {}, "Packages/p"};
+    packages[0].linkage = "dynamic";
+    dir.write("Packages/p/undefined-symbols/a.txt", "_stat\n");
+    dir.write("Packages/p/undefined-symbols/v.txt", "_stat\n");
+    dir.write("Packages/p/undefined-symbols/b.txt", "_statfs$INODE64\n");
+    std::string const timestamp = "<plist><dict><key>NSPrivacyAccessedAPITypes</key><array><dict>"
+        "<key>NSPrivacyAccessedAPIType</key><string>NSPrivacyAccessedAPICategoryFileTimestamp</string></dict></array></dict></plist>";
+    std::string const nothing = "<plist><dict><key>NSPrivacyAccessedAPITypes</key><array></array></dict></plist>";
+    // as packaging lays them out: a flat framework, and a versioned one (macOS, Mac Catalyst); no manifest in the shim
+    auto const write_manifests = [&](std::string const& text) {
+        dir.write("Packages/p/p_a.xcframework/ios-arm64/p_a.framework/PrivacyInfo.xcprivacy", text);
+        dir.write("Packages/p/p_v.xcframework/macos-arm64_x86_64/p_v.framework/Versions/A/Resources/PrivacyInfo.xcprivacy", text);
+    };
+    auto target = target::apple::make_build_target("", {});
+    std::vector<std::string> warnings;
+
+    write_manifests(timestamp);
+    EXPECT_EQ(target->output_problems(dir.path(), packages, {}, warnings), (std::vector<std::string>{
+        "the library 'b' of 'p' uses required-reason APIs that need a privacy manifest, which none of its products has: statfs "
+        "(NSPrivacyAccessedAPICategoryDiskSpace)"}));
+
+    write_manifests(nothing);
+    EXPECT_EQ(target->output_problems(dir.path(), packages, {}, warnings), (std::vector<std::string>{
+        "the library 'a' of 'p' uses required-reason APIs that no privacy manifest of its products declares: stat "
+        "(NSPrivacyAccessedAPICategoryFileTimestamp)",
+        "the library 'v' of 'p' uses required-reason APIs that no privacy manifest of its products declares: stat "
+        "(NSPrivacyAccessedAPICategoryFileTimestamp)",
         "the library 'b' of 'p' uses required-reason APIs that need a privacy manifest, which none of its products has: statfs "
         "(NSPrivacyAccessedAPICategoryDiskSpace)"}));
 }
@@ -924,11 +967,10 @@ TEST(apple_target, warns_of_symbols_of_private_libraries)
     dir.write("Packages/icu4c/defined-symbols/icuuc.txt", "_my_own\n_ubrk_next\n_unorm_normalize\n");
     auto target = target::apple::make_build_target("", current_environment());
     std::vector<std::string> warnings;
-    auto ok = target->finish_output(dir.path(), packages, {{"ios", "15.0"}}, warnings);
-    ASSERT_TRUE(ok) << ok.error().message;
-    EXPECT_EQ(warnings, (std::vector<std::string>{
+    EXPECT_EQ(target->output_problems(dir.path(), packages, {{"ios", "15.0"}}, warnings), (std::vector<std::string>{
         "the library 'icuuc' of 'icu4c' defines 2 symbols that ICU (libicucore) exports, a private system library, and App Store review "
         "rejects such an app (ITMS-90338): _ubrk_next, _unorm_normalize"}));
+    EXPECT_TRUE(warnings.empty()) << warnings.front();
 }
 #endif
 
@@ -1458,6 +1500,37 @@ TEST(apple_target, installs_a_meson_project)
     ASSERT_TRUE(ran) << ran.error().message;
     EXPECT_TRUE(ran->success()) << read_file(base / "swift.log").value_or("");
     EXPECT_EQ(ran->output, "7\n") << read_file(base / "swift.log").value_or("");
+}
+
+// The driver flags (build-lua-api.md 3.1): the compiler followed by them alone builds for the slice, not for this Mac, as a
+// link through libtool, which drops -target, needs it.
+TEST(apple_target, driver_flags_choose_the_slice)
+{
+    auto target = target::apple::make_build_target("", current_environment());
+    slice_spec const slice{"tvossim", "x86_64", "16.0"};
+    auto profile = target->profile(slice);
+    if (!profile) GTEST_SKIP() << "no Xcode here: " << profile.error().message;
+    slice_toolchain const& t = profile->toolchain;
+    std::string const sdk = profile->target_tables.at("apple").at("sdk_path");
+    EXPECT_EQ(t.driver_flags, (std::vector<std::string>{"-target", "x86_64-apple-tvos16.0-simulator", "-isysroot", sdk}));
+    for (auto const* flags : {&t.cflags, &t.cxxflags, &t.ldflags}) {
+        ASSERT_GE(flags->size(), t.driver_flags.size());
+        EXPECT_TRUE(std::equal(t.driver_flags.begin(), t.driver_flags.end(), flags->begin()));
+    }
+    EXPECT_EQ(t.env.at("CC"), t.cc);  // the bare compiler: otok.autotools adds the flags
+
+    test::temp_dir dir;
+    std::filesystem::path const base = std::filesystem::canonical(dir.path());
+    dir.write("t.c", "int t(void) { return 1; }\n");
+    std::vector<std::string> compile{t.cc};
+    compile.insert(compile.end(), t.driver_flags.begin(), t.driver_flags.end());
+    compile.insert(compile.end(), {"-c", "t.c", "-o", "t.o"});
+    auto compiled = run_process({compile, t.env, base, base / "log"});
+    ASSERT_TRUE(compiled && compiled->success()) << read_file(base / "log").value_or("");
+    auto archived = run_process({{t.ar, "rcs", "libt.a", "t.o"}, t.env, base, base / "log"});
+    ASSERT_TRUE(archived && archived->success()) << read_file(base / "log").value_or("");
+    auto checked = target->check_library(base / "libt.a", slice);
+    EXPECT_TRUE(checked) << checked.error().message;
 }
 
 TEST(apple_target, refuses_libraries_of_other_platforms)

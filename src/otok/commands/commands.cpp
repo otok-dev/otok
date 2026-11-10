@@ -916,6 +916,12 @@ bool build_project(parsed_command const& cmd, project& p, lock_file const& lock,
             return false;
         }
         for (std::string const& w : changes->warnings) ctx.err << "warning: the output '" << ts.output << "': " << w << "\n";
+        // what App Store review would reject: an error of otok publish (otok-toml.md 4.4, 4.5), whose installs are nested
+        for (std::string const& w : changes->problems) {
+            if (ctx.nested) diags.error({}, "the output '" + ts.output + "': " + w);
+            else ctx.err << "warning: the output '" << ts.output << "': " << w << "\n";
+        }
+        if (ctx.nested && !changes->problems.empty()) return false;
         ctx.out << "output '" << ts.output << "': " << changes->copied << " copied, " << changes->unchanged << " unchanged, "
                 << changes->removed << " removed\n";
     }

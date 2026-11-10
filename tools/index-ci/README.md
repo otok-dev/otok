@@ -62,5 +62,14 @@ Publishing tokens write to the repository (`otok publish` makes its branch there
 bypass a ruleset that administrators bypass: administrators are left out of the bypass list and turn the ruleset off
 for their rare changes of the repository's own files.
 
+`check.yml` runs on `pull_request_target`, which GitHub blocks by default in public repositories from December 2, 2026
+(after brownouts before that date; GitHub's "Securely using pull_request_target"). An index on GitHub needs an Actions
+policy (Settings → Actions → Policies, of the organization or of the repository) that targets the index repository and
+allows `pull_request_target` under "Restrict events"; Policy insights shows the runs a policy blocked. Allowing it is
+safe for this workflow: its definition comes from the default branch, it checks out the default branch only, and it
+reads the pull request's head as data (`git fetch refs/pull/<n>/head`), never running anything of it, so
+`allow-unsafe-pr-checkout` of `actions/checkout` is not needed either. A run blocked by a policy never started and
+cannot be re-run: closing and reopening the pull request starts a new one.
+
 GitHub's own merge of a pull request with the default branch is not used: it is not renewed reliably when the default
 branch moves, so `check.yml` merges the pull request's head with the default branch as it is itself.

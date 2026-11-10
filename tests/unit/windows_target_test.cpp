@@ -225,6 +225,7 @@ TEST(windows_target, describes_slices)
     std::vector<std::string> const flags{"--target=x86_64-pc-windows-msvc", "-fuse-ld=lld-link", "-fms-compatibility-version=19.44", "/Brepro", "/Od", "/Z7",
         "/MDd"};
     EXPECT_EQ(p->toolchain.cflags, flags);
+    EXPECT_EQ(p->toolchain.driver_flags, (std::vector<std::string>{"--target=x86_64-pc-windows-msvc"}));  // build-lua-api.md 3.1
     std::vector<std::string> cxxflags = flags;
     cxxflags.push_back("-Wno-register");  // as MSVC
     EXPECT_EQ(p->toolchain.cxxflags, cxxflags);

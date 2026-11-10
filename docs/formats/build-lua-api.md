@@ -110,6 +110,7 @@ A read-only table. Paths are absolute, with `/` as separator on every host.
 | `install_name_tool` | path or empty | Where dynamic libraries need `@rpath/` install names (dynamic `apple` slices, 8): the tool that sets them; empty elsewhere. |
 | `rpath` | string | The `RUNPATH` entry by which a dynamic library finds the other libraries of its slice, in the directory it is in: `$ORIGIN` in dynamic slices of targets whose libraries are ELF shared objects (`linux`), empty elsewhere (macOS has `@rpath/` install names, Windows looks beside the DLL, Android's loader finds an app's libraries by name). The helpers set it (6.2); a recipe that links with its own makefiles sets it itself. |
 | `cflags`, `cxxflags`, `ldflags` | array of strings | Target, sysroot, deployment and reproducibility flags (`-ffile-prefix-map`), then the configuration's (`-O2 -DNDEBUG` / `-O0 -g`; MSVC `/O2 /DNDEBUG /MD` / `/Od /Z7 /MDd`), then in `cxxflags` the C++ standard's (`-std=c++23`, MSVC `/std:c++latest`; `otok-toml.md` 5.1), then the project's (`otok-toml.md` 4.3). |
+| `driver_flags` | array of strings | The flags that choose the machine the compiler builds for, which belong to the compiler's command itself: a build system that passes the compiler only some of `cflags` or `ldflags` still builds for the slice with `cc` or `cxx` followed by them. They are also the first of `cflags` and `cxxflags`, and of `ldflags` when the target gives link flags, so build systems that take the compiler and the flags apart see what they always saw. Android `--target=<triple>` (3.3), Apple `-target <triple> -isysroot <sdk_path>` (3.2), clang-cl `--target=<triple>` (3.4); empty where the compiler builds for the slice without them (`linux`, MSVC). `otok.autotools` and `otok.make` put them into `CC` and `CXX` (6.2). |
 | `env` | table | The environment `otok.run` starts processes with (section 5): `CC`, `CXX`, `AR`, `RANLIB`, `CFLAGS`, `CXXFLAGS`, `LDFLAGS`, `PATH`, … |
 
 ### 3.2 `slice.apple`
@@ -121,6 +122,8 @@ A read-only table. Paths are absolute, with `/` as separator on every host.
 | `min_version` | string | Deployment version for this slice (`"15.0"`). |
 | `version_min_flag` | string | `"-mios-simulator-version-min=15.0"`, for build systems that do not take a triple. |
 
+`slice.toolchain.cflags` and `ldflags` start with `-target <triple> -isysroot <sdk_path>`, the `driver_flags` (3.1).
+
 ### 3.3 `slice.android`
 
 | Field | Type | Meaning |
@@ -130,7 +133,8 @@ A read-only table. Paths are absolute, with `/` as separator on every host.
 | `ndk` | path | The NDK's root, for build systems that need it (`ANDROID_NDK`). |
 
 The triple names the API level as the NDK's compilers do (`aarch64-linux-android24`,
-`armv7a-linux-androideabi24`); `slice.toolchain.cflags` start with `--target=<triple>`. The compilers
+`armv7a-linux-androideabi24`); `slice.toolchain.cflags` and `ldflags` start with `--target=<triple>`, the
+`driver_flags` (3.1). The compilers
 are the NDK's `clang` and `clang++`, the binary tools its `llvm-ar`, `llvm-ranlib`, `llvm-strip`, `llvm-nm`.
 
 ### 3.4 `slice.windows`
@@ -149,7 +153,7 @@ In `windows/msvc` the compilers are `cl.exe`, the archiver `lib.exe` and the lin
 environment (5), with the CRT and the SDK it names.
 
 In `windows/clang-cl` and `linux/clang-cl` the compiler is clang-cl, for C and C++ alike, the archiver llvm-lib (on
-Windows, those of Visual Studio's LLVM or of LLVM's installer, with Visual Studio's CRT and SDK); the flags start with `--target=<triple>`,
+Windows, those of Visual Studio's LLVM or of LLVM's installer, with Visual Studio's CRT and SDK); the flags start with `--target=<triple>` (the `driver_flags`, 3.1),
 `-fuse-ld=lld-link` (for the links clang-cl runs itself: configure's, meson's checks; its default on Linux is GNU ld),
 `-fms-compatibility-version=19.<minor>` of the CRT (the STL checks it) and `/Brepro`; C++ adds `-Wno-register`, as MSVC
 takes `register` in C++17. As vcvars does, the environment has `INCLUDE` (the CRT's
@@ -226,10 +230,10 @@ as `otok.run` does.
 
 | Function | Meaning |
 |---|---|
-| `otok.make{targets…, args, jobs}` | Runs `make` with the given targets. Parallelism comes from the jobserver; `jobs` forces a fixed number. |
+| `otok.make{targets…, args, jobs}` | Runs `make` with the given targets, `CC` and `CXX` with the `driver_flags` (below). Parallelism comes from the jobserver; `jobs` forces a fixed number. |
 | `otok.cmake{source, build, defines, args, generator, targets, install}` | Configures (`source` default `slice.source`, `build` default `slice.build`, generator default `Ninja`) with the slice's toolchain file, `CMAKE_INSTALL_PREFIX = slice.prefix`, `CMAKE_BUILD_TYPE` from the configuration, `BUILD_SHARED_LIBS` from `slice.linkage`, `CMAKE_PREFIX_PATH` and `CMAKE_FIND_ROOT_PATH` set to dependency prefixes, and, after `defines` and `args`, so a recipe cannot turn it off, `FETCHCONTENT_FULLY_DISCONNECTED=ON`: `FetchContent` downloads nothing, and content the project fetches comes from a resource of the recipe through `FETCHCONTENT_SOURCE_DIR_<NAME>` or the configure step fails; then builds `targets` (default all) and installs (`install`, default `true`). `defines` values: strings, numbers, booleans (`ON`/`OFF`). |
-| `otok.autotools{configure, args, autoreconf, targets}` | Runs `configure` (default `./configure`), on a Windows build machine through the `sh.exe` beside the `make` toolchain when it has one (MSYS2's, with the script and the prefix written `/c/…` as MSYS2 names them, and MSYS2's directory in `PATH` after the toolchain's and before Windows' own) with `--host` from the triple, `--build` naming the build machine for a platform whose programs it does not run (Apple: the devices and simulators, as `aarch64-apple-darwin27.0.0`, so configure runs no test program of the slice), `--prefix=slice.prefix`, `--disable-shared --enable-static` (`--enable-shared --disable-static` for `slice.linkage == "dynamic"`), `CPPFLAGS`/`LDFLAGS`/`PKG_CONFIG_PATH` for dependencies; with `autoreconf = true` regenerates it first instead of running the one the source ships; then `make` with `targets` (default `{"install"}`). |
-| `otok.meson{source, build, options, args}` | Configures (`source` default `slice.source`, `build` default `slice.build`) with the slice's machine file (below), `--prefix=slice.prefix`, `--libdir=lib`, `--buildtype=plain`, `--default-library` from `slice.linkage` (`static`/`shared`), `--wrap-mode=nodownload`, `pkg_config_path` and `cmake_prefix_path` set to the dependency prefixes, and `options` as `-D<name>=<value>`; then builds with `ninja` and installs. `options` values: strings, numbers, booleans (`true`/`false`), arrays of strings (joined with commas). |
+| `otok.autotools{configure, args, autoreconf, targets}` | Runs `configure` (default `./configure`), on a Windows build machine through the `sh.exe` beside the `make` toolchain when it has one (MSYS2's, with the script and the prefix written `/c/…` as MSYS2 names them, and MSYS2's directory in `PATH` after the toolchain's and before Windows' own) with `--host` from the triple, `--build` naming the build machine for a platform whose programs it does not run (Apple: the devices and simulators, as `aarch64-apple-darwin27.0.0`, so configure runs no test program of the slice), `--prefix=slice.prefix`, `--disable-shared --enable-static` (`--enable-shared --disable-static` for `slice.linkage == "dynamic"`), `CC` and `CXX` with the `driver_flags` (below), `CPPFLAGS`/`LDFLAGS`/`PKG_CONFIG_PATH` for dependencies; with `autoreconf = true` regenerates it first instead of running the one the source ships; then `make` with `targets` (default `{"install"}`). |
+| `otok.meson{source, build, options, args}` | Configures (`source` default `slice.source`, `build` default `slice.build`) with the slice's machine file (below), `--prefix=slice.prefix` (when the machine file describes a host of POSIX paths and `slice.prefix` has a drive, as in a build for Android on Windows: `--prefix=/` and the install with `--destdir=slice.prefix`, since meson checks the prefix by the host's paths), `--libdir=lib`, `--buildtype=plain`, `--default-library` from `slice.linkage` (`static`/`shared`), `--wrap-mode=nodownload`, `pkg_config_path` and `cmake_prefix_path` set to the dependency prefixes, and `options` as `-D<name>=<value>`; then builds with `ninja` and installs. `options` values: strings, numbers, booleans (`true`/`false`), arrays of strings (joined with commas). |
 | `otok.b2{b2, args, targets}` | Runs Boost's `b2` (the program `b2`, required: usually built by `build_tools` with `bootstrap.sh` and run from `slice.tools.prefix`) in `cwd` (default `slice.source`, Boost's root) with a generated `user-config.jam` for the slice toolchain (below); then the `targets` (default `{"install"}`). |
 | `otok.cmake_toolchain()` | Path of the generated CMake toolchain file for the slice. |
 | `otok.meson_cross_file()` | Path of the slice's generated meson machine file: a cross file, or a native file in slices that are not cross-compiled. |
@@ -282,6 +286,20 @@ targets); `otok.meson` sets the options `cpp_std=c++<n>` and `c_std=c<n>` (with 
 `options` give another; `otok.b2` adds the property `cxxstd=<n>`, and fails when the recipe's `args` have
 another `cxxstd=`. A recipe that chooses a standard itself takes `slice.cxx_standard` or `slice.c_standard`
 when it is set. `otok.autotools`, `otok.make` and `otok.run` have the flags in `CXXFLAGS` and `CFLAGS` only.
+
+The compilers of `otok.autotools` and `otok.make`: `CC` and `CXX` are `slice.toolchain.cc` and `cxx` followed by the
+`driver_flags` (3.1), separated by spaces (`/ndk/clang --target=aarch64-linux-android24`), so a command made of `$(CC)`
+and only some of the flags still builds for the slice. The reason is libtool: its link mode passes the command that
+links a shared library only the compiler flags it knows (`-m*`, `-f*`, `--sysroot=*`, `-isysroot <dir>`, `-stdlib=*`,
+`-fuse-ld=*`, …); `-target <triple>` is not among them in any version, `--target=<triple>` not before libtool 2.6.0, so
+a dynamic library linked with them in `LDFLAGS` alone is linked for the compiler's default machine. A makefile that links
+with `$(CC)` and no `LDFLAGS` would do the same. `otok.autotools` also takes those flags off the start of `CFLAGS`,
+`CXXFLAGS` and `LDFLAGS` that the call does not change, so every command has them once and the compile commands are the
+ones they were with the flags in `CFLAGS` (configure writes both the compilers and the flags into the makefiles);
+`otok.make` keeps them in the flags too, since a makefile may set its own `CC` and take `CFLAGS` from the environment
+alone, and a compiler given the flags twice builds the same. A call whose `env` changes or removes `CC` or `CXX` gets
+neither change: its own compilers, and the flags as the slice gives them. `otok.run` keeps `CC` and `CXX` as
+`slice.toolchain.env` has them, the bare compilers.
 
 Search paths of dynamic libraries: where `slice.toolchain.rpath` is set (`$ORIGIN`), the helpers give
 the libraries they build that `RUNPATH` with their build system's own means, which also escape its

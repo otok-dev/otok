@@ -443,6 +443,67 @@ end
     EXPECT_TRUE(specs[6].env.contains("MAKEFLAGS"));
 }
 
+// The compilers of otok.autotools and otok.make (build-lua-api.md 6.2): with the driver flags, which libtool drops from
+// the links of shared libraries; otok.autotools takes them off the flags; a call's own compilers and flags stay as they are.
+TEST_F(build_script, autotools_puts_the_driver_flags_into_the_compilers)
+{
+    std::string const driver = "-target arm64-apple-ios15.0-simulator -isysroot /sdk";
+    slice.toolchain.cxx = "/usr/bin/clang++";
+    slice.toolchain.driver_flags = {"-target", "arm64-apple-ios15.0-simulator", "-isysroot", "/sdk"};
+    slice.toolchain.env["CXX"] = "/usr/bin/clang++";
+    slice.toolchain.env["CFLAGS"] = driver + " -O2";
+    slice.toolchain.env["CXXFLAGS"] = driver;
+    slice.toolchain.env["LDFLAGS"] = driver + " -Wl,-x";
+    auto out = run(R"(
+function build(slice, options, deps)
+    assert(table.concat(slice.toolchain.driver_flags, " ") == "-target arm64-apple-ios15.0-simulator -isysroot /sdk")
+    assert(slice.toolchain.env.CC == "/usr/bin/clang")
+    otok.autotools{}
+    otok.autotools{ env = { CFLAGS = "-O3 " .. table.concat(slice.toolchain.driver_flags, " ") } }
+    otok.autotools{ env = { CC = "/opt/cc --target=x" } }
+    otok.autotools{ env = { CXX = false } }
+    otok.run{ "tool" }
+    otok.make{ "all" }
+    otok.make{ env = { CC = "/opt/cc" } }
+    return finish(slice)
+end
+)");
+    ASSERT_TRUE(out.has_value()) << out.error().message;
+    ASSERT_EQ(specs.size(), 11u);
+    std::string const ldflags = "-Wl,-x -L" + path("dep/lib");
+    // configure and make: the flags once, in the compilers
+    for (std::size_t i : {0u, 1u}) {
+        EXPECT_EQ(specs[i].env.at("CC"), "/usr/bin/clang " + driver);
+        EXPECT_EQ(specs[i].env.at("CXX"), "/usr/bin/clang++ " + driver);
+        EXPECT_EQ(specs[i].env.at("CFLAGS"), "-O2");
+        EXPECT_FALSE(specs[i].env.contains("CXXFLAGS"));  // nothing but the driver flags
+        EXPECT_EQ(specs[i].env.at("LDFLAGS"), ldflags);
+    }
+    // flags the call gives are its own
+    EXPECT_EQ(specs[2].env.at("CC"), "/usr/bin/clang " + driver);
+    EXPECT_EQ(specs[2].env.at("CFLAGS"), "-O3 " + driver);
+    EXPECT_EQ(specs[2].env.at("LDFLAGS"), ldflags);
+    // a compiler the call gives or removes: neither compiler changes, nor the flags
+    EXPECT_EQ(specs[4].env.at("CC"), "/opt/cc --target=x");
+    EXPECT_EQ(specs[4].env.at("CXX"), "/usr/bin/clang++");
+    EXPECT_EQ(specs[4].env.at("CFLAGS"), driver + " -O2");
+    EXPECT_EQ(specs[4].env.at("CXXFLAGS"), driver);
+    EXPECT_EQ(specs[4].env.at("LDFLAGS"), driver + " " + ldflags);
+    EXPECT_EQ(specs[6].env.at("CC"), "/usr/bin/clang");
+    EXPECT_FALSE(specs[6].env.contains("CXX"));
+    EXPECT_EQ(specs[6].env.at("CFLAGS"), driver + " -O2");
+    // otok.run: the slice's environment
+    EXPECT_EQ(specs[8].env, slice.toolchain.env);
+    // otok.make: the compilers with the flags, which stay in the flags too (a makefile may have its own CC)
+    EXPECT_EQ(specs[9].env.at("CC"), "/usr/bin/clang " + driver);
+    EXPECT_EQ(specs[9].env.at("CXX"), "/usr/bin/clang++ " + driver);
+    EXPECT_EQ(specs[9].env.at("CFLAGS"), driver + " -O2");
+    EXPECT_EQ(specs[9].env.at("CXXFLAGS"), driver);
+    EXPECT_EQ(specs[9].env.at("LDFLAGS"), driver + " -Wl,-x");
+    EXPECT_EQ(specs[10].env.at("CC"), "/opt/cc");
+    EXPECT_EQ(specs[10].env.at("CXX"), "/usr/bin/clang++");
+}
+
 TEST_F(build_script, older_make_inherits_the_jobserver)
 {
     slice.toolchain.env["MAKEFLAGS"] = "-j4 --jobserver-auth=fifo:/tmp/jobserver-1";
@@ -700,6 +761,26 @@ end
     EXPECT_EQ(specs[3].argv[2], path("build/b"));
     EXPECT_EQ(specs[3].argv[3], path("source/sub"));
     EXPECT_EQ(specs[3].env.at("CFLAGS"), "-DMINE");  // given by the call: kept
+
+    // a host of POSIX paths: a prefix with a drive (Windows) is "/" and the destdir of the install
+    specs.clear();
+    slice.meson_system = "android";
+    out = run("function build(slice)\n    otok.meson{}\n    return finish(slice)\nend\n");
+    ASSERT_TRUE(out.has_value()) << out.error().message;
+    ASSERT_EQ(specs.size(), 3u);
+    if (slice.prefix.has_root_name()) {
+        EXPECT_EQ(specs[0].argv[5], "--prefix=/");
+        EXPECT_EQ(specs[2].argv, (std::vector<std::string>{"meson", "install", "-C", path("build"), "--no-rebuild", "--destdir=" + path("prefix")}));
+    } else {
+        EXPECT_EQ(specs[0].argv[5], "--prefix=" + path("prefix"));
+        EXPECT_EQ(specs[2].argv.size(), 5u);
+    }
+    slice.meson_system = "windows";  // a host of Windows paths takes the prefix as it is
+    specs.clear();
+    out = run("function build(slice)\n    otok.meson{}\n    return finish(slice)\nend\n");
+    ASSERT_TRUE(out.has_value()) << out.error().message;
+    EXPECT_EQ(specs[0].argv[5], "--prefix=" + path("prefix"));
+    EXPECT_EQ(specs[2].argv.size(), 5u);
 
     // a native file, dynamic libraries, the target's options, the jobserver
     specs.clear();

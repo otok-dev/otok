@@ -267,6 +267,8 @@ public:
         t.ranlib = n.bin + "/llvm-ranlib" + exe;
         t.strip = n.bin + "/llvm-strip" + exe;
         t.nm = n.bin + "/llvm-nm" + exe;
+        // the target, part of the compiler's command too: libtool links shared objects without it (build-lua-api.md 3.1)
+        t.driver_flags = {"--target=" + p.triple};
         // the NDK's own defaults (build/cmake/flags.cmake), and PIC: static libraries end up in shared objects
         t.cflags = {"--target=" + p.triple, "-DANDROID", "-fPIC", "-fdata-sections", "-ffunction-sections", "-funwind-tables",
             "-fstack-protector-strong", "-no-canonical-prefixes", "-D_FORTIFY_SOURCE=2"};

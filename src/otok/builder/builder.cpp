@@ -1570,6 +1570,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
             meson_machine_file(slice.toolchain, profile->meson_host, pkg_config == slice.toolchains.end() ? "" : path_to_utf8(pkg_config->second),
                 profile->meson_binaries));
         slice.meson_cross = !profile->meson_host.empty();
+        if (auto const system = profile->meson_host.find("system"); system != profile->meson_host.end()) slice.meson_system = system->second;
         slice.meson_options = profile->meson_options;
         slice.autotools_host = profile->autotools_host;
         slice.autotools_build = profile->autotools_build;

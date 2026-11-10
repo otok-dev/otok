@@ -400,6 +400,7 @@ result<output_changes> write_output(fs::path const& dir, build_target const& tar
     }
     if (auto ok = write_file_if_changed(dir / "Acknowledgements.md", acknowledgements_markdown(outputs)); !ok) return std::unexpected{ok.error()};
     if (auto ok = target.finish_output(dir, outputs, deployment, changes.warnings); !ok) return fail("the output '" + name + "': " + ok.error().message);
+    changes.problems = target.output_problems(dir, outputs, deployment, changes.warnings);
     return changes;
 }
 

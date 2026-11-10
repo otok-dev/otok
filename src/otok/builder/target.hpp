@@ -251,6 +251,20 @@ public:
         (void)warnings;
         return {};
     }
+
+    // What App Store review would reject in the output directory `dir`, once finish_output has written it (Apple:
+    // otok-toml.md 4.4, 4.5): warnings of `otok install`, errors of `otok publish`. `deployment` as for finish_output.
+    // What keeps a check from being done (Apple: an SDK's text stub otok cannot read) goes to `warnings`, never failing
+    // publish for otok's own shortcoming.
+    virtual std::vector<std::string> output_problems(std::filesystem::path const& dir, std::span<output_package const> packages,
+        std::map<std::string, std::string> const& deployment, std::vector<std::string>& warnings) const
+    {
+        (void)dir;
+        (void)packages;
+        (void)deployment;
+        (void)warnings;
+        return {};
+    }
 };
 
 // The environment this machine builds a target in (otok-toml.md 4.9): the first of `build_on` that covers the machine

@@ -53,6 +53,7 @@ struct output_changes
     std::size_t unchanged = 0;
     std::size_t removed = 0;
     std::vector<std::string> warnings;      // the target's, about the output
+    std::vector<std::string> problems;      // build_target::output_problems: warnings of install, errors of publish
 };
 
 // The state file otok keeps in an output directory.

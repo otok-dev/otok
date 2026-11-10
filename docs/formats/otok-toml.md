@@ -538,7 +538,8 @@ App Store takes in an app:
 - A product's `apple.privacy-manifest` is `PrivacyInfo.xcprivacy` of the frameworks of its libraries (in `Resources/`
   on macOS), where App Store looks for it, rather than a resource of the product's shim. Two products with different
   manifests holding one dynamic library are an error.
-- The checks of 4.4 and of the private system libraries (4.5) apply as to static libraries. The overlap of symbols
+- The checks of 4.4 and of the private system libraries (4.5) apply as to static libraries; 4.4 reads the manifests
+  of a dynamic library's products from its frameworks, where they are, not from the shims. The overlap of symbols
   (4.5) does not: every dynamic library is an image of its own. A product of a dynamic library holding a static library
   of another recipe is warned of (5).
 - Xcode embeds the frameworks of the products an app links (Embed & Sign). The app's run path holds

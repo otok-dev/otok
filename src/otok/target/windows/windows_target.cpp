@@ -761,6 +761,7 @@ private:
         t.nm = llvm.llvm_nm;
         std::size_t const dot = crt.find('.');
         std::string const minor = crt.substr(dot + 1, crt.find('.', dot + 1) - dot - 1);
+        t.driver_flags = {"--target=" + names.triple};  // as in meson's binaries (build-lua-api.md 3.1)
         t.cflags = {"--target=" + names.triple, "-fuse-ld=lld-link", "-fms-compatibility-version=19." + minor, "/Brepro"};
         std::vector<std::string> const configuration = configuration_flags(debug);
         t.cflags.insert(t.cflags.end(), configuration.begin(), configuration.end());

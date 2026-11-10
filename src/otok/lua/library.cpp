@@ -386,6 +386,34 @@ void msys_before_windows(env_vars& env, fs::path const& dir)
 }
 #endif
 
+// The compilers of otok.make and otok.autotools (build-lua-api.md 6.2): CC and CXX followed by the driver flags, which
+// libtool does not pass on to the links of shared libraries, nor a makefile linking with $(CC) alone; nothing when the
+// call changes or removes CC or CXX. `once`: the flags without them, so every command has them once (otok.autotools,
+// whose configure puts both into the makefiles; a makefile of otok.make may have its own CC and take CFLAGS alone).
+void put_driver_flags(script_env const& e, process_options& o, bool once)
+{
+    slice_toolchain const& t = e.slice.toolchain;
+    if (t.driver_flags.empty()) return;
+    auto const given = [&](std::string const& name) {
+        auto const g = t.env.find(name);
+        auto const now = o.env.find(name);
+        return g != t.env.end() && now != o.env.end() && g->second == now->second;
+    };
+    if (!given("CC") || !given("CXX")) return;
+    std::string driver;
+    for (std::string const& f : t.driver_flags) driver += (driver.empty() ? "" : " ") + f;
+    o.env["CC"] += " " + driver;
+    o.env["CXX"] += " " + driver;
+    if (!once) return;
+    for (std::string const name : {"CFLAGS", "CXXFLAGS", "LDFLAGS"}) {
+        if (!given(name)) continue;
+        std::string& value = o.env[name];
+        if (!value.starts_with(driver) || (value.size() > driver.size() && value[driver.size()] != ' ')) continue;
+        value.erase(0, std::min(value.size(), driver.size() + 1));
+        if (value.empty()) o.env.erase(name);
+    }
+}
+
 int otok_make(lua_State* L)
 {
     luaL_checktype(L, 1, LUA_TTABLE);
@@ -393,6 +421,7 @@ int otok_make(lua_State* L)
     script_env const& e = env_of(L);
     std::string const make = toolchain_program(L, "otok.make", "make");
     process_options o = read_process_options(L, 1, "otok.make");
+    put_driver_flags(e, o, false);
 #ifdef _WIN32
     // the make of MSYS2 runs its rules with the programs beside it (otok.autotools)
     if (fs::path const dir = path_from_utf8(make).parent_path(); fs::is_regular_file(dir / "sh.exe")) msys_before_windows(o.env, dir);
@@ -486,6 +515,7 @@ int otok_autotools(lua_State* L)
     check_keys(L, 1, fn, {"configure", "args", "autoreconf", "targets", "cwd", "env"}, false);
     script_env const& e = env_of(L);
     process_options o = read_process_options(L, 1, fn);
+    put_driver_flags(e, o, true);
     std::string const make = toolchain_program(L, fn, "make");
     bool const autoreconf = bool_field(L, 1, "autoreconf", fn).value_or(false);
     std::string autoreconf_program;
@@ -662,8 +692,13 @@ int otok_meson(lua_State* L)
     auto const build = string_field(L, 1, "build", fn);
     std::string const build_dir = script_path(build ? confined(L, *build, access::write) : e.slice.build);
 
+    // meson checks the prefix by the paths of the host machine (meson 1.12): a prefix with a drive is not absolute for a
+    // host of POSIX paths, so it is "/" and the prefix is the destdir of the install
+    bool const posix_host = e.slice.meson_cross && !e.slice.meson_system.empty() && e.slice.meson_system != "windows" && e.slice.meson_system != "cygwin";
+    bool const destdir = posix_host && e.slice.prefix.has_root_name();
     std::vector<std::string> setup{meson, "setup", build_dir, script_path(source ? confined(L, *source, access::read) : e.slice.source),
-        (e.slice.meson_cross ? "--cross-file=" : "--native-file=") + script_path(e.slice.meson_file), "--prefix=" + script_path(e.slice.prefix),
+        (e.slice.meson_cross ? "--cross-file=" : "--native-file=") + script_path(e.slice.meson_file),
+        "--prefix=" + (destdir ? std::string{"/"} : script_path(e.slice.prefix)),
         "--libdir=lib", "--buildtype=plain", std::string{"--default-library="} + (e.slice.linkage == "dynamic" ? "shared" : "static"),
         "--wrap-mode=nodownload"};
     if (!e.slice.deps.empty()) {
@@ -716,7 +751,9 @@ int otok_meson(lua_State* L)
     std::vector<std::string> compile{ninja, "-C", build_dir};
     std::ranges::copy(parallel_flags(e, o, std::nullopt, ninja, "-j"), std::back_inserter(compile));
     run_command(L, std::move(compile), o, true, false, "compile");
-    run_command(L, {meson, "install", "-C", build_dir, "--no-rebuild"}, o, true, false, "install");
+    std::vector<std::string> install{meson, "install", "-C", build_dir, "--no-rebuild"};
+    if (destdir) install.push_back("--destdir=" + script_path(e.slice.prefix));
+    run_command(L, std::move(install), o, true, false, "install");
 
     // meson install names a Mach-O dynamic library after the place it installs it in, but where the
     // libraries are is the consumer's choice (docs/PLAN.md decision 31): `@rpath/<file>` again, and so

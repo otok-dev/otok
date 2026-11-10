@@ -85,6 +85,8 @@ struct fake_toolchain
     std::vector<std::string> products;          // "<library>.<product>: <libraries>", as packaged
     std::set<std::string> bundled;              // the packages whose data files are to be bundled
     std::optional<std::set<std::string>> system;  // build_target::system_library; none: every library is the system's
+    std::vector<std::string> problems;          // build_target::output_problems
+    std::vector<std::string> unchecked;         // and its warnings: what it could not check
 };
 
 class fake_target final : public build_target
@@ -127,6 +129,13 @@ public:
     }
 
     bool system_library(std::string const& loaded, slice_spec const&) const override { return !t_.system || t_.system->contains(loaded); }
+
+    std::vector<std::string> output_problems(std::filesystem::path const&, std::span<output_package const>,
+        std::map<std::string, std::string> const&, std::vector<std::string>& warnings) const override
+    {
+        warnings.insert(warnings.end(), t_.unchecked.begin(), t_.unchecked.end());
+        return t_.problems;
+    }
 
     // the native output generator: it needs no toolchain
     result<void> make_package(built_package const& p, recipe const& rec, std::span<output_product const> products,
@@ -207,6 +216,7 @@ protected:
             environment};
         ctx.terminal = terminal;
         ctx.tool_roots = tool_roots;
+        ctx.nested = nested;
         ctx.make_build_targets = [this](machine_config const&) {
             std::vector<std::unique_ptr<build_target>> targets;
             targets.push_back(std::make_unique<fake_target>(toolchain));
@@ -247,6 +257,7 @@ protected:
     std::map<std::string, std::string> versions;  // fake program → what its version command prints
     int probes = 0;
     bool tool_roots = false;                    // command_context::tool_roots: the project's [tool-deps] built as roots
+    bool nested = false;                        // command_context::nested: an install of otok publish
     bool with_other = false;                    // the target `other` besides `native` (other_info)
     target_info const* second = &other_info();  // that target
     bool second_built = true;                   // whether this machine has a build target for it
@@ -324,6 +335,32 @@ TEST(machine_environment, is_the_first_the_machine_has)
     e = machine_environment_of(none, {});
     ASSERT_TRUE(e.has_value());
     EXPECT_TRUE(e->compiler.empty());
+}
+
+// What App Store review would reject in the output (build_target::output_problems, otok-toml.md 4.4, 4.5): warnings of
+// otok install, errors of the installs of otok publish
+TEST_F(builder_test, output_problems_warn_install_and_fail_publish)
+{
+    toolchain.problems = {"the library 'a' of 'a' uses required-reason APIs that no privacy manifest of its products declares: stat "
+                          "(NSPrivacyAccessedAPICategoryFileTimestamp)"};
+    ASSERT_EQ(run({"install"}), 0) << err.str();
+    EXPECT_NE(err.str().find("warning: the output 'Otok': the library 'a' of 'a' uses required-reason APIs that no privacy manifest of its "
+        "products declares: stat (NSPrivacyAccessedAPICategoryFileTimestamp)\n"), std::string::npos) << err.str();
+    EXPECT_NE(out.str().find("output 'Otok': "), std::string::npos) << out.str();
+
+    // the install of otok publish
+    nested = true;
+    EXPECT_NE(run({"install"}), 0);
+    EXPECT_NE(err.str().find("error: the output 'Otok': the library 'a' of 'a' uses required-reason APIs that no privacy manifest of its "
+        "products declares: stat (NSPrivacyAccessedAPICategoryFileTimestamp)"), std::string::npos) << err.str();
+    EXPECT_EQ(err.str().find("warning: the output"), std::string::npos) << err.str();
+
+    // a check it could not do stays a warning, of publish too
+    toolchain.problems.clear();
+    toolchain.unchecked = {"cannot read the exports of ICU (libicucore) in the SDK 'iphoneos': it is not a text stub in the YAML format (tbd version 4)"};
+    ASSERT_EQ(run({"install"}), 0) << err.str();
+    EXPECT_NE(err.str().find("warning: the output 'Otok': cannot read the exports of ICU (libicucore) in the SDK 'iphoneos': it is not a text stub in "
+        "the YAML format (tbd version 4)\n"), std::string::npos) << err.str();
 }
 
 // Several target tables: a package of each target, built with the dependencies of its own graph and put in the output of

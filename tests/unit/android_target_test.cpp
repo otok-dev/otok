@@ -172,7 +172,13 @@ TEST(android_target, describes_slices)
     ASSERT_FALSE(c.empty());
     EXPECT_EQ(c.front(), "--target=armv7a-linux-androideabi24");
     for (char const* flag : {"-DANDROID", "-fPIC", "-march=armv7-a", "-mthumb", "-O2", "-DNDEBUG"}) EXPECT_TRUE(contains(c, flag)) << flag;
+    // the target, part of the compiler's command for libtool's links (build-lua-api.md 3.1), and still the first flag
+    EXPECT_EQ(p->toolchain.driver_flags, (std::vector<std::string>{"--target=armv7a-linux-androideabi24"}));
     std::vector<std::string> const& l = p->toolchain.ldflags;
+    ASSERT_FALSE(l.empty());
+    EXPECT_EQ(l.front(), "--target=armv7a-linux-androideabi24");
+    EXPECT_EQ(p->toolchain.cxxflags.front(), "--target=armv7a-linux-androideabi24");
+    EXPECT_EQ(p->toolchain.env.at("CC"), p->toolchain.cc);  // the bare compiler: otok.autotools adds the flags
     EXPECT_TRUE(contains(l, "-Wl,--no-rosegment"));
     EXPECT_TRUE(contains(l, "-static-libstdc++"));
     EXPECT_FALSE(contains(l, "-Wl,-z,max-page-size=16384"));  // 32-bit

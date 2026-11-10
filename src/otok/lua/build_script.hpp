@@ -28,7 +28,10 @@ struct slice_toolchain
     std::string install_name_tool;  // set where dynamic libraries need @rpath/ install names (macOS); empty: none
     std::string rpath;              // the RUNPATH entry of dynamic libraries: "$ORIGIN" on ELF hosts; empty: none
     std::vector<std::string> cflags, cxxflags, ldflags;
-    env_vars env;                                               // what otok.run starts processes with
+    // the flags that choose the machine the compiler builds for, part of its command (build-lua-api.md 3.1): "--target=…";
+    // also the first of cflags, cxxflags and ldflags
+    std::vector<std::string> driver_flags;
+    env_vars env;                                             // what otok.run starts processes with
 };
 
 // One entry of `deps` or `deps.tools` (build-lua-api.md 4).
@@ -85,6 +88,7 @@ struct slice_context
     std::vector<std::string> b2_properties; // "target-os=iphone", …
     std::filesystem::path meson_file;       // the machine file the builder wrote; empty: none
     bool meson_cross = false;               // a cross file, else a native file
+    std::string meson_system;               // `system` of the cross file's host machine: "android"; empty: native
     std::vector<std::string> meson_options; // the target's: "-Db_vscrt=none"
     std::filesystem::path launcher;         // otok, whose jobserver-exec runs b2's compilers; empty: none
 

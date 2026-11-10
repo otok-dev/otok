@@ -194,6 +194,8 @@ void push_slice(lua_State* L, slice_context const& s)
     lua_setfield(L, -2, "cxxflags");
     push_strings(L, s.toolchain.ldflags);
     lua_setfield(L, -2, "ldflags");
+    push_strings(L, s.toolchain.driver_flags);
+    lua_setfield(L, -2, "driver_flags");
     push_map(L, s.toolchain.env, [L](std::string const& v) { lua_pushlstring(L, v.data(), v.size()); });
     lua_setfield(L, -2, "env");
     freeze(L);
