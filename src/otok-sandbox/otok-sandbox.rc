@@ -1,0 +1,11 @@
+// Otok (c) Alexander A Pototskiy
+// SPDX-License-Identifier: GPL-3.0-only WITH AdditionRef-otok-output-exception
+
+// The resources of otok-sandbox.dll: its version (src/otok/core/version_info.rc).
+
+#define OTOK_RC_DESCRIPTION "otok's sandbox for the processes of builds (AppContainer)"
+#define OTOK_RC_NAME "otok-sandbox"
+#define OTOK_RC_FILENAME "otok-sandbox.dll"
+#define OTOK_RC_FILETYPE VFT_DLL
+
+#include "version_info.rc"

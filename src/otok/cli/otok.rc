@@ -1,0 +1,11 @@
+// Otok (c) Alexander A Pototskiy
+// SPDX-License-Identifier: GPL-3.0-only WITH AdditionRef-otok-output-exception
+
+// The resources of otok.exe: its version (src/otok/core/version_info.rc).
+
+#define OTOK_RC_DESCRIPTION "otok, a dependency manager that builds native libraries from source"
+#define OTOK_RC_NAME "otok"
+#define OTOK_RC_FILENAME "otok.exe"
+#define OTOK_RC_FILETYPE VFT_APP
+
+#include "version_info.rc"

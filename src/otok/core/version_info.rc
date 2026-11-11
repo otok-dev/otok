@@ -1,0 +1,42 @@
+// Otok (c) Alexander A Pototskiy
+// SPDX-License-Identifier: GPL-3.0-only WITH AdditionRef-otok-output-exception
+
+// The version resource of otok's Windows binaries, included by src/otok/cli/otok.rc and
+// src/otok-sandbox/otok-sandbox.rc, which define OTOK_RC_DESCRIPTION, OTOK_RC_NAME, OTOK_RC_FILENAME and
+// OTOK_RC_FILETYPE first. otok_version.h is generated from build_info.hpp by both builds (Directory.Build.targets,
+// CMakeLists.txt). Without a version resource, binaries look unfinished to the machine-learning models of some
+// antivirus programs (docs/PLAN.md decision 107).
+
+#include <winver.h>
+
+#include "otok_version.h"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION OTOK_VERSION_MAJOR, OTOK_VERSION_MINOR, OTOK_VERSION_PATCH, 0
+ PRODUCTVERSION OTOK_VERSION_MAJOR, OTOK_VERSION_MINOR, OTOK_VERSION_PATCH, 0
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE OTOK_RC_FILETYPE
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Alexander A Pototskiy"
+            VALUE "FileDescription", OTOK_RC_DESCRIPTION
+            VALUE "FileVersion", OTOK_VERSION_STRING
+            VALUE "InternalName", OTOK_RC_NAME
+            VALUE "LegalCopyright", OTOK_LEGAL_COPYRIGHT
+            VALUE "OriginalFilename", OTOK_RC_FILENAME
+            VALUE "ProductName", "otok"
+            VALUE "ProductVersion", OTOK_VERSION_STRING
+            VALUE "Comments", "https://github.com/otok-dev/otok"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

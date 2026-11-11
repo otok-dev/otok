@@ -21,8 +21,8 @@ using namespace otok;
 TEST(license_headers, every_source_file_has_one)
 {
     std::filesystem::path const root = std::filesystem::path{path_from_utf8(OTOK_TEST_DATA_DIR)}.parent_path().parent_path();
-    static constexpr std::array<std::string_view, 13> extensions{".cpp", ".hpp", ".cmake", ".sh", ".ps1", ".rb", ".cmd", ".yml", ".service",
-        ".html", ".atom", ".js", ".css"};
+    static constexpr std::array<std::string_view, 14> extensions{".cpp", ".hpp", ".rc", ".cmake", ".sh", ".ps1", ".rb", ".cmd", ".yml",
+        ".service", ".html", ".atom", ".js", ".css"};
     // third-party files of the catalog site, under their own licenses (their .LICENSE.txt beside them)
     static constexpr std::array<std::string_view, 2> vendored{"diff.min.js", "minisearch.js"};
     auto const checked = [&](std::filesystem::path const& file) {

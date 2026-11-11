@@ -21,6 +21,7 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <thread>
 
@@ -187,6 +188,55 @@ unsigned long long duplicate_into(HANDLE child, HANDLE handle)
         || !::DuplicateHandle(::GetCurrentProcess(), handle, child, &copy, 0, FALSE, DUPLICATE_SAME_ACCESS))
         return 0;
     return reinterpret_cast<ULONG_PTR>(copy);
+}
+
+// The desktop for the processes of an AppContainer, as `<window station>\<desktop>` for STARTUPINFO, or empty for the
+// one they inherit (open item 36). A window station that is not interactive (session 0: services, PowerShell Direct,
+// SSH) grants nothing to containers, and a process of one ends in user32's initialization (0xC0000142) before it runs;
+// there otok makes a window station and a desktop of its own, open to the user and the container, once per process.
+// Their handles stay open while otok runs. Making the desktop sets the process's window station for a moment; a process
+// another thread starts meanwhile gets otok's, which its user may use too.
+result<std::wstring> container_desktop(PSID container)
+{
+    static std::mutex mutex;
+    static std::optional<result<std::wstring>> made;
+    std::lock_guard const lock{mutex};
+    if (made) return *made;
+    made = [&]() -> result<std::wstring> {
+        HWINSTA const current = ::GetProcessWindowStation();
+        USEROBJECTFLAGS flags{};
+        if (current && ::GetUserObjectInformationW(current, UOI_FLAGS, &flags, sizeof flags, nullptr) && (flags.dwFlags & WSF_VISIBLE))
+            return std::wstring{};
+        std::wstring const user = current_user_sid();
+        std::wstring const sddl = L"D:(A;;GA;;;" + user + L")(A;;GA;;;" + sid_text(container) + L")";
+        PSECURITY_DESCRIPTOR descriptor = nullptr;
+        if (user.empty() || !::ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &descriptor, nullptr))
+            return fail("cannot make a desktop for the sandbox: " + windows_error(::GetLastError()));
+        struct descriptor_guard
+        {
+            PSECURITY_DESCRIPTOR descriptor;
+            ~descriptor_guard() { ::LocalFree(descriptor); }
+        } guard{descriptor};
+        SECURITY_ATTRIBUTES attributes{sizeof attributes, descriptor, FALSE};
+        std::wstring const station_name = L"otok-sandbox-" + std::to_wstring(::GetCurrentProcessId());
+        std::wstring const desktop_name = L"otok-sandbox";
+        HWINSTA const station = ::CreateWindowStationW(station_name.c_str(), 0, WINSTA_ALL_ACCESS, &attributes);
+        if (!station) return fail("cannot make a window station for the sandbox: " + windows_error(::GetLastError()));
+        if (!::SetProcessWindowStation(station)) {
+            DWORD const error = ::GetLastError();
+            ::CloseWindowStation(station);
+            return fail("cannot make a desktop for the sandbox: " + windows_error(error));
+        }
+        HDESK const desktop = ::CreateDesktopW(desktop_name.c_str(), nullptr, nullptr, 0, GENERIC_ALL, &attributes);
+        DWORD const error = ::GetLastError();
+        ::SetProcessWindowStation(current);
+        if (!desktop) {
+            ::CloseWindowStation(station);
+            return fail("cannot make a desktop for the sandbox: " + windows_error(error));
+        }
+        return station_name + L"\\" + desktop_name;
+    }();
+    return *made;
 }
 
 // The broker of the device map (core/virtual_drives) for the processes of an AppContainer, which may not set a map on
@@ -631,6 +681,13 @@ result<void> detail::create_sandboxed_process([[maybe_unused]] sandbox_launch co
     extended.StartupInfo = *static_cast<STARTUPINFOW*>(startup);
     extended.StartupInfo.cb = sizeof extended;
     extended.lpAttributeList = list;
+    std::wstring desktop;
+    if (contained) {
+        auto made = container_desktop(sid.sid);
+        if (!made) return fail(made.error().message + "; build without the sandbox with --no-sandbox");
+        desktop = std::move(*made);
+        if (!desktop.empty()) extended.StartupInfo.lpDesktop = desktop.data();
+    }
     auto const pi = static_cast<PROCESS_INFORMATION*>(information);
     if (!::DetourCreateProcessWithDllExW(program.c_str(), command_line.data(), nullptr, nullptr, TRUE,
             EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | CREATE_SUSPENDED, given.data(), cwd.c_str(),
