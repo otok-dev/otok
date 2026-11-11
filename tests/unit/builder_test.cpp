@@ -37,6 +37,10 @@
 
 using namespace otok;
 
+// Every build of the test process (builder_test, host_target_test, commands_test) skips the check of the sandbox's exits,
+// ~2 s each, one process at a time; sandbox_test tests the check itself. Set before main.
+[[maybe_unused]] static bool const sandbox_exit_checks_skipped = (skip_sandbox_exit_checks(), true);
+
 namespace {
 
 target_info const* const native_targets[] = {&test::native_info()};
@@ -606,7 +610,10 @@ TEST_F(builder_test, reports_failures)
     EXPECT_EQ(run({"install"}), 1);
     std::string const e = err.str();
     EXPECT_NE(e.find("error: b 2.0 for " + slice + ": b/build.lua:3: no luck"), std::string::npos) << e;
-    EXPECT_NE(e.find("the end of the log:\nstep one\n"), std::string::npos) << e;
+    // after the letters of the virtual drives on Windows (cache.md 7.1)
+    std::size_t const tail = e.find("the end of the log:\n");
+    ASSERT_NE(tail, std::string::npos) << e;
+    EXPECT_NE(e.find("step one\n", tail), std::string::npos) << e;
     EXPECT_EQ(e.find("the work directory is kept"), std::string::npos) << e;
     EXPECT_EQ(entries(slices_of("b", "2.0")), 0u);  // nothing half-built in the cache
     EXPECT_EQ(e.find("building a 1.0"), std::string::npos) << e;  // nothing starts after a failure
@@ -1164,16 +1171,17 @@ TEST_F(builder_test, builds_in_the_sandbox)
     env["PATH"] = "/usr/bin:/bin";
     if (auto host = find_host_sandbox({{"PATH", env["PATH"]}}); host.kind == host_sandbox::mechanism::none) GTEST_SKIP() << host.why_not;
 #ifdef __APPLE__
-    std::string const unreachable = "Operation not permitted";
+    std::string const unreachable = "out == 'Operation not permitted'";
 #else
-    std::string const unreachable = "Network is unreachable";
+    // strerror(ENETUNREACH) of perl's C library: glibc's, or musl's (Alpine)
+    std::string const unreachable = "out == 'Network is unreachable' or out == 'Network unreachable'";
 #endif
     std::string const escape = path_to_utf8(std::filesystem::canonical(project.path()) / "escaped.txt");
     write_recipe("b", "2.0",
         build_lua("b",
             "    local out = otok.run({'/usr/bin/perl', '-MIO::Socket::INET', '-e', [[IO::Socket::INET->new(PeerAddr => '192.0.2.1:80', "
             "Timeout => 5) or print \"$!\"]]}, { capture = true })\n"
-            "    assert(out == '" + unreachable + "', out)\n"
+            "    assert(" + unreachable + ", out)\n"
             "    otok.run({'/bin/sh', '-c', 'echo x > \"" + escape + "\"'}, { check = false })\n"),
         options_of_b);
     ASSERT_EQ(run({"install"}), 0) << err.str();
@@ -1223,10 +1231,14 @@ TEST_F(builder_test, builds_without_the_sandbox_when_asked)
 TEST_F(builder_test, refuses_unisolated_builds)
 {
     env["PATH"] = "/nowhere";
+    // two slices at once, both failing alike: the error once
+    project.write("otok.toml", "[otok]\nformat = 1\n[native]\nplatforms = [\"native\"]\nconfigurations = [\"debug\", \"release\"]\n"
+                               "[deps.a]\nrecipe = { path = \"recipes/a\" }\n[deps.b]\nrecipe = { path = \"recipes/b\" }\n");
     EXPECT_EQ(run({"install"}), 1);
-    EXPECT_NE(err.str().find("builds cannot be isolated on this host (bwrap (bubblewrap) was not found in PATH); to build without the "
-                             "sandbox, give --no-sandbox, set OTOK_SANDBOX=0 or 'sandbox = false' in config.toml"),
-        std::string::npos) << err.str();
+    std::string const message = "builds cannot be isolated on this host (bwrap (bubblewrap) was not found in PATH); to build without the "
+                                "sandbox, give --no-sandbox, set OTOK_SANDBOX=0 or 'sandbox = false' in config.toml";
+    EXPECT_NE(err.str().find(message), std::string::npos) << err.str();
+    EXPECT_EQ(err.str().find(message), err.str().rfind(message)) << err.str();
     ASSERT_EQ(run({"install", "--no-sandbox"}), 0) << err.str();
 }
 

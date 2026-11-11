@@ -815,12 +815,24 @@ TEST(recipe, conditions_on_the_architecture_and_the_environment)
 TEST(recipe, a_condition_on_the_build_machine_holds_on_it)
 {
     condition c;
-    c.host = std::vector<std::string>{std::string{host_machine()}};
+    c.host = std::vector<std::string>{host_condition()};
     EXPECT_TRUE(condition_holds(c, {}, "", ""));
     c.host = std::vector<std::string>{"linux-arm64", "windows-arm64"};
-    if (host_machine() != "linux-arm64" && host_machine() != "windows-arm64") {
+    if (host_condition() != "linux-arm64" && host_condition() != "windows-arm64") {
         EXPECT_FALSE(condition_holds(c, {}, "", ""));
     }
+    // a machine on musl holds only its -musl name, one on glibc only the plain one (decision 105)
+    std::string const other = host_libc() == "musl" ? std::string{host_machine()} : std::string{host_machine()} + "-musl";
+    c.host = std::vector<std::string>{other};
+    EXPECT_FALSE(condition_holds(c, {}, "", ""));
+}
+
+TEST(recipe, tests_linux_machines_on_musl)
+{
+    std::string const resource = "[[resource]]\nname = \"r\"\nurl = \"https://example.com/r.tar.gz\"\nsha256 = \"" + std::string(64, 'a') + "\"\n";
+    auto p = parse_with(resource + "when = { host = [\"linux-x86_64-musl\", \"linux-arm64-musl\"] }\n");
+    EXPECT_TRUE(p.r.has_value()) << messages(p.diags);
+    EXPECT_TRUE(parse_with(resource + "when = { host = [\"macos-arm64-musl\"] }\n").reports("'macos-arm64-musl' in 'host' in resource[1].when is not a build machine"));
 }
 
 TEST(recipe, git_source_tags)

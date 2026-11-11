@@ -54,6 +54,7 @@
     <ClInclude Include="$(OtokRoot)src\otok\core\jobserver.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\core\sandbox.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\core\sandbox_windows.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\core\virtual_drives.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\core\license.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\core\names.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\core\option_data.hpp" />
@@ -113,6 +114,7 @@
     <ClCompile Include="$(OtokRoot)src\otok\core\fs.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\core\jobserver.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\core\sandbox.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\core\virtual_drives.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\core\binary.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\core\license.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\core\names.cpp" />

@@ -132,6 +132,25 @@ int run(std::vector<std::string> args)
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
         std::cout << (h != INVALID_HANDLE_VALUE ? std::string{"opened"} : std::to_string(::GetLastError())) << '\n';
         if (h != INVALID_HANDLE_VALUE) ::CloseHandle(h);
+    } else if (command == "final" && args.size() == 2) {
+        // the path GetFinalPathNameByHandleW gives a file (otok-sandbox.dll gives it through a virtual drive)
+        std::filesystem::path const file{std::u8string{args[1].begin(), args[1].end()}};
+        HANDLE const h = ::CreateFileW(file.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+            OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        if (h == INVALID_HANDLE_VALUE) {
+            std::cout << ::GetLastError() << '\n';
+            return 0;
+        }
+        wchar_t final_path[2048];
+        DWORD const n = ::GetFinalPathNameByHandleW(h, final_path, 2048, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+        ::CloseHandle(h);
+        std::cout << (n && n < 2048 ? utf8(std::wstring{final_path, n}) : std::string{"?"}) << '\n';
+    } else if (command == "volume" && args.size() == 2) {
+        // whether GetVolumeInformationW tells of a volume preserving case (perlglob lowercases names otherwise)
+        std::filesystem::path const root{std::u8string{args[1].begin(), args[1].end()}};
+        DWORD flags = 0;
+        if (!::GetVolumeInformationW(root.c_str(), nullptr, 0, nullptr, nullptr, &flags, nullptr, 0)) std::cout << ::GetLastError() << '\n';
+        else std::cout << ((flags & FILE_CASE_PRESERVED_NAMES) ? "preserves case" : "no case") << '\n';
     } else if (command == "semaphore" && args.size() == 2) {
         HANDLE const s = ::OpenSemaphoreW(SEMAPHORE_ALL_ACCESS, FALSE, std::filesystem::path{std::u8string{args[1].begin(), args[1].end()}}.c_str());
         std::cout << (s ? std::string{"opened"} : std::to_string(::GetLastError())) << '\n';

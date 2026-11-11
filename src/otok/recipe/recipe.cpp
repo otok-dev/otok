@@ -827,7 +827,7 @@ std::optional<condition> recipe_reader::when(toml_table& parent, recipe const& r
             for (std::string const& h : c.host.value_or(std::vector<std::string>{})) {
                 if (!is_host_machine(h)) {
                     t->error(t->position("host"), in_quotes(h) + " in " + t->describe("host")
-                        + " is not a build machine: <os>-<arch> of windows, macos, linux and x86_64, arm64");
+                        + " is not a build machine: <os>-<arch> of windows, macos, linux and x86_64, arm64, a Linux one on musl linux-<arch>-musl");
                     ok = false;
                 }
             }

@@ -69,6 +69,7 @@
     <ClCompile Include="$(OtokRoot)tests\unit\hash_test.cpp" />
     <ClCompile Include="$(OtokRoot)tests\unit\jobserver_test.cpp" />
     <ClCompile Include="$(OtokRoot)tests\unit\sandbox_test.cpp" />
+    <ClCompile Include="$(OtokRoot)tests\unit\virtual_drives_test.cpp" />
     <ClCompile Include="$(OtokRoot)tests\unit\binary_test.cpp" />
     <ClCompile Include="$(OtokRoot)tests\unit\license_test.cpp" />
     <ClCompile Include="$(OtokRoot)tests\unit\recipe_test.cpp" />

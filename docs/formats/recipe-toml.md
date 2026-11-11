@@ -200,7 +200,7 @@ Nothing else is downloaded for a build.
 | `url` + `sha256` (+ `mirrors`), or `git` + `commit` | as in 4 | Where it comes from. |
 | `unpack` | boolean | Archive resources: unpack (default `true`) or keep the file as is. |
 | `dest` | path inside the source tree | Optional: place the resource there in every source copy before patching. Without `dest` the resource stays outside the source tree, read-only. |
-| `when` | condition with `option`, `host`, `arch` and `environment` only (9.1) | Without `when` every build uses the resource. An inactive resource is not in `slice.resources` and not in the slice key, and is not fetched when it holds for no slice the configuration could build (its `arch` and `environment` taken as holding); `otok.lock` records every resource all the same (`otok-lock.md` 3), so the lock does not depend on options or on the machine. `host` lets a tool recipe of release binaries fetch only the archive of the build machine: `when = { host = ["windows-x86_64"] }`. |
+| `when` | condition with `option`, `host`, `arch` and `environment` only (9.1) | Without `when` every build uses the resource. An inactive resource is not in `slice.resources` and not in the slice key, and is not fetched when it holds for no slice the configuration could build (its `arch` and `environment` taken as holding); `otok.lock` records every resource all the same (`otok-lock.md` 3), so the lock does not depend on options or on the machine. `host` lets a tool recipe of release binaries fetch only the archive of the build machine: `when = { host = ["windows-x86_64"] }`; for Linux, the one of its C library: `["linux-x86_64"]` (glibc) and `["linux-x86_64-musl"]`. A recipe with no archive for a machine builds the program from source there, finding no resource active (`build-lua-api.md` 3, `slice.host_libc`). |
 
 ## 6. `[platforms]`
 
@@ -358,7 +358,7 @@ A library this recipe links against, built for the same slices.
 | `option` + `is` | the named `enum`, `string` or `int` option equals `is` |
 | `os` | the slice's target is in the array (`["apple"]`); of use in a recipe of several targets (6.1) |
 | `platform` | the slice's platform is in the array (`["ios", "iossim"]`) |
-| `host` | the build machine, the one otok runs on, is in the array: `<os>-<arch>` with `<os>` one of `windows`, `macos`, `linux` and `<arch>` one of `x86_64`, `arm64` (`["macos-arm64", "macos-x86_64"]`). Only in `when` of `[[resource]]` (5) |
+| `host` | the build machine, the one otok runs on, is in the array: `<os>-<arch>` with `<os>` one of `windows`, `macos`, `linux` and `<arch>` one of `x86_64`, `arm64` (`["macos-arm64", "macos-x86_64"]`); a Linux machine whose C library is musl (Alpine) is `linux-<arch>-musl` (`"linux-x86_64-musl"`), and `linux-<arch>` is one of glibc, so that a release binary built for glibc is never fetched where it cannot run. Only in `when` of `[[resource]]` (5) |
 | `arch` | the slice's architecture is in the array (`["arm64"]`, Android's `["arm64-v8a"]`). Only in `when` of `[[resource]]` (5) and `[toolchains]` (13), not under `not` |
 | `environment` | an environment in the array covers the slice's (common 4.2, as `build-on` does): `["windows/msvc"]`, `["*/ndk"]`. Only in `when` of `[[resource]]` (5) and `[toolchains]` (13), not under `not` |
 | `not` | the condition it holds (a table of these keys) does not hold: `{ not = { option = "data-filter" } }` |

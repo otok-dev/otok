@@ -56,6 +56,7 @@ struct slice_context
     // The build environment (build-lua-api.md 3): "linux/clang-cl", the machine "linux-x86_64" and the compiler "clang-cl";
     // empty in a slice of a target without environments, and then nil in `slice`
     std::string environment, host, compiler;
+    std::string host_libc;       // "glibc" or "musl" on a Linux build machine, nil in `slice` elsewhere (decision 105)
     std::string triple;          // "arm64-apple-ios15.0-simulator"
     std::string configuration = "release";
     std::string linkage = "static";  // "dynamic" (build-lua-api.md 3)

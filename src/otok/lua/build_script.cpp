@@ -10,6 +10,7 @@
 #include <lauxlib.h>
 #include <lua.h>
 
+#include "otok/core/virtual_drives.hpp"
 #include "otok/lua/library.hpp"
 #include "otok/lua/state.hpp"
 
@@ -153,6 +154,7 @@ void push_slice(lua_State* L, slice_context const& s)
     if (!s.environment.empty()) {
         set_string(L, "environment", s.environment);
         set_string(L, "host", s.host);
+        if (!s.host_libc.empty()) set_string(L, "host_libc", s.host_libc);
         set_string(L, "compiler", s.compiler);
     }
     set_string(L, "triple", s.triple);
@@ -287,7 +289,7 @@ private:
         auto p = lua_detail::confine(env_, given, lua_detail::access::read);
         if (!p) return fail(label_ + ": " + what + ": " + p.error().message);
         std::error_code ec;
-        fs::path const prefix = fs::weakly_canonical(env_.slice.prefix, ec);
+        fs::path const prefix = virtual_drives::to_virtual(fs::weakly_canonical(env_.slice.prefix, ec));
         auto const [r, q] = std::mismatch(prefix.begin(), prefix.end(), p->begin(), p->end());
         if (r != prefix.end()) return fail(label_ + ": " + what + " '" + given + "' is not inside slice.prefix");
         if (!fs::exists(*p, ec)) return fail(label_ + ": " + what + " '" + given + "' does not exist");

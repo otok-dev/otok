@@ -4,6 +4,7 @@
 #pragma once
 
 #include <compare>
+#include <filesystem>
 #include <optional>
 #include <span>
 #include <string>
@@ -17,8 +18,19 @@ namespace otok {
 std::span<std::string_view const> host_systems() noexcept;
 std::span<std::string_view const> host_architectures() noexcept;
 
-// `<system>-<arch>`: "macos-arm64".
+// `<system>-<arch>`: "macos-arm64"; a Linux machine on musl `linux-<arch>-musl` (recipe-toml.md 9.1).
 bool is_host_machine(std::string_view s) noexcept;
+
+// The C library of a Linux machine whose root is `root` (docs/PLAN.md decision 105): "musl" when it has musl's
+// dynamic loader (`lib/ld-musl-*.so.1`) and none of glibc's, as Alpine; else "glibc", also where both are (Debian's
+// package musl).
+std::string_view libc_of_root(std::filesystem::path const& root);
+
+// The C library of this machine: libc_of_root("/") on Linux, found once; empty elsewhere.
+std::string_view host_libc();
+
+// This machine as `when = { host = … }` names it: host_machine(), with "-musl" on a Linux machine on musl.
+std::string const& host_condition();
 
 struct build_environment
 {

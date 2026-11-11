@@ -20,8 +20,14 @@
 //  11. otok's jobserver semaphore, made in the session's namespace and granted to the container, found there;
 //  12. TEMP, TMP and LOCALAPPDATA, which CreateProcess rewrites for a container process, set back;
 //  13. an ALPC client asking its server to be the user (cl /Zi /FS and mspdbsrv) asked again for the user in this
-//      container, for the ports of the container's own RPC Control.
-// The DLL passes itself and the payload (otok/core/sandbox_windows.hpp) to every child through CreateProcessW/A.
+//      container, for the ports of the container's own RPC Control;
+//  14. otok's device map (otok/core/virtual_drives: short letters for the cache and the work directories), which is not
+//      inherited, set on every child before it runs: by the DLL itself outside a container, by otok's broker in one,
+//      where a process may not set it;
+//  15. GetFinalPathNameByHandleW giving a path under a virtual drive's directory through the letter, as the build named it
+//      (realpath of Python, CMake, LLVM).
+// The DLL passes itself and the payload (otok/core/sandbox_windows.hpp) to every child through CreateProcessW/A. Without a
+// container in the payload (sandbox = false) it does 14 and 15 alone.
 
 #include <windows.h>
 #include <winternl.h>
@@ -625,6 +631,9 @@ DWORD WINAPI hook_query_dos_device_w(LPCWSTR name, LPWSTR buffer, DWORD size)
     return result;
 }
 
+using nt_set_information_process_t = NTSTATUS(NTAPI*)(HANDLE, ULONG, PVOID, ULONG);
+nt_set_information_process_t real_nt_set_information_process;  // not hooked: what hook 14 calls
+
 // --- children --------------------------------------------------------------------------------------------------------
 
 // Duplicates `handle` into the child: its value there, 0 for none.
@@ -635,6 +644,26 @@ unsigned long long duplicate_into(HANDLE child, unsigned long long handle)
                        0, FALSE, DUPLICATE_SAME_ACCESS))
         return 0;
     return reinterpret_cast<ULONG_PTR>(copy);
+}
+
+// The device map of a new suspended child (hook 14): set here outside a container; in one, by otok's broker, to which
+// the handle's value is sent.
+void give_map(HANDLE child)
+{
+    if (the_payload.map_directory) {
+        HANDLE directory = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(the_payload.map_directory));
+        if (NTSTATUS const status = real_nt_set_information_process(child, 23 /* ProcessDeviceMap */, &directory, sizeof directory); status < 0)
+            write_log(L"device-map", L"", status);
+        return;
+    }
+    if (!the_payload.map_pipe[0]) return;
+    unsigned long long request = reinterpret_cast<ULONG_PTR>(child);
+    LONG reply = 0;
+    DWORD got = 0;
+    if (!::CallNamedPipeW(the_payload.map_pipe, &request, sizeof request, &reply, sizeof reply, &got, 10000) || got != sizeof reply)
+        write_log(L"device-map-broker", L"", static_cast<NTSTATUS>(HRESULT_FROM_WIN32(::GetLastError())));
+    else if (reply < 0)
+        write_log(L"device-map", L"", reply);
 }
 
 // Gives a new suspended child its copy of the payload, then lets it run unless its creator wanted it suspended.
@@ -650,8 +679,10 @@ void after_create(DWORD flags, LPPROCESS_INFORMATION pi, wchar_t const* intended
     for (int i = 0; i < 26; ++i) copy.roots[i] = duplicate_into(pi->hProcess, the_payload.roots[i]);
     for (unsigned i = 0; i < the_payload.ancestor_count && i < max_ancestors; ++i)
         copy.ancestors[i].handle = duplicate_into(pi->hProcess, the_payload.ancestors[i].handle);
+    copy.map_directory = duplicate_into(pi->hProcess, the_payload.map_directory);
     ::DetourCopyPayloadToProcess(pi->hProcess, payload_guid, &copy, sizeof copy);
     ::ReleaseSRWLockExclusive(&lock);
+    give_map(pi->hProcess);
     if (!(flags & CREATE_SUSPENDED)) ::ResumeThread(pi->hThread);
 }
 
@@ -813,6 +844,55 @@ NTSTATUS NTAPI hook_nt_alpc_connect_port(PHANDLE port, PUNICODE_STRING name, POB
     return retried;
 }
 
+// --- virtual drives --------------------------------------------------------------------------------------------------
+
+using get_final_path_name_by_handle_w_t = DWORD(WINAPI*)(HANDLE, LPWSTR, DWORD, DWORD);
+get_final_path_name_by_handle_w_t real_get_final_path_name_by_handle_w;
+
+// "\\?\C:\long\x" or "C:\long\x" under a virtual drive's directory as "\\?\Q:\x" / "Q:\x"; empty otherwise.
+std::wstring through_drive(std::wstring_view path)
+{
+    std::wstring_view prefix;
+    std::wstring_view rest = path;
+    if (rest.starts_with(L"\\\\?\\")) {
+        prefix = rest.substr(0, 4);
+        rest.remove_prefix(4);
+    }
+    for (unsigned i = 0; i < the_payload.drive_count && i < max_drives; ++i) {
+        std::wstring_view const real = the_payload.drives[i].real;
+        if (real.empty() || !starts_with_ci(rest, real) || (rest.size() > real.size() && rest[real.size()] != L'\\')) continue;
+        std::wstring out{prefix};
+        out += the_payload.drives[i].letter;
+        out += L":\\";
+        std::wstring_view tail = rest.substr(real.size());
+        if (!tail.empty()) tail.remove_prefix(1);
+        out += tail;
+        return out;
+    }
+    return {};
+}
+
+// Hook 15: a path as a DOS path through the virtual drive (the deepest directory first, as the payload orders them).
+// The volume as a GUID or an NT device, and the path alone, are left as they are.
+DWORD WINAPI hook_get_final_path_name_by_handle_w(HANDLE file, LPWSTR buffer, DWORD size, DWORD flags)
+{
+    if ((flags & (VOLUME_NAME_GUID | VOLUME_NAME_NT | VOLUME_NAME_NONE)) != 0 || !the_payload.drive_count)
+        return real_get_final_path_name_by_handle_w(file, buffer, size, flags);
+    std::wstring real(1024, L'\0');
+    DWORD n = real_get_final_path_name_by_handle_w(file, real.data(), static_cast<DWORD>(real.size()), flags);
+    if (n >= real.size()) {
+        real.resize(n + 1);
+        n = real_get_final_path_name_by_handle_w(file, real.data(), static_cast<DWORD>(real.size()), flags);
+    }
+    if (n == 0 || n >= real.size()) return real_get_final_path_name_by_handle_w(file, buffer, size, flags);
+    real.resize(n);
+    std::wstring const short_path = through_drive(real);
+    std::wstring const& out = short_path.empty() ? real : short_path;
+    if (out.size() + 1 > size) return static_cast<DWORD>(out.size() + 1);
+    std::wmemcpy(buffer, out.c_str(), out.size() + 1);
+    return static_cast<DWORD>(out.size());
+}
+
 // --- start -----------------------------------------------------------------------------------------------------------
 
 // The container's SID from the token, or from the payload where the token cannot be read (a forked Cygwin child).
@@ -845,6 +925,7 @@ void install()
 {
     HMODULE const ntdll = ::GetModuleHandleW(L"ntdll.dll");
     HMODULE const kernelbase = ::GetModuleHandleW(L"kernelbase.dll");
+    real_nt_set_information_process = reinterpret_cast<nt_set_information_process_t>(::GetProcAddress(ntdll, "NtSetInformationProcess"));
     ::DetourTransactionBegin();
     ::DetourUpdateThread(::GetCurrentThread());
     attach(real_nt_create_file, ntdll, "NtCreateFile", &hook_nt_create_file);
@@ -869,6 +950,21 @@ void install()
     attach(real_query_dos_device_w, kernelbase, "QueryDosDeviceW", &hook_query_dos_device_w);
     attach(real_create_process_w, kernelbase, "CreateProcessW", &hook_create_process_w);
     attach(real_create_process_a, kernelbase, "CreateProcessA", &hook_create_process_a);
+    attach(real_get_final_path_name_by_handle_w, kernelbase, "GetFinalPathNameByHandleW", &hook_get_final_path_name_by_handle_w);
+    ::DetourTransactionCommit();
+}
+
+// Outside a container: the device map of the children and the paths through it (hooks 14 and 15), nothing else.
+void install_drives_only()
+{
+    HMODULE const ntdll = ::GetModuleHandleW(L"ntdll.dll");
+    HMODULE const kernelbase = ::GetModuleHandleW(L"kernelbase.dll");
+    real_nt_set_information_process = reinterpret_cast<nt_set_information_process_t>(::GetProcAddress(ntdll, "NtSetInformationProcess"));
+    ::DetourTransactionBegin();
+    ::DetourUpdateThread(::GetCurrentThread());
+    attach(real_create_process_w, kernelbase, "CreateProcessW", &hook_create_process_w);
+    attach(real_create_process_a, kernelbase, "CreateProcessA", &hook_create_process_a);
+    attach(real_get_final_path_name_by_handle_w, kernelbase, "GetFinalPathNameByHandleW", &hook_get_final_path_name_by_handle_w);
     ::DetourTransactionCommit();
 }
 
@@ -889,6 +985,10 @@ BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID)
     for (std::size_t i = 0; i < restored_count; ++i) {
         auto const& v = the_payload.variables[i];
         ::SetEnvironmentVariableW(restored_variables[i], v.present ? v.value : nullptr);
+    }
+    if (!the_payload.container_sid[0]) {
+        install_drives_only();
+        return TRUE;
     }
     find_container();
     install();

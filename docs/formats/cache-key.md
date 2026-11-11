@@ -49,6 +49,7 @@ The names:
 | `key-format`, `toolchain-profile` | the two version numbers |
 | `os`, `slice` | the target and the slice: `apple`, `iossim-arm64` |
 | `environment` | the environment the slice is built in (common 4.2), its host's system and the compiler: `linux/clang-cl`; also for a recipe that says `*/ndk`, so machines of two systems do not share slices |
+| `host-libc` | `musl` on a Linux build machine whose C library is musl (`recipe-toml.md` 9.1), absent elsewhere: the programs of its tool slices run there only, and its compiler links musl |
 | `library`, `version`, `revision` | |
 | `recipe-sha256` | the locked hash; for a recipe outside the project, its tree hash at build time |
 | `source` | `archive:<sha256>`, `git:<commit>` (`+submodules`), `path:<tree hash>`, `local:<tree hash at build time>` |

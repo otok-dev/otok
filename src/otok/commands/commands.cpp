@@ -64,6 +64,8 @@ option_spec const allow_advisory_option{"allow-advisory", 0, "ID,...", "Install 
 option_spec const verbose_option{"verbose", 'v', "", "Show what each slice builds with and the commands it runs; -vv: their output too, one slice at a time", true};
 option_spec const keep_build_dirs_option{"keep-build-dirs", 0, "", "Keep the whole work directory of a failed build in the cache (failed/), not only its log"};
 option_spec const no_sandbox_option{"no-sandbox", 0, "", "Build without the sandbox, unisolated: on a host that has none, or for a tool the sandbox stops"};
+option_spec const no_virtual_paths_option{"no-virtual-paths", 0, "",
+    "Windows: build processes see the real, long paths of the cache and the work directories, not short drive letters"};
 option_spec const progress_option{"progress", 0, "auto|plain", "auto: the slices under way below the lines on a terminal; plain: lines only"};
 // otok.dev.toml (docs/formats/otok-dev-toml.md 3).
 option_spec const no_dev_option{"no-dev", 0, "", "Build what otok.lock says, ignoring the working trees of otok.dev.toml"};
@@ -837,6 +839,8 @@ bool build_project(parsed_command const& cmd, project& p, lock_file const& lock,
     // the programs of an AppContainer find the jobserver only in its own namespace (docs/PLAN.md decision 103)
     if (settings.isolation == build_isolation::sandbox && settings.sandbox.kind == host_sandbox::mechanism::appcontainer)
         use_container_jobservers(settings.sandbox.container);
+    // short drive letters for the cache and the work directories on Windows (docs/PLAN.md open item 23)
+    settings.virtual_paths = p.config.virtual_paths && !cmd.flag("no-virtual-paths");
     if (auto home = ctx.env("HOME"); home && !home->empty()) settings.denied_reads.push_back(path_from_utf8(*home));
     settings.launcher = ctx.launcher;
     // the slices under way below the lines on a terminal (docs/PLAN.md decision 59): whatever is written to ctx.err
@@ -2388,7 +2392,7 @@ int publish(parsed_command const& cmd, command_context& ctx)
                 parsed_command install;
                 install.command = "install";
                 // what the build shows, as asked
-                for (char const* name : {"verbose", "keep-build-dirs", "no-sandbox"}) {
+                for (char const* name : {"verbose", "keep-build-dirs", "no-sandbox", "no-virtual-paths"}) {
                     if (cmd.flag(name)) {
                         install.flags.insert(name);
                         install.counts[name] = cmd.count(name);
@@ -2716,9 +2720,9 @@ std::span<command_spec const> command_specs()
 {
     static command_spec const commands[] = {
         {"install", "", "Resolve the dependencies (keeping locked versions), write otok.lock, fetch the inputs and build the libraries into the output",
-            {build_profile_option, locked_option, offline_option, frozen_option, allow_advisory_option, verbose_option, keep_build_dirs_option, no_sandbox_option, progress_option, no_dev_option}, 0, 0},
+            {build_profile_option, locked_option, offline_option, frozen_option, allow_advisory_option, verbose_option, keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option, no_dev_option}, 0, 0},
         {"update", "[LIBRARY...]", "Move every library (or the named ones) to the newest allowed version, then as install",
-            {build_profile_option, offline_option, allow_advisory_option, verbose_option, keep_build_dirs_option, no_sandbox_option, progress_option, no_dev_option, drop_option}, 0, any_number},
+            {build_profile_option, offline_option, allow_advisory_option, verbose_option, keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option, no_dev_option, drop_option}, 0, any_number},
         {"fetch", "", "Resolve and write otok.lock as install does, then fetch the inputs of every package in it (all profiles); build nothing",
             {locked_option, offline_option, frozen_option, allow_advisory_option, no_dev_option}, 0, 0},
         {"tree", "", "Print the resolved graph with versions, recipes, platforms and changed options", {profile_option, offline_option, no_dev_option}, 0, 0},
@@ -2741,7 +2745,7 @@ std::span<command_spec const> command_specs()
                 {"dry-run", 0, "", "Build, and publish nothing"}, {"no-build", 0, "", "Add the entry without building the recipe"},
                 {"no-push", 0, "", "With a checkout of the index: commit the entry, but do not push"},
                 verbose_option,
-                keep_build_dirs_option, no_sandbox_option, progress_option}, 0, any_number},
+                keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option}, 0, any_number},
         {"licenses", "", "Show the licenses of the third-party software built into otok, and where otok's source is", {}, 0, 0},
         {"log", "LIBRARY [SLICE]", "Show the log of the latest build of a library (or of one slice of it) kept in the cache, a failed one too",
             {{"list", 0, "", "List the logs of the library kept in the cache, the newest first"}}, 1, 2},

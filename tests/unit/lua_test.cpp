@@ -177,6 +177,7 @@ TEST_F(build_script, sees_slice_options_and_deps)
 function build(slice, options, deps)
     assert(slice.name == "iossim-arm64" and slice.os == "apple" and slice.platform == "iossim" and slice.arch == "arm64")
     assert(slice.environment == "macos/xcode" and slice.host == "macos-arm64" and slice.compiler == "xcode")
+    assert(slice.host_libc == nil)
     assert(slice.triple == "arm64-apple-ios15.0-simulator" and slice.configuration == "release" and slice.is_tool == false)
     assert(slice.source:find("/source$") and slice.prefix:find("/prefix$") and not slice.source:find("\\", 1, true))
     assert(slice.resources.data:find("/res$") and slice.vars.openssl_target == "iossimulator-xcrun" and slice.jobs == 4)
@@ -199,6 +200,22 @@ end
     EXPECT_EQ(out->libraries.at("p").filename(), "libp.a");
     ASSERT_TRUE(out->headers.has_value());
     EXPECT_EQ(out->headers->filename(), "include");
+}
+
+// docs/PLAN.md decision 105: the C library of a Linux build machine
+TEST_F(build_script, sees_the_c_library_of_a_linux_machine)
+{
+    slice.environment = "linux/gcc";
+    slice.host = "linux-x86_64";
+    slice.host_libc = "musl";
+    slice.compiler = "gcc";
+    auto out = run(R"(
+function build(slice, options, deps)
+    assert(slice.host == "linux-x86_64" and slice.host_libc == "musl", tostring(slice.host_libc))
+    return finish(slice)
+end
+)");
+    ASSERT_TRUE(out.has_value()) << out.error().message;
 }
 
 TEST_F(build_script, tables_are_read_only)

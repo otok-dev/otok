@@ -179,8 +179,11 @@ A slice is built in `tmp/<process>/build/<library>-<slice>/` (`-debug` for the `
 `dest` and patches applied), `build/`, `prefix/`, `home/` and `tmp/` (`HOME` and `TMPDIR` of the
 build's processes), `toolchain.cmake` and `build.log`; with the sandbox of Windows also `sandbox.log` (what the
 AppContainer was refused) and, for a recipe of a path outside the cache, `recipe/`, its copy (`slice.recipe`; the
-container reads only the cache, `docs/PLAN.md` decision 103). The entry is created under its lock (6) while
-the build runs; when the build succeeds it receives:
+container reads only the cache, `docs/PLAN.md` decision 103). On Windows, with `virtual-paths` (`config.md`), the build
+sees these through short drive letters of a device map of otok's own: one for `tmp/<process>/build/`, so that the work
+directory is `<letter>:\<library>-<slice>\`, and one for the cache root, through which it is given the prefixes of its
+dependencies, toolchains and resources; `build.log` begins with a line per letter naming its directory. The entry is
+created under its lock (6) while the build runs; when the build succeeds it receives:
 
 | File | Contents |
 |---|---|

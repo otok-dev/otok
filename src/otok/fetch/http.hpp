@@ -72,6 +72,14 @@ result<http_reply> http_call(http_exchange const& request, http_settings const& 
 // What makes requests: http_call, or a fake in tests (command_context::http).
 using http_transport = std::function<result<http_reply>(http_exchange const&)>;
 
+// The certificates TLS verifies with on Linux (docs/PLAN.md decision 104): the release binary is static, its libcurl
+// built on one distribution, whose bundle path the others need not have. The file of SSL_CERT_FILE when it is set (null
+// or empty: not set), else the first of `candidates` that is a file; empty when none, and libcurl keeps its own.
+std::filesystem::path find_ca_bundle(char const* ssl_cert_file, std::span<std::filesystem::path const> candidates);
+
+// The bundles of the distributions, in the order find_ca_bundle tries them.
+std::span<std::filesystem::path const> known_ca_bundles();
+
 // `file:///C:/dir/a%20b.tar.gz` for a local path (tests, `file://` sources of local recipes).
 std::string file_url(std::filesystem::path const& path);
 

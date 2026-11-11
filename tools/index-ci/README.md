@@ -49,8 +49,9 @@ The paths in these files are examples, for a user `otok` of the server; adjust t
 them when creating the index, adjusting the name.
 
 The workflows take otok from the index's own release named `otok`, asset `otok-linux-x64`, never from a pull
-request. The release holds a Linux x86-64 build of otok that the maintainers have checked; the jobs run
-in a container of the system it was built on (`ubuntu:26.04`), since it needs that C library.
+request. The release holds a Linux x86-64 build of otok that the maintainers have checked: the static binary of
+a release of otok (`otok-<version>-linux-x64.tar.gz`), which runs on any system; the jobs run in a container of
+`ubuntu:26.04` for their other tools.
 
 The repository's settings: Actions may write (the workflows ask for `contents: write` and
 `pull-requests: write` themselves); the labels `approved`, `ready-for-review` and `refused` exist; the default branch

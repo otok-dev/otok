@@ -23,6 +23,7 @@
 
 #include "otok/builder/toolchains.hpp"
 #include "otok/commands/commands.hpp"
+#include "otok/core/environment.hpp"
 #include "otok/core/fs.hpp"
 #include "otok/core/process.hpp"
 #include "otok/fetch/git.hpp"
@@ -286,6 +287,10 @@ TEST(host_target, gives_builds_nothing_of_the_user)
     }
     EXPECT_FALSE(target->system_library("libpng16.so.16", spec));
     EXPECT_FALSE(target->system_library("libz.so.1", spec));
+    // musl's library and loader on a machine of musl only (decision 105)
+    EXPECT_EQ(target->system_library("libc.so", spec), host_libc() == "musl");
+    EXPECT_EQ(target->system_library("ld-musl-aarch64.so.1", spec), host_libc() == "musl");
+    EXPECT_EQ(target->system_library("libc.musl-aarch64.so.1", spec), host_libc() == "musl");
 #endif
 }
 

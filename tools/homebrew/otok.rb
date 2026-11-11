@@ -22,6 +22,12 @@ class Otok < Formula
 
   uses_from_macos "curl"
 
+  # C++23: GCC 14 or later (Homebrew's own GCC on Linux, decision 104)
+  fails_with :gcc do
+    version "13"
+    cause "otok is written in C++23"
+  end
+
   def install
     args = %W[
       -DOTOK_BUILD_TESTS=OFF

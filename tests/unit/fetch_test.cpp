@@ -8,6 +8,8 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -154,6 +156,23 @@ TEST(http, downloads_over_https)
     auto again = http_call(request, {});
     ASSERT_TRUE(again.has_value()) << again.error().message;
     EXPECT_EQ(again->status, 304);
+}
+
+TEST(http, finds_the_ca_bundle_of_the_system)
+{
+    test::temp_dir dir;
+    std::filesystem::create_directories(dir.path() / "certs");  // a directory is no bundle
+    ASSERT_TRUE(write_file_atomic(dir.path() / "b.crt", "b"));
+    ASSERT_TRUE(write_file_atomic(dir.path() / "c.crt", "c"));
+    std::vector<std::filesystem::path> const candidates{dir.path() / "missing.crt", dir.path() / "certs", dir.path() / "b.crt",
+                                                        dir.path() / "c.crt"};
+    EXPECT_EQ(find_ca_bundle(nullptr, candidates), dir.path() / "b.crt");
+    EXPECT_EQ(find_ca_bundle("", candidates), dir.path() / "b.crt");
+    // SSL_CERT_FILE wins, whether it exists or not: what the user asked for
+    EXPECT_EQ(find_ca_bundle("/elsewhere/ca.pem", candidates), std::filesystem::path{"/elsewhere/ca.pem"});
+    EXPECT_EQ(find_ca_bundle(nullptr, std::span{candidates}.first(2)), std::filesystem::path{});
+    ASSERT_FALSE(known_ca_bundles().empty());
+    EXPECT_EQ(known_ca_bundles().front(), std::filesystem::path{"/etc/ssl/certs/ca-certificates.crt"});
 }
 
 TEST(archive, strips_a_single_top_level_directory)

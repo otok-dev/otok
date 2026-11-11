@@ -91,6 +91,9 @@ struct build_settings
     std::optional<git_tool> git;            // applies patches
     build_isolation isolation = build_isolation::unavailable;
     host_sandbox sandbox;                   // the mechanism, with `isolation == sandbox`; why there is none, with `unavailable`
+    // Windows: the cache and the work directories through short drive letters (core/virtual_drives), which needs
+    // otok-sandbox.dll (`sandbox.program`) also when the builds are unisolated
+    bool virtual_paths = false;
     std::vector<std::filesystem::path> denied_reads;    // in the sandbox: HOME
     std::filesystem::path launcher;         // otok itself, for otok.b2 (build-lua-api.md 6.2); empty: none
     toolchain_choice toolchains;            // check_toolchains: what each recipe declares, as found
@@ -124,12 +127,19 @@ std::string key_text(std::map<std::string, std::string> const& inputs);
 std::string meson_machine_file(slice_toolchain const& t, std::map<std::string, std::string> const& host, std::string const& pkg_config,
     std::map<std::string, std::vector<std::string>> const& binaries = {});
 
+// Builders of this process skip the check of the sandbox's exits (builder::check_sandbox_exits): for the tests, whose
+// every build would otherwise spend ~2 s on it, one process at a time; the check itself is tested apart.
+void skip_sandbox_exit_checks() noexcept;
+
 class builder
 {
 public:
     builder(resolution const& r, manifest const& m, lock_file const& lock, std::filesystem::path project_dir,
         std::map<std::string, package_inputs> inputs, std::span<build_target* const> targets, cache_store& cache,
         build_settings settings, std::ostream& progress);
+    ~builder();
+    builder(builder const&) = delete;
+    builder& operator=(builder const&) = delete;
 
     // Builds every package the selected configuration builds, slices concurrently as the jobserver
     // allows (docs/PLAN.md decision 20), each after the slices it needs; slices already in the cache are
@@ -194,6 +204,8 @@ private:
     std::optional<slice_spec> tool_slice_;
     std::unique_ptr<job_broker> own_broker_;
     job_broker* broker_ = nullptr;                      // own_broker_, or that of the settings
+    std::filesystem::path builds_drive_;                // the drive of the work directories (core/virtual_drives); empty: none
+    std::vector<std::filesystem::path> drives_;         // the letters this builder uses, released when it ends
 
     // Shared by the slices building at once.
     std::mutex mutex_;

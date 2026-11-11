@@ -63,6 +63,7 @@ add_custom_command(
 # otok_notices.inc: the license notices of the third-party software built into otok, `otok licenses`
 # (cmake/notices.cmake; the MSBuild build generates the same file in Directory.Build.targets). Run at every build: what
 # vcpkg installed decides what is linked.
+set(OTOK_EXTRA_NOTICES "" CACHE PATH "A directory of more <name>.txt notices for `otok licenses` (cmake/notices.cmake)")
 set(OTOK_VCPKG_SHARE "")
 if(DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
     set(OTOK_VCPKG_SHARE ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share)
@@ -71,6 +72,7 @@ add_custom_target(otok-notices
     COMMAND ${CMAKE_COMMAND}
         -DOTOK_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
         -DOTOK_VCPKG_SHARE=${OTOK_VCPKG_SHARE}
+        -DOTOK_EXTRA_NOTICES=${OTOK_EXTRA_NOTICES}
         -DOTOK_OUTPUT=${OTOK_GENERATED_DIR}/otok_notices.inc
         -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/notices.cmake
     BYPRODUCTS ${OTOK_GENERATED_DIR}/otok_notices.inc

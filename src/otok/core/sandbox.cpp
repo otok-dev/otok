@@ -22,9 +22,11 @@
 #include <limits>
 #include <mutex>
 #include <set>
+#include <thread>
 
 #include "otok/core/build_info.hpp"
 #include "otok/core/sandbox_windows.hpp"
+#include "otok/core/virtual_drives.hpp"
 #endif
 
 namespace otok {
@@ -187,8 +189,59 @@ unsigned long long duplicate_into(HANDLE child, HANDLE handle)
     return reinterpret_cast<ULONG_PTR>(copy);
 }
 
+// The broker of the device map (core/virtual_drives) for the processes of an AppContainer, which may not set a map on
+// their children: a named pipe of this process that the container may write to. A client sends the value of a handle
+// to its suspended child in its own table; the broker duplicates it out of the client, whose id the pipe tells, sets the
+// map and answers the NTSTATUS. Only a handle the client holds can be named, and the child does not run meanwhile, so
+// no process id is taken for another. Started once, for the first container; the pipe's name, empty when it fails.
+std::wstring map_broker(PSID container)
+{
+    static std::once_flag once;
+    static std::wstring name;
+    std::call_once(once, [&] {
+        std::wstring const pipe = L"\\\\.\\pipe\\otok-map-" + std::to_wstring(::GetCurrentProcessId());
+        std::wstring const sddl = L"D:(A;;GA;;;" + current_user_sid() + L")(A;;GRGW;;;" + sid_text(container) + L")";
+        auto const serve = [pipe, sddl] {
+            SECURITY_ATTRIBUTES attributes{sizeof attributes, nullptr, FALSE};
+            if (!::ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &attributes.lpSecurityDescriptor, nullptr))
+                return;
+            HANDLE const p = ::CreateNamedPipeW(pipe.c_str(), PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, PIPE_UNLIMITED_INSTANCES, 64, 64, 0, &attributes);
+            ::LocalFree(attributes.lpSecurityDescriptor);
+            if (p == INVALID_HANDLE_VALUE) return;
+            for (;;) {
+                if (!::ConnectNamedPipe(p, nullptr) && ::GetLastError() != ERROR_PIPE_CONNECTED) continue;
+                std::uint64_t request = 0;
+                DWORD got = 0;
+                LONG reply = static_cast<LONG>(0xC000000DL);  // STATUS_INVALID_PARAMETER
+                ULONG client = 0;
+                if (::ReadFile(p, &request, sizeof request, &got, nullptr) && got == sizeof request && ::GetNamedPipeClientProcessId(p, &client)) {
+                    reply = static_cast<LONG>(0xC0000022L);  // STATUS_ACCESS_DENIED
+                    if (HANDLE const parent = ::OpenProcess(PROCESS_DUP_HANDLE, FALSE, client)) {
+                        HANDLE child = nullptr;
+                        if (::DuplicateHandle(parent, reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(request)), ::GetCurrentProcess(), &child,
+                                PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, 0)) {
+                            reply = virtual_drives::give(child) ? 0 : static_cast<LONG>(0xC0000001L);
+                            ::CloseHandle(child);
+                        }
+                        ::CloseHandle(parent);
+                    }
+                }
+                DWORD written = 0;
+                ::WriteFile(p, &reply, sizeof reply, &written, nullptr);
+                ::FlushFileBuffers(p);
+                ::DisconnectNamedPipe(p);
+            }
+        };
+        // a few instances: processes start at once in many slices
+        for (int i = 0; i < 4; ++i) std::thread{serve}.detach();
+        name = pipe;
+    });
+    return name;
+}
+
 // The payload of otok-sandbox.dll for a new process: what the container may not open, opened here and duplicated
-// into it (sandbox_windows.hpp).
+// into it (sandbox_windows.hpp); no container (`container` null): the device map alone.
 result<void> give_payload(sandbox_launch const& launch, PSID container, HANDLE child, wchar_t const* environment)
 {
     static sandbox_windows::payload p;  // large
@@ -217,19 +270,23 @@ result<void> give_payload(sandbox_launch const& launch, PSID container, HANDLE c
         wchar_t const root[4] = {static_cast<wchar_t>(L'A' + d), L':', L'\\', 0};
         p.roots[d] = keep(opened(root, sandbox_windows::root_access, FILE_FLAG_BACKUP_SEMANTICS));
     }
-    std::wstring const container_text = sid_text(container);
-    copy_text(p.container_sid, std::size(p.container_sid), container_text);
     copy_text(p.user_sid, std::size(p.user_sid), current_user_sid());
-    DWORD session = 0;
-    ::ProcessIdToSessionId(::GetCurrentProcessId(), &session);
-    copy_text(p.container_objects, std::size(p.container_objects),
-        L"\\Sessions\\" + std::to_wstring(session) + L"\\AppContainerNamedObjects\\" + container_text);
+    if (container) {
+        std::wstring const container_text = sid_text(container);
+        copy_text(p.container_sid, std::size(p.container_sid), container_text);
+        DWORD session = 0;
+        ::ProcessIdToSessionId(::GetCurrentProcessId(), &session);
+        copy_text(p.container_objects, std::size(p.container_objects),
+            L"\\Sessions\\" + std::to_wstring(session) + L"\\AppContainerNamedObjects\\" + container_text);
+    }
     if (!launch.log.empty()) copy_text(p.log, std::size(p.log), launch.log.wstring());
     sandbox_windows::take_variables(p, environment);
     // the ancestors of the work directory, from the drive root down to its parent, to pass through and nothing more
-    if (!launch.work.empty()) {
+    if (container && !launch.work.empty()) {
         std::error_code ec;
-        fs::path const work = fs::weakly_canonical(launch.work, ec);
+        // on a virtual drive as it is: resolved, it would be the long real path, whose ancestors the build never walks
+        bool const virtual_work = virtual_drives::to_real(launch.work) != launch.work;
+        fs::path const work = virtual_work ? launch.work.lexically_normal() : fs::weakly_canonical(launch.work, ec);
         std::vector<fs::path> ancestors;
         for (fs::path a = work.parent_path(); !a.empty(); a = a.parent_path()) {
             ancestors.push_back(a);
@@ -244,6 +301,26 @@ result<void> give_payload(sandbox_launch const& launch, PSID container, HANDLE c
             if (!entry.handle) continue;
             copy_text(entry.name, std::size(entry.name), name);
             ++p.ancestor_count;
+        }
+    }
+    // the device map for the children (core/virtual_drives): the directory outside a container, the broker in one
+    if (virtual_drives::enabled()) {
+        if (container) copy_text(p.map_pipe, std::size(p.map_pipe), map_broker(container));
+        else p.map_directory = duplicate_into(child, virtual_drives::directory());
+        for (virtual_drives::drive const& d : virtual_drives::drives()) {
+            if (p.drive_count == sandbox_windows::max_drives) break;
+            auto& entry = p.drives[p.drive_count++];
+            entry.letter = d.letter;
+            copy_text(entry.real, std::size(entry.real), d.real.wstring());
+            // QueryDosDeviceW of the letter as of a subst drive: the AppContainer may not read the link
+            copy_text(p.dos_devices[d.letter - L'A'], std::size(p.dos_devices[0]), d.device);
+            // its root as the roots of the other drives (hook 7): the container may not open the directory, and a program
+            // asking the volume's attributes there (GetVolumeInformationW: perlglob lowercases every name it finds on a
+            // volume that does not preserve case) would get nothing
+            if (container) {
+                wchar_t const root[4] = {d.letter, L':', L'\\', 0};
+                p.roots[d.letter - L'A'] = keep(opened(root, sandbox_windows::root_access, FILE_FLAG_BACKUP_SEMANTICS));
+            }
         }
     }
     if (!::DetourCopyPayloadToProcess(child, sandbox_windows::payload_guid, &p, sizeof p))
@@ -335,9 +412,11 @@ result<void> grant_sandbox_access([[maybe_unused]] host_sandbox const& host, [[m
     static std::set<std::pair<fs::path, DWORD>> done;
     std::lock_guard lock{mutex};
     auto const once = [&](fs::path const& path, DWORD access, bool required) -> result<void> {
-        if (done.contains({path, access})) return {};
+        // remembered by the real directory: a virtual drive's letter is another directory once it is given again
+        fs::path const real = virtual_drives::to_real(path);
+        if (done.contains({real, access})) return {};
         if (auto ok = grant(sid.sid, path, access, required); !ok) return ok;
-        done.insert({path, access});
+        done.insert({real, access});
         return {};
     };
     for (fs::path const& w : spec.writable) {
@@ -515,8 +594,10 @@ result<void> detail::create_sandboxed_process([[maybe_unused]] sandbox_launch co
     [[maybe_unused]] std::vector<void*> const& inherited, [[maybe_unused]] void* startup, [[maybe_unused]] void* information)
 {
 #ifdef _WIN32
+    // no container: otok-sandbox.dll alone, for the device map of the children (core/virtual_drives)
+    bool const contained = !launch.container.empty();
     local_sid sid;
-    if (!parse_sid(launch.container, sid)) return fail("the AppContainer's SID '" + launch.container + "' cannot be read");
+    if (contained && !parse_sid(launch.container, sid)) return fail("the AppContainer's SID '" + launch.container + "' cannot be read");
     std::string const dll = ansi_path(launch.dll);
     if (dll.empty()) return fail("the path of '" + path_to_utf8(launch.dll) + "' cannot be written in the system's code page");
 
@@ -538,14 +619,14 @@ result<void> detail::create_sandboxed_process([[maybe_unused]] sandbox_launch co
     } guard{list};
     std::vector<void*> handles = inherited;
     if (!::UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles.data(), handles.size() * sizeof(HANDLE), nullptr, nullptr)
-        || !::UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities, sizeof capabilities, nullptr, nullptr)
-        || !::UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, &mitigation, sizeof mitigation, nullptr, nullptr)) {
+        || (contained && !::UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities, sizeof capabilities, nullptr, nullptr))
+        || (contained && !::UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, &mitigation, sizeof mitigation, nullptr, nullptr))) {
         return fail("cannot prepare the process attributes: " + windows_error(::GetLastError()));
     }
     // CreateProcess refuses a container process without LOCALAPPDATA and rewrites it, TEMP and TMP; the DLL sets back
     // what the environment gives (the payload), removing what it does not
     std::wstring const intended = environment;
-    std::wstring given = sandbox_windows::with_variable(environment.c_str(), L"LOCALAPPDATA", cwd.wstring());
+    std::wstring given = contained ? sandbox_windows::with_variable(environment.c_str(), L"LOCALAPPDATA", cwd.wstring()) : environment;
     STARTUPINFOEXW extended{};
     extended.StartupInfo = *static_cast<STARTUPINFOW*>(startup);
     extended.StartupInfo.cb = sizeof extended;

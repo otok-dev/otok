@@ -39,7 +39,10 @@ brew install otok-dev/tap/otok                                           # macOS
 scoop bucket add otok https://github.com/otok-dev/scoop-bucket; scoop install otok   # Windows
 ```
 
-On Linux, take `otok-<version>-linux-x64.tar.gz` from the [latest release](https://github.com/otok-dev/otok/releases/latest).
+```sh
+curl -fsSL https://otok-dev.github.io/install.sh | sh                   # Linux: the static binary, any distribution
+```
+
 Building otok from this source is described in [Install otok](https://otok-dev.github.io/start/install/#build-from-source).
 
 ## Contributing

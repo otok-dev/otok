@@ -29,6 +29,7 @@
 
 #include "otok/core/fs.hpp"
 #include "otok/core/sandbox.hpp"
+#include "otok/core/virtual_drives.hpp"
 
 #ifndef _WIN32
 extern char** environ;
@@ -304,6 +305,11 @@ result<process_exit> spawn(std::filesystem::path const& program, process_spec co
     }
     handle process{pi.hProcess};
     handle thread{pi.hThread};
+    // otok's device map, before it runs: a map is not inherited (core/virtual_drives)
+    if (auto ok = virtual_drives::give(process.get()); !ok) {
+        ::TerminateProcess(process.get(), 1);
+        return fail("cannot start '" + path_to_utf8(program) + "': " + ok.error().message);
+    }
     // in the job before it runs, so that whatever it starts is in it too
     if (HANDLE const job = children_job()) ::AssignProcessToJobObject(job, process.get());
     if (::ResumeThread(thread.get()) == static_cast<DWORD>(-1)) {

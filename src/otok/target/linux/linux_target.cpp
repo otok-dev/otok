@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "otok/core/binary.hpp"
+#include "otok/core/environment.hpp"
 #include "otok/core/fs.hpp"
 
 namespace otok::target::linux {
@@ -220,13 +221,15 @@ public:
         return p;
     }
 
-    // The C and C++ runtimes (build-lua-api.md 8, docs/PLAN.md decision 80).
+    // The C and C++ runtimes (build-lua-api.md 8, docs/PLAN.md decision 80). On a machine of musl (decision 105) its one library, `libc.so` (Alpine's
+    // `libc.musl-<arch>.so.1`), and its loader: on glibc's, `libc.so` is the linker's script, never loaded.
     bool system_library(std::string const& loaded, slice_spec const& slice) const override
     {
         (void)slice;
         static std::set<std::string, std::less<>> const runtimes{"libc.so.6", "libm.so.6", "libmvec.so.1", "libpthread.so.0", "libdl.so.2",
             "librt.so.1", "libutil.so.1", "libresolv.so.2", "libanl.so.1", "libstdc++.so.6", "libgcc_s.so.1", "libatomic.so.1"};
-        return runtimes.contains(loaded) || loaded.starts_with("ld-linux");
+        if (runtimes.contains(loaded) || loaded.starts_with("ld-linux")) return true;
+        return host_libc() == "musl" && (loaded == "libc.so" || loaded.starts_with("libc.musl-") || loaded.starts_with("ld-musl-"));
     }
 
     // include/, lib/ and bin/, debug/lib/ and debug/bin/ (otok-toml.md 4.1)

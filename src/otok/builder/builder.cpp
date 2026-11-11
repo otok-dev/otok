@@ -4,6 +4,7 @@
 #include "otok/builder/builder.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
@@ -23,6 +24,7 @@
 
 #include "otok/builder/dev_tree.hpp"
 #include "otok/core/binary.hpp"
+#include "otok/core/environment.hpp"
 #include "otok/core/file_lock.hpp"
 #include "otok/core/executor.hpp"
 #include "otok/core/fs.hpp"
@@ -30,6 +32,7 @@
 #include "otok/core/process.hpp"
 #include "otok/core/sandbox.hpp"
 #include "otok/core/tree_hash.hpp"
+#include "otok/core/virtual_drives.hpp"
 #include "otok/resolver/options.hpp"
 
 namespace otok {
@@ -578,6 +581,22 @@ builder::builder(resolution const& r, manifest const& m, lock_file const& lock, 
 
 namespace {
 
+std::atomic<bool> exit_checks_skipped{false};
+
+}
+
+void skip_sandbox_exit_checks() noexcept
+{
+    exit_checks_skipped = true;
+}
+
+builder::~builder()
+{
+    for (fs::path const& d : drives_) virtual_drives::release(d);
+}
+
+namespace {
+
 build_target* target_of_platform(std::span<build_target* const> targets, std::string const& platform)
 {
     for (build_target* t : targets) {
@@ -625,6 +644,17 @@ std::expected<std::vector<built_package>, std::vector<error>> builder::build_all
     if (tool_target) {
         tool_slice_ = slice_spec{tool_target->info().tool_platform, tool_target->tool_arch(), "", "release", "static"};
         tool_slice_->environment = m_.tool_environment(tool_target->info());  // otok-toml.md 3, 7
+    }
+    // short drive letters for the cache and the work directories (core/virtual_drives, docs/PLAN.md open item 23), with
+    // otok-sandbox.dll, which gives the device map to the children of the build's programs
+    if (settings_.virtual_paths && settings_.sandbox.kind == host_sandbox::mechanism::appcontainer && !settings_.sandbox.program.empty()) {
+        std::error_code ec;
+        fs::create_directories(cache_.tmp() / "build", ec);
+        auto const cache_drive = virtual_drives::enable().and_then([&] { return virtual_drives::drive_for(cache_.root()); });
+        if (cache_drive) drives_.push_back(*cache_drive);
+        auto const drive = cache_drive.and_then([&](fs::path const&) { return virtual_drives::drive_for(cache_.tmp() / "build"); });
+        if (drive) drives_.push_back(builds_drive_ = *drive);
+        else say("warning: the paths of the builds are not shortened: " + drive.error().message);
     }
     // the environment this machine builds each target of the project in (otok-toml.md 4.9)
     std::map<std::string, build_environment, std::less<>> environments;
@@ -808,7 +838,12 @@ std::expected<std::vector<built_package>, std::vector<error>> builder::build_all
     if (one_at_a_time && settings_.jobs > 1) {
         say("note: -vv builds one slice at a time, so that their output does not interleave; each still runs " + std::to_string(settings_.jobs) + " jobs");
     }
-    if (auto errors = run_tasks(graph, *broker_, one_at_a_time ? 1 : std::numeric_limits<std::size_t>::max()); !errors.empty()) return failure{std::move(errors)};
+    if (auto errors = run_tasks(graph, *broker_, one_at_a_time ? 1 : std::numeric_limits<std::size_t>::max()); !errors.empty()) {
+        // once each: the slices under way when one fails can fail alike (a host without a sandbox fails them all)
+        std::set<std::string> seen;
+        std::erase_if(errors, [&seen](error const& e) { return !seen.insert(e.message).second; });
+        return failure{std::move(errors)};
+    }
 
     for (built_package& bp : packages) {
         for (std::string const& id : slices_of[package_key(bp.id, bp.tool)]) bp.slices.push_back(built_.at(id));
@@ -1030,8 +1065,11 @@ result<void> builder::apply_patches(recipe const& rec, fs::path const& recipe_di
         if (!settings_.git) return fail("applying patches needs git, and git is not in PATH");
         git_tool git = *settings_.git;
         // git must not take a repository around the copy for the one to patch
-        git.env["GIT_CEILING_DIRECTORIES"] = path_to_utf8(work);
-        auto applied = run_git(git, {"apply", "-p1", "--whitespace=nowarn", path_to_utf8(recipe_dir / path_from_utf8(patch))}, source, log);
+        git.env["GIT_CEILING_DIRECTORIES"] = path_to_utf8(virtual_drives::to_real(work));
+        // in the real directory: git is otok's, not the build's, and has no otok-sandbox.dll to give it the paths through a
+        // virtual drive, so the working directory it is given and the one it resolves would differ (core/virtual_drives)
+        auto applied = run_git(git, {"apply", "-p1", "--whitespace=nowarn", path_to_utf8(recipe_dir / path_from_utf8(patch))},
+            virtual_drives::to_real(source), log);
         if (!applied) return fail("the patch '" + patch + "' does not apply: " + applied.error().message);
     }
     return {};
@@ -1148,6 +1186,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
     key["os"] = os;
     key["slice"] = slice_name(spec);
     if (!spec.environment.compiler.empty()) key["environment"] = spec.environment.text();
+    if (host_libc() == "musl") key["host-libc"] = "musl";  // absent elsewhere: the keys of other machines unchanged (decision 105)
     key["linkage"] = spec.linkage;
     key["library"] = p.library;
     key["version"] = rec.version->str();
@@ -1271,11 +1310,28 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         }
     }
 
+    // what the build is given of the cache, through its drive (core/virtual_drives)
+    if (!builds_drive_.empty()) {
+        auto const shorten = [](slice_dependency& d) {
+            d.prefix = virtual_drives::to_virtual(d.prefix);
+            d.include = virtual_drives::to_virtual(d.include);
+            for (auto& [name, lib] : d.libraries) lib = virtual_drives::to_virtual(lib);
+            for (fs::path& dir : d.lib_dirs) dir = virtual_drives::to_virtual(dir);
+            d.bin = virtual_drives::to_virtual(d.bin);
+        };
+        for (auto& [name, d] : slice.deps) shorten(d);
+        for (auto& [name, d] : slice.tool_deps) shorten(d);
+        for (auto& [name, program] : built_toolchains) program = virtual_drives::to_virtual(program);
+        std::map<fs::path, fs::path> through;
+        for (auto const& [program, run_by] : interpreted)
+            through.emplace(virtual_drives::to_virtual(program).lexically_normal(), virtual_drives::to_virtual(run_by));
+        interpreted = std::move(through);
+    }
     fs::path const script = inputs.recipe_dir / "build.lua";
     std::string const script_label = p.library + "/build.lua";
     if (tools) {
         key["build-tools"] = tools->key;
-        slice.tools_prefix = tools->entry / "prefix";
+        slice.tools_prefix = builds_drive_.empty() ? tools->entry / "prefix" : virtual_drives::to_virtual(tools->entry / "prefix");
     }
     key["entry"] = building_tools ? "build_tools" : "build";
     // build.lua sees it (slice.is_tool): a library that is a tool too builds its programs there only (recipe-toml.md 13.2)
@@ -1341,7 +1397,8 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
             + "; to build without the sandbox, give --no-sandbox, set OTOK_SANDBOX=0 or 'sandbox = false' in config.toml");
     }
     // before the first sandboxed process, the slices that come meanwhile waiting, so the check counts its own processes
-    if (settings_.isolation == build_isolation::sandbox && settings_.sandbox.kind == host_sandbox::mechanism::appcontainer) {
+    if (settings_.isolation == build_isolation::sandbox && settings_.sandbox.kind == host_sandbox::mechanism::appcontainer
+        && !exit_checks_skipped.load()) {
         std::unique_lock lock{mutex_};
         if (!exits_check_started_) {
             exits_check_started_ = true;
@@ -1373,10 +1430,15 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
             fs::remove_all(long_path(work), ec);
         }
         for (char const* d : {"build", "prefix", "home", "tmp"}) fs::create_directories(work / d);
-        // resolved (macOS: /var is a link), as the paths build.lua returns are
-        fs::path const base = fs::canonical(work, ec);
+        // resolved (macOS: /var is a link), as the paths build.lua returns are; through its drive on Windows, where the
+        // build sees short paths (core/virtual_drives)
+        fs::path const base = builds_drive_.empty() ? fs::canonical(work, ec) : virtual_drives::to_virtual(work);
         fs::path const log = base / "build.log";
-        std::ofstream{log, std::ios::binary};  // exists even when nothing is logged
+        {
+            std::ofstream made{log, std::ios::binary};  // exists even when nothing is logged
+            // the letters the build's paths are on, for whoever reads the log
+            for (fs::path const& d : drives_) made << "otok: " << path_to_utf8(d.root_name()) << " is " << slashed(virtual_drives::to_real(d)) << "\n";
+        }
         // the output of the build as it comes (`-vv`); a dev slice's always, unless `quiet`, each line with its slice, since
         // the slices build at once (otok-dev-toml.md 4)
         std::optional<log_follower> follow;
@@ -1422,7 +1484,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
             auto const r = inputs.resources.find(res.name);
             if (r == inputs.resources.end()) return failed("the resource '" + res.name + "' was not fetched");
             if (!res.dest) {
-                resources.emplace(res.name, r->second);
+                resources.emplace(res.name, builds_drive_.empty() ? r->second : virtual_drives::to_virtual(r->second));
                 continue;
             }
             fs::path const dest = base / "source" / path_from_utf8(*res.dest);
@@ -1498,6 +1560,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         if (!spec.environment.compiler.empty()) {
             slice.environment = spec.environment.text();
             slice.host = std::string{host_machine()};
+            slice.host_libc = std::string{host_libc()};
             slice.compiler = spec.environment.compiler;
         }
         slice.triple = profile->triple;
@@ -1521,6 +1584,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
                 slice.recipe = base / "recipe";
             }
         }
+        if (!builds_drive_.empty() && slice.recipe == inputs.recipe_dir) slice.recipe = virtual_drives::to_virtual(inputs.recipe_dir);
         slice.resources = resources;
         for (recipe_variable const& v : rec.vars) {
             for (std::string const& selector : {slice_name(spec), spec.platform, os, std::string{"default"}}) {
@@ -1687,6 +1751,17 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
                 sandboxed.sandbox = launch;
                 return run_process(sandboxed);
             };
+        } else if (!builds_drive_.empty()) {
+            // unisolated, otok-sandbox.dll alone gives the device map to the children of the build's programs
+            auto const launch = std::make_shared<sandbox_launch const>(sandbox_launch{"", settings_.sandbox.program, base / "sandbox.log", base});
+            slice.run = [launch](process_spec const& s) -> result<process_exit> {
+                auto program = find_program(s.argv.front(), s.env, s.cwd);
+                if (!program) return std::unexpected{program.error()};
+                process_spec with = s;
+                with.argv.front() = path_to_utf8(*program);
+                with.sandbox = launch;
+                return run_process(with);
+            };
         }
         // a toolchain that is a script runs under its interpreter, before the sandbox wraps the command (docs/PLAN.md decision 70)
         if (!interpreted.empty()) {
@@ -1720,7 +1795,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
 
         // the results (build-lua-api.md 8): their kinds by the linkage, checked by the target too
         std::vector<std::string> leaks;  // as the host writes them and with `/`, as build.lua sees them
-        for (fs::path const& dir : {base, work, cache_.root()}) {
+        for (fs::path const& dir : {base, work, cache_.root(), virtual_drives::to_virtual(cache_.root())}) {
             leaks.push_back(path_to_utf8(dir));
             leaks.push_back(slashed(dir));
         }
@@ -1898,7 +1973,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
             return {};
         }
         fs::create_directories(staging, ec);
-        rename_path(slice.prefix, staging / "prefix", ec);
+        rename_path(virtual_drives::to_real(slice.prefix), staging / "prefix", ec);
         if (ec) return failed("cannot move the prefix into the cache: " + ec.message());
         std::ofstream{staging / "result.toml", std::ios::binary} << write_result(*built, slice.prefix);
         std::ofstream{staging / "key.txt", std::ios::binary} << text;

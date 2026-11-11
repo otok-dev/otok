@@ -18,6 +18,7 @@
 
 #include "otok/core/binary.hpp"
 #include "otok/core/fs.hpp"
+#include "otok/core/virtual_drives.hpp"
 
 namespace otok::lua_detail {
 
@@ -1001,7 +1002,8 @@ script_env::script_env(slice_context const& s) : slice{s}
     auto const add = [](std::vector<fs::path>& roots, fs::path const& p) {
         if (p.empty()) return;
         std::error_code ec;
-        fs::path real = fs::weakly_canonical(p, ec);
+        // through the virtual drives as the build sees them: resolved, a path on one is the long real path
+        fs::path real = virtual_drives::to_virtual(fs::weakly_canonical(p, ec));
         roots.push_back(ec ? p.lexically_normal() : std::move(real));
     };
     for (fs::path const& p : {s.source, s.build, s.prefix}) {
@@ -1036,7 +1038,7 @@ result<fs::path> confine(script_env const& env, std::string_view path, access a)
     fs::path p = path_from_utf8(path);
     if (p.is_relative()) p = env.slice.source / p;
     std::error_code ec;
-    fs::path const real = fs::weakly_canonical(p, ec);
+    fs::path const real = virtual_drives::to_virtual(fs::weakly_canonical(p, ec));
     if (ec) return fail("cannot resolve '" + std::string{path} + "': " + ec.message());
     for (fs::path const& root : a == access::write ? env.write_roots : env.read_roots) {
         if (within(real, root)) return real;

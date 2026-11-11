@@ -3,8 +3,12 @@
 
 #include <gtest/gtest.h>
 
+#include <filesystem>
+#include <fstream>
+
 #include "otok/core/environment.hpp"
 #include "otok/core/process.hpp"
+#include "test_util.hpp"
 
 using namespace otok;
 
@@ -60,4 +64,25 @@ TEST(environment, of_the_machine)
     EXPECT_TRUE(is_host_machine(host_machine()));
     EXPECT_FALSE(is_host_machine("macos"));
     EXPECT_FALSE(is_host_machine("macos-ppc"));
+    // a Linux machine on musl (decision 105)
+    EXPECT_TRUE(is_host_machine("linux-x86_64-musl"));
+    EXPECT_TRUE(is_host_machine("linux-arm64-musl"));
+    EXPECT_FALSE(is_host_machine("windows-x86_64-musl"));
+    EXPECT_FALSE(is_host_machine("linux-musl"));
+    EXPECT_TRUE(is_host_machine(host_condition()));
+    EXPECT_TRUE(host_condition().starts_with(host_machine()));
+}
+
+TEST(environment, the_c_library_of_a_root)
+{
+    test::temp_dir root;
+    auto const file = [&](char const* relative) {
+        std::filesystem::create_directories((root.path() / relative).parent_path());
+        std::ofstream{root.path() / relative} << "x";
+    };
+    EXPECT_EQ(libc_of_root(root.path()), "glibc");  // nothing to tell: glibc, as most systems
+    file("lib/ld-musl-aarch64.so.1");
+    EXPECT_EQ(libc_of_root(root.path()), "musl");   // Alpine
+    file("lib/ld-linux-aarch64.so.1");
+    EXPECT_EQ(libc_of_root(root.path()), "glibc");  // glibc with Debian's package musl beside it
 }

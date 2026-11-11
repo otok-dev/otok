@@ -102,6 +102,7 @@ std::optional<config_file> parse_config(std::string_view content, std::string co
     read_input_mirrors(root, c.mirrors, severity::warning);
     c.keep_build_dirs = root.boolean("keep-build-dirs");
     c.sandbox = root.boolean("sandbox");
+    c.virtual_paths = root.boolean("virtual-paths");
     if (auto color = root.string("color")) {
         c.color = parse_color(*color);
         if (!c.color) root.error(root.position("color"), root.describe("color") + " must be \"auto\", \"always\" or \"never\"");
@@ -226,6 +227,13 @@ std::optional<machine_config> resolve_config(config_file const& file, environmen
         auto value = parse_flag(*sandbox);
         if (!value) diags.error({}, "OTOK_SANDBOX must be 1, 0, true, false, yes or no, not '" + *sandbox + "'");
         else c.sandbox = *value;
+    }
+
+    c.virtual_paths = file.virtual_paths.value_or(true);
+    if (auto virtual_paths = non_empty(env, "OTOK_VIRTUAL_PATHS")) {
+        auto value = parse_flag(*virtual_paths);
+        if (!value) diags.error({}, "OTOK_VIRTUAL_PATHS must be 1, 0, true, false, yes or no, not '" + *virtual_paths + "'");
+        else c.virtual_paths = *value;
     }
 
     c.color = file.color.value_or(color_mode::automatic);

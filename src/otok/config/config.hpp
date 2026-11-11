@@ -40,6 +40,7 @@ struct config_file
     std::optional<std::int64_t> cache_max_age;
     std::optional<bool> keep_build_dirs;
     std::optional<bool> sandbox;
+    std::optional<bool> virtual_paths;
     std::optional<std::string> visual_studio;
     std::optional<std::string> xcode;
     std::optional<std::string> android_ndk;
@@ -62,6 +63,7 @@ struct machine_config
     std::int64_t cache_max_age = 30;  // days; 0: no automatic garbage collection
     bool keep_build_dirs = false;
     bool sandbox = true;         // build processes in the host's sandbox (DESIGN 6.5)
+    bool virtual_paths = true;   // Windows: build processes see the cache and work directories through short drive letters
     std::string visual_studio;  // Windows, native target: a major version or a path; empty: the newest
     std::string xcode;          // Apple target: Xcode.app or its Developer directory; empty: xcode-select -p
     std::string android_ndk;    // Android target: the NDK's root; empty: found from the environment and the SDK

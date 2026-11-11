@@ -7,10 +7,14 @@
 #include <array>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
+#include <string>
 
 #include <curl/curl.h>
 
@@ -25,6 +29,20 @@ void global_init()
 {
     static std::once_flag once;
     std::call_once(once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
+}
+
+// The CA bundle and directory of the system for every handle, found once (decision 104); nothing elsewhere than on
+// Linux, where libcurl uses the system's store (Schannel, Secure Transport).
+void set_ca(CURL* h)
+{
+#if defined(__linux__)
+    static std::string const bundle = path_to_utf8(find_ca_bundle(std::getenv("SSL_CERT_FILE"), known_ca_bundles()));
+    static char const* const dir = std::getenv("SSL_CERT_DIR");
+    if (!bundle.empty()) curl_easy_setopt(h, CURLOPT_CAINFO, bundle.c_str());
+    if (dir && *dir) curl_easy_setopt(h, CURLOPT_CAPATH, dir);
+#else
+    (void)h;
+#endif
 }
 
 struct easy_deleter
@@ -82,6 +100,7 @@ result<void> start(transfer& t, http_settings const& settings)
     curl_easy_setopt(h, CURLOPT_USERAGENT, settings.user_agent.c_str());
     curl_easy_setopt(h, CURLOPT_NOSIGNAL, 1L);
     if (!settings.proxy.empty()) curl_easy_setopt(h, CURLOPT_PROXY, settings.proxy.c_str());
+    set_ca(h);
     curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, on_data);
     curl_easy_setopt(h, CURLOPT_WRITEDATA, &t);
     curl_easy_setopt(h, CURLOPT_ERRORBUFFER, t.error.data());
@@ -270,6 +289,7 @@ result<http_reply> http_call(http_exchange const& request, http_settings const& 
     curl_easy_setopt(h, CURLOPT_USERAGENT, settings.user_agent.c_str());
     curl_easy_setopt(h, CURLOPT_NOSIGNAL, 1L);
     if (!settings.proxy.empty()) curl_easy_setopt(h, CURLOPT_PROXY, settings.proxy.c_str());
+    set_ca(h);
     curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, on_reply);
     curl_easy_setopt(h, CURLOPT_WRITEDATA, &sink);
     curl_easy_setopt(h, CURLOPT_HEADERFUNCTION, on_header);
@@ -282,6 +302,29 @@ result<http_reply> http_call(http_exchange const& request, http_settings const& 
     curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &reply.status);
     reply.truncated = sink.truncated;
     return reply;
+}
+
+std::filesystem::path find_ca_bundle(char const* ssl_cert_file, std::span<std::filesystem::path const> candidates)
+{
+    if (ssl_cert_file && *ssl_cert_file) return path_from_utf8(ssl_cert_file);
+    for (std::filesystem::path const& candidate : candidates) {
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(candidate, ec)) return candidate;  // a link to a file too
+    }
+    return {};
+}
+
+std::span<std::filesystem::path const> known_ca_bundles()
+{
+    static std::array<std::filesystem::path, 6> const bundles{
+        "/etc/ssl/certs/ca-certificates.crt",                 // Debian, Ubuntu, Arch, Gentoo, Alpine, NixOS, Void
+        "/etc/pki/tls/certs/ca-bundle.crt",                   // Fedora, RHEL
+        "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",  // RHEL, CentOS
+        "/etc/ssl/ca-bundle.pem",                             // openSUSE
+        "/etc/ssl/cert.pem",                                  // Alpine, the BSDs' layout
+        "/etc/pki/tls/cacert.pem",                            // OpenELEC
+    };
+    return bundles;
 }
 
 std::string file_url(std::filesystem::path const& path)

@@ -5,8 +5,9 @@
 # (docs/PLAN.md decision 7: their licenses ask for the notices to go with every binary): Lua, dataforge, the JavaScript
 # libraries of the catalog site and the copyright file of every vcpkg port under OTOK_VCPKG_SHARE but gtest (the tests')
 # and vcpkg's own helper ports. A build without vcpkg (Homebrew's, with the system's packages) leaves those to its
-# packager: OTOK_VCPKG_SHARE may be empty or missing. The notices are staged as `<name>.txt` and embedded by
-# cmake/embed.cmake. Both builds run it: CMakeLists.txt and Directory.Build.targets.
+# packager: OTOK_VCPKG_SHARE may be empty or missing. OTOK_EXTRA_NOTICES: a directory of more `<name>.txt` notices of
+# what the build links (musl in the static Linux binary, decision 104); empty: none. The notices are staged as
+# `<name>.txt` and embedded by cmake/embed.cmake. Both builds run it: CMakeLists.txt and Directory.Build.targets.
 
 file(TO_CMAKE_PATH "${OTOK_ROOT}" OTOK_ROOT)
 file(TO_CMAKE_PATH "${OTOK_OUTPUT}" OTOK_OUTPUT)
@@ -32,6 +33,15 @@ if(OTOK_VCPKG_SHARE)
             endif()
         endforeach()
     endif()
+endif()
+
+if(OTOK_EXTRA_NOTICES)
+    file(TO_CMAKE_PATH "${OTOK_EXTRA_NOTICES}" OTOK_EXTRA_NOTICES)
+    file(GLOB extra ${OTOK_EXTRA_NOTICES}/*.txt)
+    if(NOT extra)
+        message(FATAL_ERROR "no notices in OTOK_EXTRA_NOTICES '${OTOK_EXTRA_NOTICES}'")
+    endif()
+    file(COPY ${extra} DESTINATION ${stage})
 endif()
 
 set(OTOK_EMBED_DIR ${stage})

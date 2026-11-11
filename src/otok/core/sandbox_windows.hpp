@@ -22,7 +22,7 @@ inline constexpr GUID payload_guid = {0x9b3f61d2, 0x4c8e, 0x4f0a, {0xb5, 0xd7, 0
 
 // Raised whenever the layout changes: a DLL and an otok of different versions never meet (the DLL lies beside
 // otok.exe), but the check costs nothing.
-inline constexpr unsigned payload_version = 2;
+inline constexpr unsigned payload_version = 3;
 
 // The DLL's file name, beside otok.exe.
 inline constexpr wchar_t dll_name[] = L"otok-sandbox.dll";
@@ -47,6 +47,9 @@ inline constexpr DWORD mountmgr_access = SYNCHRONIZE | FILE_READ_ATTRIBUTES;
 inline constexpr DWORD ancestor_access = SYNCHRONIZE | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | READ_CONTROL;
 inline constexpr std::size_t max_ancestors = 24;
 
+// The virtual drives a payload carries (core/virtual_drives): the cache and the work directories.
+inline constexpr std::size_t max_drives = 4;
+
 struct payload
 {
     unsigned version;
@@ -58,7 +61,8 @@ struct payload
     // QueryDosDeviceW of each drive letter, taken outside ("" for none): the container may not open the links of \??.
     wchar_t dos_devices[26][128];
     // The container's SID and the user's as text, and the container's object namespace,
-    // \Sessions\<n>\AppContainerNamedObjects\<SID>: a forked Cygwin child cannot always read its own token.
+    // \Sessions\<n>\AppContainerNamedObjects\<SID>: a forked Cygwin child cannot always read its own token. No container:
+    // the DLL runs outside an AppContainer, for the device map alone (sandbox = false).
     wchar_t container_sid[192];
     wchar_t user_sid[192];
     wchar_t container_objects[320];
@@ -79,6 +83,19 @@ struct payload
         unsigned long long handle;
         wchar_t name[520];
     } ancestors[max_ancestors];
+    // The device map of otok (core/virtual_drives), which a map not being inherited the DLL sets on each child: the map's
+    // object directory, valid in this process, outside an AppContainer; in one, which may not set it, the pipe of otok's
+    // broker (core/sandbox), to which the DLL sends a handle to the suspended child. Both empty: no map.
+    unsigned long long map_directory;
+    wchar_t map_pipe[128];
+    // The virtual drives, the deepest directories first: GetFinalPathNameByHandleW gives the real directory's paths
+    // through the letter.
+    unsigned drive_count;
+    struct drive
+    {
+        wchar_t letter;
+        wchar_t real[1024];  // C:\…, no separator at the end
+    } drives[max_drives];
 };
 
 // The value of `name` in an environment block ("NAME=value\0…\0"), compared without case; null when not there.

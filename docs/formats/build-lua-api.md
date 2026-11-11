@@ -60,6 +60,10 @@ end
     and offered to target slices as `slice.tools.prefix`. Its return value is ignored.
 - **Fresh inputs.** `slice.source` is a fresh, patched copy of the source (and resources with
   `dest`) for this slice only, so in-tree builds of different slices never collide.
+- **Short paths on Windows.** With `virtual-paths` (`config.md`) the paths of the slice (`slice.source`, `slice.build`,
+  `slice.prefix`, the dependencies' prefixes, toolchains of recipes, resources) are on short drive letters that only otok
+  and the build's processes see (`cache.md` 7.1): `build.lua` uses them as they are, and anything resolving them gets
+  the same letters back.
 - **Failure.** `error(...)`, a Lua runtime error, or a failing `otok.run` aborts the slice. otok
   reports the message with the `build.lua` line, the failed command and the end of the slice's log,
   and keeps the whole log, or the work directory when `keep-build-dirs` is set (`config.md`, `cache.md` 7.1).
@@ -78,7 +82,8 @@ A read-only table. Paths are absolute, with `/` as separator on every host.
 | `platform` | string | `"iossim"` |
 | `arch` | string | `"arm64"` |
 | `environment` | string | The build environment (common 4.2) of the slice, its host without architecture: `"macos/xcode"`, `"linux/clang-cl"`, `"windows/ndk"` (also when the recipe says `"*/ndk"`). |
-| `host` | string | The build machine, `<system>-<arch>`: `"linux-x86_64"`, `"windows-arm64"` (as `when = { host }` of `recipe-toml.md` 9.1). |
+| `host` | string | The build machine, `<system>-<arch>`: `"linux-x86_64"`, `"windows-arm64"` (as `when = { host }` of `recipe-toml.md` 9.1, without its `-musl`). |
+| `host_libc` | string or nil | The C library of a Linux build machine, `"glibc"` or `"musl"` (`when = { host }` writes the second `linux-<arch>-musl`); nil on other machines. A tool recipe of glibc release binaries builds from source where it is `"musl"`. |
 | `compiler` | string | The compiler of the environment: `"xcode"`, `"ndk"`, `"msvc"`, `"clang-cl"`, `"gcc"`, `"clang"`. |
 | `triple` | string | Clang target triple with deployment version: `"arm64-apple-ios15.0-simulator"`. |
 | `configuration` | string | `"release"` or `"debug"`. |
@@ -452,7 +457,8 @@ otok's cache in what is fixed at link time (its install name or `SONAME`, an `RP
 What an ELF or Mach-O dynamic library or program of the slice loads (a `NEEDED` entry, a loaded library) must be the
 slice's own, a dependency's or the system's, so a library installed on the build machine
 cannot reach the output unnoticed: a name the target counts as the system's (`linux`: the libraries of the C
-and C++ runtimes, `libc.so.6`, `libm.so.6`, `libstdc++.so.6`, `libgcc_s.so.1`, `ld-linux-*`, …; `apple`: everything in
+and C++ runtimes, `libc.so.6`, `libm.so.6`, `libstdc++.so.6`, `libgcc_s.so.1`, `ld-linux-*`, …, and on a build machine of
+musl musl's `libc.so`, `libc.musl-*` (Alpine's name) and `ld-musl-*`; `apple`: everything in
 `/usr/lib/` and `/System/`); a name without a directory or starting with `@rpath/`, `@loader_path/` or
 `@executable_path/` whose file name is a file of the slice's prefix or of a directory of a library of a dependency,
 direct or not; or a library of the `link` of the recipe's products (`recipe-toml.md` 11): `z` allows `libz.so…`.

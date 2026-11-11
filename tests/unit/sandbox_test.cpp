@@ -104,7 +104,9 @@ TEST(sandbox, confines_processes)
 #ifdef __APPLE__
     EXPECT_EQ(run({"/usr/bin/perl", "-e", connect}), "Operation not permitted");
 #else
-    EXPECT_EQ(run({"/usr/bin/perl", "-e", connect}), "Network is unreachable");
+    // strerror(ENETUNREACH) of perl's C library: glibc's, or musl's (Alpine)
+    std::string const refused = run({"/usr/bin/perl", "-e", connect});
+    EXPECT_TRUE(refused == "Network is unreachable" || refused == "Network unreachable") << refused;
 #endif
 
     EXPECT_EQ(run({"/bin/sh", "-c", "echo x > made.txt && cat mine.txt made.txt"}), "mine\nx\n");

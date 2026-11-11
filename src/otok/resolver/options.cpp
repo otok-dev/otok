@@ -7,6 +7,7 @@
 #include <type_traits>
 #include <variant>
 
+#include "otok/core/environment.hpp"
 #include "otok/core/fs.hpp"
 #include "otok/core/paths.hpp"
 #include "otok/core/process.hpp"
@@ -158,7 +159,7 @@ bool condition_holds(condition const& c, merged_options const& options, std::str
     }
     if (c.os && std::ranges::find(*c.os, os) == c.os->end()) return false;
     if (c.platform && std::ranges::find(*c.platform, platform) == c.platform->end()) return false;
-    if (c.host && std::ranges::find(*c.host, host_machine()) == c.host->end()) return false;
+    if (c.host && std::ranges::find(*c.host, host_condition()) == c.host->end()) return false;  // linux-x86_64-musl on musl (decision 105)
     if (c.option) {
         auto const it = options.find(*c.option);
         if (it == options.end()) return false;

@@ -92,45 +92,54 @@ jobs:
 
   linux:
     needs: version
-    runs-on: ubuntu-24.04
-    # the system of the index's CI, which runs this binary
-    container: ubuntu:26.04
+    strategy:
+      matrix:
+        include:
+          - { arch: x64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    # one static binary for every distribution (decision 104), made in Alpine for its musl. Through docker run, not
+    # `container:`: GitHub's JavaScript actions run in Alpine containers of x64 runners only.
     env:
-      VCPKG_ROOT: /opt/vcpkg
-      VCPKG_BINARY_SOURCES: clear;files,/opt/vcpkg-cache,readwrite
+      ALPINE: alpine:3.24
     steps:
-      - name: Build tools
-        run: |
-          apt-get update -q
-          DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
-            build-essential cmake ninja-build git ca-certificates curl zip unzip tar zstd pkg-config perl \
-            autoconf automake autoconf-archive libtool python3 linux-libc-dev
-          git config --global --add safe.directory '*'
       - uses: actions/checkout@v4
         with: { submodules: true, fetch-depth: 0 }
       - name: vcpkg
         run: |
-          git init -q "$VCPKG_ROOT" && cd "$VCPKG_ROOT"
+          git init -q ../vcpkg && cd ../vcpkg
           git fetch -q --depth 1 https://github.com/microsoft/vcpkg "$VCPKG_COMMIT" && git checkout -q FETCH_HEAD
-          ./bootstrap-vcpkg.sh -disableMetrics
-          mkdir -p /opt/vcpkg-cache
+          mkdir -p ../vcpkg-cache
       - uses: actions/cache/restore@v4
         with:
-          path: /opt/vcpkg-cache
-          key: vcpkg-linux-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'triplets/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/../vcpkg-cache
+          key: vcpkg-linux-musl-${{ matrix.arch }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'triplets/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            vcpkg-linux-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'triplets/**') }}-
-            vcpkg-linux-
+            vcpkg-linux-musl-${{ matrix.arch }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'triplets/**') }}-
+            vcpkg-linux-musl-${{ matrix.arch }}-
       - name: Build
-        run: bash tools/release/linux-x64.sh "$GITHUB_WORKSPACE/build/release"
+        run: |
+          parent=$(cd .. && pwd)
+          docker run --rm -v "$parent:/build" -w "/build/$(basename "$GITHUB_WORKSPACE")" \
+            -e OTOK_REVISION -e "HOST_IDS=$(id -u):$(id -g)" -e VCPKG_ROOT=/build/vcpkg -e VCPKG_FORCE_SYSTEM_BINARIES=1 \
+            -e "VCPKG_BINARY_SOURCES=clear;files,/build/vcpkg-cache,readwrite" \
+            "$ALPINE" /bin/sh -c '
+              set -e
+              trap "chown -R $HOST_IDS /build" EXIT  # the runner saves the cache and uploads the archive
+              apk add --no-cache -q build-base cmake ninja-is-really-ninja git curl zip unzip tar zstd pkgconf perl \
+                autoconf automake autoconf-archive libtool python3 linux-headers bash ca-certificates
+              gcc --version | head -n 1
+              git config --global --add safe.directory "*"
+              /build/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+              bash tools/release/linux.sh "$PWD/build/release"'
       - uses: actions/cache/save@v4
         if: always()
         with:
-          path: /opt/vcpkg-cache
-          key: vcpkg-linux-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'triplets/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/../vcpkg-cache
+          key: vcpkg-linux-musl-${{ matrix.arch }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'triplets/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
       - uses: actions/upload-artifact@v4
         with:
-          name: otok-linux
+          name: otok-linux-${{ matrix.arch }}
           path: build/release/otok-*.tar.gz*
           if-no-files-found: error
 

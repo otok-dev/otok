@@ -27,7 +27,7 @@ jobs:
     # after check.yml or probe.yml, only when they succeeded: a failed run pushed nothing
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
-    container: ubuntu:26.04  # the system otok-linux-x64 is built on
+    container: ubuntu:26.04  # the tools below; otok-linux-x64 is static and runs on any system
     environment:
       name: github-pages
     steps:
