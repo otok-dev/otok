@@ -28,6 +28,7 @@
 #endif
 
 #include "otok/core/fs.hpp"
+#include "otok/core/sandbox.hpp"
 
 #ifndef _WIN32
 extern char** environ;
@@ -289,7 +290,14 @@ result<process_exit> spawn(std::filesystem::path const& program, process_spec co
     std::wstring env = environment_block(spec.env);
 
     PROCESS_INFORMATION pi{};
-    if (!::CreateProcessW(program.c_str(), wide_command_line.data(), nullptr, nullptr, TRUE,
+    if (spec.sandbox) {
+        // in the AppContainer, with otok-sandbox.dll (docs/PLAN.md decision 103)
+        STARTUPINFOW plain = si.StartupInfo;
+        plain.cb = sizeof plain;
+        std::vector<void*> const handles{inherited.begin(), inherited.end()};
+        if (auto ok = detail::create_sandboxed_process(*spec.sandbox, program, wide_command_line, env, spec.cwd, handles, &plain, &pi); !ok)
+            return std::unexpected{ok.error()};
+    } else if (!::CreateProcessW(program.c_str(), wide_command_line.data(), nullptr, nullptr, TRUE,
             EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | CREATE_SUSPENDED, env.data(),
             spec.cwd.c_str(), &si.StartupInfo, &pi)) {
         return fail("cannot start '" + path_to_utf8(program) + "': " + last_error_message());

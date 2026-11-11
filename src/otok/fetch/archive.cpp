@@ -177,7 +177,7 @@ result<void> extract_archive(std::filesystem::path const& archive_file, std::fil
             single = e.path();
         }
         bool const strip = root_mode == top_level::strip_single && count == 1 && fs::is_directory(fs::symlink_status(single, ec));
-        fs::rename(strip ? single : partial, destination, ec);
+        rename_path(strip ? single : partial, destination, ec);
         if (ec) result = fail("cannot move the unpacked archive to '" + path_to_utf8(destination) + "': " + ec.message());
     }
     fs::remove_all(long_path(partial), ec);

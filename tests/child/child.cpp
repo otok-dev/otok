@@ -16,6 +16,11 @@
 //   abort         terminates abnormally (a signal on POSIX)
 //   job           Windows: prints the limits otok sets of the job it runs in (kill-on-close, die-on-exception), or none
 //   jobserver     POSIX: takes a token from descriptor 3, gives it back to descriptor 4 and prints it
+//   semaphore N   Windows: opens the semaphore named N and prints opened, or the error
+//   traverse D    Windows: opens the directory D to pass through it and prints opened, or the error
+//   list D        Windows: opens the directory D to list it and prints opened, or the error
+//   connect       Windows: connects to 192.0.2.1:80 (TEST-NET, never answers) and prints the Winsock error, or
+//                 timeout after 2 s (an AppContainer without capabilities is refused at once: 10013)
 //
 // A first argument naming an existing file is a script it was started for as an interpreter (tests/unit/builder_test.cpp):
 // it prints `script <file name>` and runs the command that follows.
@@ -29,9 +34,12 @@
 #include <vector>
 
 #ifdef _WIN32
+#   include <winsock2.h>
+#   include <ws2tcpip.h>
 #   include <fcntl.h>
 #   include <io.h>
 #   include <windows.h>
+#   pragma comment(lib, "ws2_32.lib")
 #else
 #   include <unistd.h>
 extern char** environ;
@@ -118,6 +126,45 @@ int run(std::vector<std::string> args)
         DWORD const flags = limits.BasicLimitInformation.LimitFlags;
         if (flags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE) std::cout << "kill-on-close\n";
         if (flags & JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION) std::cout << "die-on-exception\n";
+    } else if ((command == "traverse" || command == "list") && args.size() == 2) {
+        std::filesystem::path const dir{std::u8string{args[1].begin(), args[1].end()}};
+        HANDLE const h = ::CreateFileW(dir.c_str(), command == "traverse" ? SYNCHRONIZE | FILE_TRAVERSE : SYNCHRONIZE | FILE_LIST_DIRECTORY,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        std::cout << (h != INVALID_HANDLE_VALUE ? std::string{"opened"} : std::to_string(::GetLastError())) << '\n';
+        if (h != INVALID_HANDLE_VALUE) ::CloseHandle(h);
+    } else if (command == "semaphore" && args.size() == 2) {
+        HANDLE const s = ::OpenSemaphoreW(SEMAPHORE_ALL_ACCESS, FALSE, std::filesystem::path{std::u8string{args[1].begin(), args[1].end()}}.c_str());
+        std::cout << (s ? std::string{"opened"} : std::to_string(::GetLastError())) << '\n';
+    } else if (command == "connect") {
+        WSADATA data;
+        ::WSAStartup(MAKEWORD(2, 2), &data);
+        SOCKET const s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        u_long nonblocking = 1;
+        ::ioctlsocket(s, FIONBIO, &nonblocking);
+        sockaddr_in to{};
+        to.sin_family = AF_INET;
+        to.sin_port = ::htons(80);
+        ::inet_pton(AF_INET, "192.0.2.1", &to.sin_addr);
+        if (::connect(s, reinterpret_cast<sockaddr*>(&to), sizeof to) == 0) {
+            std::cout << "connected\n";
+            return 0;
+        }
+        int error = ::WSAGetLastError();
+        if (error == WSAEWOULDBLOCK) {
+            fd_set writable, failed;
+            FD_ZERO(&writable);
+            FD_ZERO(&failed);
+            FD_SET(s, &writable);
+            FD_SET(s, &failed);
+            timeval timeout{2, 0};
+            if (::select(0, nullptr, &writable, &failed, &timeout) == 0) {
+                std::cout << "timeout\n";
+                return 0;
+            }
+            int length = sizeof error;
+            ::getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&error), &length);
+        }
+        std::cout << error << '\n';
 #endif
 #ifndef _WIN32
     } else if (command == "jobserver") {

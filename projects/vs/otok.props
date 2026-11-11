@@ -8,10 +8,11 @@
     <OtokVcpkgLibDir Condition="'$(Configuration)' == 'Debug'">$(OtokVcpkgInstalled)debug\lib\</OtokVcpkgLibDir>
     <OtokVcpkgLibDir Condition="'$(Configuration)' != 'Debug'">$(OtokVcpkgInstalled)lib\</OtokVcpkgLibDir>
     <!-- Static libraries of vcpkg (debug builds carry a suffix) and the system libraries they need
-         (from their .pc files: libcurl with Schannel, libarchive). -->
-    <OtokVcpkgLibs Condition="'$(Configuration)' == 'Debug'">libcurl-d.lib;archive.lib;bz2d.lib;lzma.lib;zstd.lib;zsd.lib</OtokVcpkgLibs>
-    <OtokVcpkgLibs Condition="'$(Configuration)' != 'Debug'">libcurl.lib;archive.lib;bz2.lib;lzma.lib;zstd.lib;zs.lib</OtokVcpkgLibs>
-    <OtokSystemLibs>bcrypt.lib;advapi32.lib;crypt32.lib;secur32.lib;ws2_32.lib;iphlpapi.lib</OtokSystemLibs>
+         (from their .pc files: libcurl with Schannel, libarchive). detours: the sandbox (docs/PLAN.md decision 103), with userenv
+         for its AppContainer profile. -->
+    <OtokVcpkgLibs Condition="'$(Configuration)' == 'Debug'">libcurl-d.lib;archive.lib;bz2d.lib;lzma.lib;zstd.lib;zsd.lib;$(OtokVcpkgInstalled)lib\detours.lib</OtokVcpkgLibs>
+    <OtokVcpkgLibs Condition="'$(Configuration)' != 'Debug'">libcurl.lib;archive.lib;bz2.lib;lzma.lib;zstd.lib;zs.lib;detours.lib</OtokVcpkgLibs>
+    <OtokSystemLibs>bcrypt.lib;advapi32.lib;crypt32.lib;secur32.lib;ws2_32.lib;iphlpapi.lib;userenv.lib</OtokSystemLibs>
   </PropertyGroup>
 
   <ItemDefinitionGroup>

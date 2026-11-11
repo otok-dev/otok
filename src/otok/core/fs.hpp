@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <system_error>
 #include <map>
 #include <span>
 #include <string>
@@ -23,6 +24,11 @@ std::string path_to_utf8(std::filesystem::path const& path);
 // form of the absolute path (`\\?\C:\…`, `\\?\UNC\server\…`), so trees with deep paths (Boost's
 // documentation) can be copied and removed; elsewhere the path itself.
 std::filesystem::path long_path(std::filesystem::path const& path);
+
+// std::filesystem::rename that waits out another process holding a file in `from` open: Windows refuses meanwhile
+// with access denied (an indexer or an antivirus reading what was just unpacked, another thread replacing the same
+// file), so there it is tried again for about five seconds, waiting longer each time; elsewhere once.
+void rename_path(std::filesystem::path const& from, std::filesystem::path const& to, std::error_code& ec);
 
 // The whole file as bytes.
 result<std::string> read_file(std::filesystem::path const& path);

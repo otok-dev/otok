@@ -65,6 +65,21 @@ result<std::string> read_file(std::filesystem::path const& path)
     return content;
 }
 
+void rename_path(std::filesystem::path const& from, std::filesystem::path const& to, std::error_code& ec)
+{
+    std::filesystem::rename(from, to, ec);
+#ifdef _WIN32
+    // 10 ms, doubling up to half a second, for about five seconds in all
+    auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    auto wait = std::chrono::milliseconds{10};
+    while (ec == std::errc::permission_denied && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(wait);
+        wait = std::min(wait * 2, std::chrono::milliseconds{500});
+        std::filesystem::rename(from, to, ec);
+    }
+#endif
+}
+
 result<void> write_file_atomic(std::filesystem::path const& path, std::string_view content)
 {
     // a name of its own per write: threads and processes may replace the same file at once (the state of an index read by
@@ -80,12 +95,8 @@ result<void> write_file_atomic(std::filesystem::path const& path, std::string_vi
         if (!out) return fail("cannot write '" + path_to_utf8(temporary) + "'");
     }
     std::error_code ec;
-    // Windows refuses to replace a file another thread is replacing at that moment: tried again a while
-    for (int attempt = 0;; ++attempt) {
-        std::filesystem::rename(temporary, path, ec);
-        if (ec != std::errc::permission_denied || attempt == 100) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds{10});
-    }
+    // Windows refuses to replace a file another thread is replacing at that moment
+    rename_path(temporary, path, ec);
     if (ec) {
         std::string const reason = ec.message();
         std::filesystem::remove(temporary, ec);

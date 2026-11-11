@@ -888,7 +888,9 @@ int otok_move(lua_State* L)
     fs::path const from = path_arg(L, 1, "otok.move", access::write);
     fs::path const to = path_arg(L, 2, "otok.move", access::write);
     fs::create_directories(to.parent_path());
-    fs::rename(from, to);
+    std::error_code ec;
+    rename_path(from, to, ec);
+    if (ec) throw fs::filesystem_error("rename", from, to, ec);
     return 0;
 }
 

@@ -53,6 +53,7 @@
     <ClInclude Include="$(OtokRoot)src\otok\core\fs.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\core\jobserver.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\core\sandbox.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\core\sandbox_windows.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\core\license.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\core\names.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\core\option_data.hpp" />

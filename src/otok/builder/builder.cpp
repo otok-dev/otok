@@ -6,9 +6,10 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
-#include <cstdio>
 #include <condition_variable>
+#include <cstdio>
 #include <ctime>
+#include <deque>
 #include <fstream>
 #include <functional>
 #include <iterator>
@@ -250,7 +251,7 @@ std::string keep_failure(cache_store const& cache, fs::path const& work, fs::pat
     for (int n = 2; fs::exists(kept, ec); ++n) kept.replace_filename(name + "-" + timestamp() + "-" + std::to_string(n));
     fs::create_directories(kept.parent_path(), ec);
     if (whole) {
-        fs::rename(work, kept, ec);
+        rename_path(work, kept, ec);
         if (!ec) {
             std::ofstream{kept / "key.txt", std::ios::binary} << key;
             return "\nthe work directory is kept in '" + slashed(kept) + "'";
@@ -935,7 +936,47 @@ result<std::vector<std::string>> builder::sandbox_command_of(fs::path const& wor
     if (settings_.sandbox.kind == host_sandbox::mechanism::seatbelt) {
         if (auto ok = write_file_atomic(file, seatbelt_profile(spec)); !ok) return std::unexpected{ok.error()};
     }
+    // an AppContainer reaches what the ACLs grant it (docs/PLAN.md decision 103): entries that stay and are inherited, so
+    // only in otok's cache and on otok itself; the rest (Visual Studio, the Windows Kits, LLVM in Program Files) the
+    // container reads already, or a build's refusals in sandbox.log name it
+    if (settings_.sandbox.kind == host_sandbox::mechanism::appcontainer) {
+        sandbox_spec granted = spec;
+        auto const root = resolved(cache_.root());
+        auto const launcher = settings_.launcher.empty() ? std::nullopt : resolved(settings_.launcher);
+        std::erase_if(granted.readable, [&](fs::path const& p) {
+            if (launcher && p == *launcher) return false;
+            if (!root) return true;
+            auto const [r, q] = std::mismatch(root->begin(), root->end(), p.begin(), p.end());
+            return r != root->end();
+        });
+        if (auto ok = grant_sandbox_access(settings_.sandbox, granted); !ok) return std::unexpected{ok.error()};
+    }
     return sandbox_command(settings_.sandbox, spec, file);
+}
+
+void builder::check_sandbox_exits()
+{
+    // the load of a sandboxed build cannot tell it from the kernel's own work (ACLs written, many processes ending at
+    // once took most of a core on a healthy machine): empty processes before it can
+    constexpr int processes = 50;
+    constexpr double much = 0.005;  // seconds per process; healthy well under 0.001, the bad state ~0.02
+    auto const started = std::chrono::steady_clock::now();
+    std::uint64_t const task = settings_.display ? settings_.display->begin("checking the sandbox") : 0;
+    auto const cost = sandbox_exit_cost(settings_.sandbox, processes);
+    if (settings_.display) settings_.display->end(task);
+    if (!cost) {
+        say("warning: cannot check the sandbox: " + cost.error().message);
+        return;
+    }
+    std::chrono::duration<double> const took = std::chrono::steady_clock::now() - started;
+    char text[160];
+    std::snprintf(text, sizeof text, "checked the sandbox: %.2f ms of the kernel for each of its processes that ends (%.1f s)", *cost * 1000,
+        took.count());
+    say(text);
+    if (*cost > much) {
+        say("warning: Windows spends much time in the kernel after each process of the sandbox ends: builds will be slow and the "
+            "desktop may stall; a reboot usually clears it, and --no-sandbox builds without the sandbox");
+    }
 }
 
 jobserver_protocol builder::jobserver_client(std::string const& tool, env_vars const& env)
@@ -1047,7 +1088,7 @@ result<void> builder::prepare_sources(resolved_package const& p, built_package& 
         if (auto ok = copy_tree(inputs.source, work / "source"); !ok) return failed("cannot copy the source: " + ok.error().message);
         if (auto ok = apply_patches(rec, inputs.recipe_dir, work / "source", work, log); !ok) return failed(ok.error().message);
         fs::create_directories(staging, ec);
-        fs::rename(work / "source", staging / "source", ec);
+        rename_path(work / "source", staging / "source", ec);
         if (ec) return failed("cannot move the patched source into the cache: " + ec.message());
         std::ofstream{staging / "key.txt", std::ios::binary} << text;
         fs::remove_all(long_path(work), ec);
@@ -1287,13 +1328,33 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
     bool tell = false;
     {
         std::lock_guard const lock{mutex_};
-        tell = !isolation_told_ && settings_.isolation != build_isolation::sandbox;
+        tell = !isolation_told_ && settings_.isolation == build_isolation::off;
         isolation_told_ = isolation_told_ || tell;
     }
-    if (tell && settings_.isolation == build_isolation::off) say("warning: the sandbox is off ('sandbox' in config.toml): builds are not isolated");
-    if (tell && settings_.isolation == build_isolation::unavailable) {
+    if (tell && settings_.isolation == build_isolation::off) {
+        say("warning: the sandbox is off (--no-sandbox, OTOK_SANDBOX or 'sandbox' in config.toml): builds are not isolated");
+    }
+    // never unisolated unless asked (docs/PLAN.md decision 103)
+    if (settings_.isolation == build_isolation::unavailable) {
         std::string const& why = settings_.sandbox.why_not;
-        say("note: builds are not isolated on this host" + (why.empty() ? std::string{} : ": " + why));
+        return fail("builds cannot be isolated on this host" + (why.empty() ? std::string{} : " (" + why + ")")
+            + "; to build without the sandbox, give --no-sandbox, set OTOK_SANDBOX=0 or 'sandbox = false' in config.toml");
+    }
+    // before the first sandboxed process, the slices that come meanwhile waiting, so the check counts its own processes
+    if (settings_.isolation == build_isolation::sandbox && settings_.sandbox.kind == host_sandbox::mechanism::appcontainer) {
+        std::unique_lock lock{mutex_};
+        if (!exits_check_started_) {
+            exits_check_started_ = true;
+            lock.unlock();
+            check_sandbox_exits();
+            lock.lock();
+            exits_checked_ = true;
+            exits_checked_cv_.notify_all();
+        } else if (!exits_checked_) {
+            if (shown.display) shown.display->waiting(shown.id, true, "the check of the sandbox");
+            exits_checked_cv_.wait(lock, [this] { return exits_checked_; });
+            if (shown.display) shown.display->waiting(shown.id, false);
+        }
     }
     auto const started = std::chrono::steady_clock::now();
     fs::path const work = dev ? out.entry : cache_.tmp() / "build" / work_name;
@@ -1331,6 +1392,14 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
             message += keep_failure(cache_, work, log, text, work_name, settings_.keep_build_dirs && !dev, !dev);
             return fail(label + " for " + slice_label(spec) + ": " + message);
         };
+        // the AppContainer's entry given while the work directory is empty, so what is made in it inherits the entry: given
+        // later, it was carried to every file of the source copied there, the other slices waiting for their grants
+        // meanwhile (docs/PLAN.md decision 103)
+        if (settings_.isolation == build_isolation::sandbox && settings_.sandbox.kind == host_sandbox::mechanism::appcontainer) {
+            sandbox_spec own;
+            own.writable = {base};
+            if (auto ok = grant_sandbox_access(settings_.sandbox, own); !ok) return failed(ok.error().message);
+        }
 
         // a fresh copy of the source, resources with `dest`, patches (DESIGN 6.4); in a dev slice, the trees synchronized
         show_stage("sources");
@@ -1439,6 +1508,19 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         slice.build = base / "build";
         slice.prefix = base / "prefix";
         slice.recipe = inputs.recipe_dir;
+        // the AppContainer reads only what otok grants it, in its cache: a recipe of a path elsewhere (the user's working
+        // tree, never touched) is a copy in the work directory, as a recipe of git is one in the cache (docs/PLAN.md
+        // decision 103)
+        if (settings_.isolation == build_isolation::sandbox && settings_.sandbox.kind == host_sandbox::mechanism::appcontainer) {
+            std::error_code failure;
+            fs::path const root = fs::weakly_canonical(cache_.root(), failure);
+            fs::path const dir = fs::weakly_canonical(inputs.recipe_dir, failure);
+            if (auto const [r, d] = std::mismatch(root.begin(), root.end(), dir.begin(), dir.end()); r != root.end()) {
+                fs::remove_all(long_path(base / "recipe"), failure);
+                if (auto ok = copy_tree(inputs.recipe_dir, base / "recipe"); !ok) return failed("cannot copy the recipe: " + ok.error().message);
+                slice.recipe = base / "recipe";
+            }
+        }
         slice.resources = resources;
         for (recipe_variable const& v : rec.vars) {
             for (std::string const& selector : {slice_name(spec), spec.platform, os, std::string{"default"}}) {
@@ -1590,15 +1672,19 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         }
         slice.log = log;
         if (settings_.isolation == build_isolation::sandbox) {
-            auto const command = sandbox_command_of(base, inputs.recipe_dir, read_paths, lease->server().fifo());
+            auto const command = sandbox_command_of(base, slice.recipe, read_paths, lease->server().fifo());
             if (!command) return failed(command.error().message);
-            slice.run = [command = *command](process_spec const& s) -> result<process_exit> {
+            std::shared_ptr<sandbox_launch const> launch;
+            if (settings_.sandbox.kind == host_sandbox::mechanism::appcontainer)
+                launch = std::make_shared<sandbox_launch const>(sandbox_launch{settings_.sandbox.container, settings_.sandbox.program, base / "sandbox.log", base});
+            slice.run = [command = *command, launch](process_spec const& s) -> result<process_exit> {
                 // looked up here, so a missing program fails as it does outside the sandbox
                 auto program = find_program(s.argv.front(), s.env, s.cwd);
                 if (!program) return std::unexpected{program.error()};
                 process_spec sandboxed = s;
                 sandboxed.argv.front() = path_to_utf8(*program);
                 sandboxed.argv.insert(sandboxed.argv.begin(), command.begin(), command.end());
+                sandboxed.sandbox = launch;
                 return run_process(sandboxed);
             };
         }
@@ -1812,7 +1898,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
             return {};
         }
         fs::create_directories(staging, ec);
-        fs::rename(slice.prefix, staging / "prefix", ec);
+        rename_path(slice.prefix, staging / "prefix", ec);
         if (ec) return failed("cannot move the prefix into the cache: " + ec.message());
         std::ofstream{staging / "result.toml", std::ios::binary} << write_result(*built, slice.prefix);
         std::ofstream{staging / "key.txt", std::ios::binary} << text;

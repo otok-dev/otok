@@ -209,6 +209,11 @@ protected:
         environment const environment = [cache_dir, extra](std::string_view name) -> std::optional<std::string> {
             if (name == "OTOK_CACHE_DIR") return path_to_utf8(cache_dir);
             if (auto it = extra.find(std::string{name}); it != extra.end()) return it->second;
+#ifdef __linux__
+            // no PATH, so no bwrap: unisolated, as asked, since otok refuses that unasked (docs/PLAN.md decision 103); the
+            // tests of the sandbox give PATH
+            if (name == "OTOK_SANDBOX" && !extra.contains("PATH")) return "0";
+#endif
             return std::nullopt;
         };
         target_info const* const both_targets[] = {&test::native_info(), second};
@@ -1176,35 +1181,53 @@ TEST_F(builder_test, builds_in_the_sandbox)
     EXPECT_EQ(err.str().find("not isolated"), std::string::npos) << err.str();
 }
 
+#else
+
+// docs/PLAN.md decision 103: the processes of a build run in the AppContainer
+TEST_F(builder_test, builds_in_the_sandbox)
+{
+    std::string const escape = path_to_utf8(std::filesystem::canonical(project.path()) / "escaped.txt");
+    write_recipe("b", "2.0", build_lua("b",
+            // runs, NUL through the DLL; but writes nothing outside the work directory
+            "    otok.run({[[C:\\Windows\\System32\\cmd.exe]], '/d', '/c', 'echo x> nul'})\n"
+            "    otok.run({[[C:\\Windows\\System32\\cmd.exe]], '/d', '/c', [[echo x> \"" + escape + "\"]]}, { check = false })\n"),
+        options_of_b);
+    ASSERT_EQ(run({"install"}), 0) << err.str();
+    EXPECT_FALSE(std::filesystem::exists(escape));
+    EXPECT_EQ(err.str().find("not isolated"), std::string::npos) << err.str();
+}
+
+#endif
+
 TEST_F(builder_test, warns_when_the_sandbox_is_off)
 {
     env["PATH"] = "/usr/bin:/bin";
     if (auto host = find_host_sandbox({{"PATH", env["PATH"]}}); host.kind == host_sandbox::mechanism::none) GTEST_SKIP() << host.why_not;
     env["OTOK_SANDBOX"] = "0";
     ASSERT_EQ(run({"install"}), 0) << err.str();
-    std::string const warning = "warning: the sandbox is off ('sandbox' in config.toml): builds are not isolated\n";
+    std::string const warning = "warning: the sandbox is off (--no-sandbox, OTOK_SANDBOX or 'sandbox' in config.toml): builds are not isolated\n";
     EXPECT_NE(err.str().find(warning), std::string::npos) << err.str();
     EXPECT_EQ(err.str().find(warning), err.str().rfind(warning)) << err.str();  // once
 }
 
-#endif
-
-#ifndef __APPLE__
-
-// Windows, and Linux without bwrap in PATH, which this test's environment has not
-TEST_F(builder_test, notes_unisolated_builds)
+TEST_F(builder_test, builds_without_the_sandbox_when_asked)
 {
-    ASSERT_EQ(run({"install"}), 0) << err.str();
-#ifdef _WIN32
-    std::string const note = "note: builds are not isolated on this host\n";
-#else
-    std::string const note = "note: builds are not isolated on this host: bwrap (bubblewrap) was not found in PATH\n";
-#endif
-    EXPECT_NE(err.str().find(note), std::string::npos) << err.str();
-    EXPECT_EQ(err.str().find(note), err.str().rfind(note)) << err.str();  // once
-    // nothing built: nothing to say
-    ASSERT_EQ(run({"install"}), 0) << err.str();
-    EXPECT_EQ(err.str().find(note), std::string::npos) << err.str();
+    env["PATH"] = "/usr/bin:/bin";
+    ASSERT_EQ(run({"install", "--no-sandbox"}), 0) << err.str();
+    EXPECT_NE(err.str().find("warning: the sandbox is off (--no-sandbox"), std::string::npos) << err.str();
+}
+
+#ifdef __linux__
+
+// Linux without bwrap in PATH: never unisolated unless asked (docs/PLAN.md decision 103)
+TEST_F(builder_test, refuses_unisolated_builds)
+{
+    env["PATH"] = "/nowhere";
+    EXPECT_EQ(run({"install"}), 1);
+    EXPECT_NE(err.str().find("builds cannot be isolated on this host (bwrap (bubblewrap) was not found in PATH); to build without the "
+                             "sandbox, give --no-sandbox, set OTOK_SANDBOX=0 or 'sandbox = false' in config.toml"),
+        std::string::npos) << err.str();
+    ASSERT_EQ(run({"install", "--no-sandbox"}), 0) << err.str();
 }
 
 #endif

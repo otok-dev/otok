@@ -304,7 +304,7 @@ result<fs::path> cache_store::ensure(fs::path const& entry, std::string const& d
     }
     // its last use is now (cache.md 9), whatever time unpacking gave it (an archive's, a commit's)
     fs::last_write_time(staging, fs::file_time_type::clock::now(), ec);
-    fs::rename(staging, entry, ec);
+    rename_path(staging, entry, ec);
     if (ec) {
         std::string const reason = ec.message();
         fs::remove_all(long_path(staging), ec);
@@ -401,7 +401,7 @@ std::vector<result<fs::path>> cache_store::fetch(std::span<cache_download const>
             }
             f.next = f.locations.size();  // done
             fs::path const path = download_path(f.sha256);
-            fs::rename(requests[k].file, path, ec);
+            rename_path(requests[k].file, path, ec);
             if (ec) {
                 result<fs::path> const failure = fail("cannot move the download of " + requests[k].url + " into the cache: " + ec.message());
                 for (std::size_t i : indices) results[i] = failure;
@@ -448,7 +448,7 @@ result<std::vector<cleaned_directory>> cache_store::clean(cache_parts parts, boo
         if (dry_run) continue;
         // out of the way first: an interrupted clean leaves the rest in tmp/, removed by the next otok
         fs::path const trash = state_->tmp / ("clean-" + name);
-        fs::rename(dir, trash, ec);
+        rename_path(dir, trash, ec);
         if (ec) return fail("cannot move '" + path_to_utf8(dir) + "' out of the cache: " + ec.message());
         fs::remove_all(long_path(trash), ec);
         if (ec) return fail("cannot remove '" + path_to_utf8(trash) + "': " + ec.message());
@@ -513,7 +513,7 @@ result<collected_garbage> cache_store::collect_garbage(cache_parts parts, std::i
         if (dry_run) continue;
         // out of the way first, as clean does
         fs::path const trash = state_->tmp / ("gc-" + std::to_string(out.entries));
-        fs::rename(entry, trash, ec);
+        rename_path(entry, trash, ec);
         if (ec) return fail("cannot move '" + path_to_utf8(entry) + "' out of the cache: " + ec.message());
         fs::remove_all(long_path(trash), ec);
         if (ec) return fail("cannot remove '" + path_to_utf8(trash) + "': " + ec.message());

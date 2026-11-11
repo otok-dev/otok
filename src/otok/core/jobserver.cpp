@@ -13,6 +13,8 @@
 
 #ifdef _WIN32
 #   include <windows.h>
+#   include <sddl.h>
+#   include <mutex>
 #else
 #   include <cerrno>
 #   include <fcntl.h>
@@ -61,6 +63,34 @@ result<jobserver> jobserver::create(std::int64_t jobs, fs::path const& dir)
     return create(jobs, jobs - 1, dir, "jobserver");
 }
 
+#ifdef _WIN32
+namespace {
+
+// The SID of the AppContainer granted the semaphores (use_container_jobservers), as text; empty: none.
+struct container_grant
+{
+    std::mutex mutex;
+    std::wstring sid;
+};
+
+container_grant& jobserver_container()
+{
+    static container_grant c;
+    return c;
+}
+
+}
+#endif
+
+void use_container_jobservers([[maybe_unused]] std::string const& container)
+{
+#ifdef _WIN32
+    auto& c = jobserver_container();
+    std::lock_guard lock{c.mutex};
+    c.sid = path_from_utf8(container).wstring();
+#endif
+}
+
 result<jobserver> jobserver::create(std::int64_t jobs, std::int64_t tokens, fs::path const& dir, std::string const& name)
 {
     if (jobs < 1) jobs = 1;
@@ -70,8 +100,22 @@ result<jobserver> jobserver::create(std::int64_t jobs, std::int64_t tokens, fs::
     std::random_device random;
     std::wstring const semaphore = L"otok-" + std::to_wstring(::GetCurrentProcessId()) + L"-" + path_from_utf8(name).wstring() + L"-"
         + std::to_wstring(random());
+    // granted to the AppContainer when builds run in it: its programs find it through otok-sandbox.dll, which looks in
+    // the session's namespace for a semaphore its own lacks
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    {
+        auto& c = jobserver_container();
+        std::lock_guard lock{c.mutex};
+        if (!c.sid.empty()) {
+            std::wstring const sddl = L"D:(A;;GA;;;SY)(A;;GA;;;OW)(A;;GA;;;" + c.sid + L")";
+            ::ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &sd, nullptr);
+        }
+    }
+    SECURITY_ATTRIBUTES attributes{sizeof attributes, sd, FALSE};
     // as many as clients may run, at least one: the maximum must be positive even when the pool is empty
-    s->semaphore = ::CreateSemaphoreW(nullptr, static_cast<LONG>(tokens), static_cast<LONG>(std::max<std::int64_t>({tokens, jobs, 1})), semaphore.c_str());
+    s->semaphore = ::CreateSemaphoreW(sd ? &attributes : nullptr, static_cast<LONG>(tokens),
+        static_cast<LONG>(std::max<std::int64_t>({tokens, jobs, 1})), semaphore.c_str());
+    if (sd) ::LocalFree(sd);
     if (!s->semaphore) return fail("cannot create the jobserver semaphore: error " + std::to_string(::GetLastError()));
     s->makeflags = "-j" + std::to_string(jobs) + " --jobserver-auth=" + path_to_utf8(fs::path{semaphore});
 #else

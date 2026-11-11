@@ -177,7 +177,9 @@ builds of `otok publish`, which run at once, each open the cache in one process.
 A slice is built in `tmp/<process>/build/<library>-<slice>/` (`-debug` for the `debug` configuration,
 `-tool` for a tool package, `-tools` for `build_tools`), which holds `source/` (a fresh copy of the source with resources placed at their
 `dest` and patches applied), `build/`, `prefix/`, `home/` and `tmp/` (`HOME` and `TMPDIR` of the
-build's processes), `toolchain.cmake` and `build.log`. The entry is created under its lock (6) while
+build's processes), `toolchain.cmake` and `build.log`; with the sandbox of Windows also `sandbox.log` (what the
+AppContainer was refused) and, for a recipe of a path outside the cache, `recipe/`, its copy (`slice.recipe`; the
+container reads only the cache, `docs/PLAN.md` decision 103). The entry is created under its lock (6) while
 the build runs; when the build succeeds it receives:
 
 | File | Contents |

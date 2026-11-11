@@ -120,6 +120,13 @@ list(FILTER OTOK_CORE_SOURCES EXCLUDE REGEX "/src/otok/(target|cli)/")
 add_library(otok-core STATIC ${OTOK_CORE_SOURCES} ${OTOK_GENERATED_DIR}/otok_catalog_site.inc)
 add_dependencies(otok-core otok-revision otok-notices)
 target_link_libraries(otok-core PUBLIC otok-options tomlplusplus::tomlplusplus nlohmann_json::nlohmann_json pantor::inja otok-lua CURL::libcurl LibArchive::LibArchive Threads::Threads)
+# Microsoft Detours on Windows: the sandbox injects otok-sandbox.dll with it (docs/PLAN.md decision 103).
+if(WIN32)
+    find_path(OTOK_DETOURS_INCLUDE_DIR detours/detours.h REQUIRED)
+    find_library(OTOK_DETOURS_LIBRARY detours REQUIRED)
+    target_include_directories(otok-core SYSTEM PUBLIC ${OTOK_DETOURS_INCLUDE_DIR})
+    target_link_libraries(otok-core PUBLIC ${OTOK_DETOURS_LIBRARY} userenv)
+endif()
 
 file(GLOB_RECURSE OTOK_TARGET_LINUX_SOURCES CONFIGURE_DEPENDS ${OTOK_SRC}/target/linux/*.cpp)
 add_library(otok-target-linux STATIC ${OTOK_TARGET_LINUX_SOURCES})
@@ -137,9 +144,20 @@ file(GLOB_RECURSE OTOK_TARGET_APPLE_SOURCES CONFIGURE_DEPENDS ${OTOK_SRC}/target
 add_library(otok-target-apple STATIC ${OTOK_TARGET_APPLE_SOURCES})
 target_link_libraries(otok-target-apple PUBLIC otok-core)
 
+# otok-sandbox.dll: injected with Microsoft Detours into the processes of sandboxed builds on Windows (docs/PLAN.md
+# decision 103); beside otok.exe.
+if(WIN32)
+    add_library(otok-sandbox SHARED ${CMAKE_CURRENT_SOURCE_DIR}/src/otok-sandbox/sandbox_dll.cpp)
+    target_include_directories(otok-sandbox SYSTEM PRIVATE ${OTOK_DETOURS_INCLUDE_DIR})
+    target_link_libraries(otok-sandbox PRIVATE otok-options ${OTOK_DETOURS_LIBRARY} advapi32)
+endif()
+
 file(GLOB_RECURSE OTOK_CLI_SOURCES CONFIGURE_DEPENDS ${OTOK_SRC}/cli/*.cpp)
 add_executable(otok ${OTOK_CLI_SOURCES})
 target_link_libraries(otok PRIVATE otok-core otok-target-linux otok-target-android otok-target-windows otok-target-apple)
+if(WIN32)
+    add_dependencies(otok otok-sandbox)
+endif()
 
 if(OTOK_BUILD_TESTS)
     enable_testing()
@@ -151,6 +169,9 @@ if(OTOK_BUILD_TESTS)
     add_executable(otok-tests ${OTOK_TEST_SOURCES})
     target_link_libraries(otok-tests PRIVATE otok-core otok-target-linux otok-target-android otok-target-windows otok-target-apple GTest::gtest GTest::gtest_main)
     add_dependencies(otok-tests otok-test-child)
+    if(WIN32)
+        add_dependencies(otok-tests otok-sandbox)
+    endif()
     # Fixtures are found through this path, independent of the working directory.
     target_compile_definitions(otok-tests PRIVATE OTOK_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data"
         OTOK_TEST_CHILD="$<TARGET_FILE:otok-test-child>")

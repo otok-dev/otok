@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -19,6 +20,8 @@ namespace otok {
 
 // The complete environment of a child process (UTF-8); nothing is inherited from otok's own.
 using env_vars = std::map<std::string, std::string>;
+
+struct sandbox_launch;  // core/sandbox.hpp
 
 struct process_spec
 {
@@ -40,6 +43,9 @@ struct process_spec
     // POSIX: a jobserver fifo the child inherits as descriptors 3 (to read) and 4 (to write), as GNU make before
     // 4.4 takes the jobserver's pipe (inherit_jobserver); empty: none. Ignored on Windows.
     std::filesystem::path jobserver_fifo{};
+    // Windows: the program runs in otok's AppContainer with otok-sandbox.dll (core/sandbox, docs/PLAN.md decision 103);
+    // null: as otok does. Elsewhere the sandbox is a command before argv and this is ignored.
+    std::shared_ptr<sandbox_launch const> sandbox{};
 };
 
 struct process_exit

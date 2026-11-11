@@ -100,6 +100,11 @@ protected:
         environment const env = [cache_dir, extra](std::string_view name) -> std::optional<std::string> {
             if (name == "OTOK_CACHE_DIR") return path_to_utf8(cache_dir);
             if (auto it = extra.find(std::string{name}); it != extra.end()) return it->second;
+#ifdef __linux__
+            // no PATH, so no bwrap: unisolated, as asked, since otok refuses that unasked (docs/PLAN.md decision 103); the
+            // tests of the sandbox give PATH
+            if (name == "OTOK_SANDBOX" && !extra.contains("PATH")) return "0";
+#endif
             if (name == "OTOK_INDEX") return "";  // not the public index: no network
             return std::nullopt;
         };

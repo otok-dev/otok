@@ -9,6 +9,7 @@
 #include <chrono>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -184,4 +185,32 @@ TEST(fs, write_file_atomic)
     std::string const g = read_file(dir.path() / "g").value_or("");
     EXPECT_EQ(g, std::string(100, g.empty() ? '?' : g[0]));
     EXPECT_EQ(std::distance(std::filesystem::directory_iterator{dir.path()}, std::filesystem::directory_iterator{}), 2);
+}
+
+TEST(fs, rename_path)
+{
+    test::temp_dir dir;
+    dir.write("unpacked/file.txt", "x");
+    std::error_code ec;
+#ifdef _WIN32
+    // a file open in the directory (an indexer reading what was just unpacked): Windows refuses to move the directory
+    // until it is closed, which rename_path waits for
+    auto held = std::make_unique<std::ifstream>(dir.path() / "unpacked" / "file.txt");
+    ASSERT_TRUE(*held);
+    std::filesystem::rename(dir.path() / "unpacked", dir.path() / "moved", ec);
+    EXPECT_EQ(ec, std::errc::permission_denied) << ec.message();
+    std::thread closer{[&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds{300});
+        held.reset();
+    }};
+    rename_path(dir.path() / "unpacked", dir.path() / "moved", ec);
+    closer.join();
+#else
+    rename_path(dir.path() / "unpacked", dir.path() / "moved", ec);
+#endif
+    EXPECT_FALSE(ec) << ec.message();
+    EXPECT_EQ(read_file(dir.path() / "moved" / "file.txt").value_or("?"), "x");
+    // what cannot be moved fails as std::filesystem::rename does
+    rename_path(dir.path() / "missing", dir.path() / "elsewhere", ec);
+    EXPECT_TRUE(ec);
 }

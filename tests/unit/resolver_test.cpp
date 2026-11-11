@@ -112,7 +112,7 @@ public:
     {
         for (candidate& c : recipes_[library]) {
             if (c.recipe->version->str() == version) {
-                c.advisories.push_back({"2026-0001", advisory_severity::withdrawn, "Withdrawn."});
+                c.advisories.push_back({"2026-0001", advisory_severity::withdrawn, "Withdrawn.", {}});
             }
         }
     }

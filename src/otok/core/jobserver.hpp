@@ -85,6 +85,11 @@ struct inherited_jobserver
 // whose MAKEFLAGS is `makeflags` ("-j<n> --jobserver-auth=fifo:<path>"); nothing when it has no fifo.
 std::optional<inherited_jobserver> inherit_jobserver(std::string_view makeflags, jobserver_protocol protocol);
 
+// Windows: the semaphores of the jobservers created from now on are granted to the AppContainer whose SID is
+// `container` (text); its programs, whose own namespace lacks them, are sent to the session's by otok-sandbox.dll
+// (docs/PLAN.md decision 103). Empty: granted to none. Elsewhere nothing.
+void use_container_jobservers(std::string const& container);
+
 namespace detail {
 
 // The same from the output of `--version`; `descriptors`: whether the host passes descriptors (POSIX).

@@ -80,6 +80,11 @@
     <ClCompile Include="$(OtokRoot)tests\unit\version_test.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <!-- otok-sandbox.dll beside the executable: built first, not linked (docs/PLAN.md decision 103) -->
+    <ProjectReference Include="..\otok-sandbox\otok-sandbox.vcxproj">
+      <Project>{5C2E8A41-7B93-4D1F-A6E0-3F9B21C47D58}</Project>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+    </ProjectReference>
     <ProjectReference Include="..\otok-core\otok-core.vcxproj">
       <Project>{47746624-8EB8-4E15-9751-5766555DA36F}</Project>
     </ProjectReference>

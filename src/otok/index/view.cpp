@@ -234,7 +234,7 @@ struct http_view
         std::filesystem::create_directories(file.parent_path(), ec);
         std::filesystem::path const staging = cache->tmp() / ("view-" + std::to_string(++staged));
         if (auto ok = write_file_atomic(staging, content); !ok) return ok;
-        std::filesystem::rename(staging, file, ec);
+        rename_path(staging, file, ec);
         if (ec) return fail("cannot write '" + path_to_utf8(file) + "': " + ec.message());
         return {};
     }

@@ -15,6 +15,7 @@
     <Project Path="projects/vs/otok-tests/otok-tests.vcxproj" Id="ebca105f-c0bf-4dae-af09-efbe77351558" />
   </Folder>
   <Project Path="projects/vs/otok-lua/otok-lua.vcxproj" Id="6f3b2c1d-8e4a-4b7c-9d2e-5a1f0c3b7e91" />
+  <Project Path="projects/vs/otok-sandbox/otok-sandbox.vcxproj" Id="5c2e8a41-7b93-4d1f-a6e0-3f9b21c47d58" />
   <Project Path="projects/vs/otok-core/otok-core.vcxproj" Id="47746624-8eb8-4e15-9751-5766555da36f" />
   <Project Path="projects/vs/otok/otok.vcxproj" Id="fa642bb0-b924-4df0-b9a9-eda3fe0b43f1" />
 </Solution>

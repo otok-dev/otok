@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <condition_variable>
 #include <expected>
 #include <filesystem>
 #include <map>
@@ -57,8 +58,8 @@ struct package_inputs
 // How build processes are isolated (docs/PLAN.md decisions 28, 73).
 enum class build_isolation
 {
-    unavailable,    // the host has no sandbox
-    off,            // `sandbox = false` in config.toml
+    unavailable,    // the host has no sandbox: builds fail (docs/PLAN.md decision 103)
+    off,            // asked: --no-sandbox, `sandbox = false` in config.toml (OTOK_SANDBOX)
     sandbox
 };
 
@@ -174,6 +175,10 @@ private:
     result<std::vector<std::string>> sandbox_command_of(std::filesystem::path const& work, std::filesystem::path const& recipe_dir,
         std::vector<std::filesystem::path> const& read_paths, std::filesystem::path const& jobserver_fifo) const;
 
+    // Windows: what the processes of the AppContainer cost the kernel at their exit (sandbox_exit_cost), checked with a
+    // task of its own on the display, told in a line and warned of when it is much (docs/PLAN.md decision 103).
+    void check_sandbox_exits();
+
     // Whether `tool` in the PATH of `env` understands the jobserver, asked once per program.
     jobserver_protocol jobserver_client(std::string const& tool, env_vars const& env);
 
@@ -195,9 +200,13 @@ private:
     std::map<std::string, std::string> described_;      // targets whose toolchain was announced
     std::map<std::string, built_slice> built_;          // slice id (slice_id) → its entry
     std::map<std::string, jobserver_protocol> jobserver_clients_;     // program → jobserver_client
-    bool isolation_told_ = false;                       // the note on unisolated builds was printed
+    bool isolation_told_ = false;                       // the warning on unisolated builds was printed
     std::map<std::string, std::string> recipe_hashes_;  // package key → recipe_hash; filled before building
     std::map<std::string, std::pair<std::size_t, std::size_t>> slices_done_;  // package key → slices done, of all
+    // Windows: check_sandbox_exits, by the first sandboxed slice while the others wait
+    bool exits_check_started_ = false;
+    bool exits_checked_ = false;
+    std::condition_variable exits_checked_cv_;
 };
 
 }

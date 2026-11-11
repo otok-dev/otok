@@ -3,8 +3,8 @@
 #
 # Builds the self-contained otok of a release for Windows x64: every dependency static from vcpkg with the static CRT
 # (triplets/x64-windows-static-otok), with CMake and the compiler of Visual Studio. Checks that otok.exe uses only the
-# system's DLLs, then packs otok-<version>-windows-x64.zip (otok.exe, its license, the licenses of what it carries)
-# and its .sha256, the files of a release that the Scoop manifest names (tools/scoop/otok.json).
+# system's DLLs, then packs otok-<version>-windows-x64.zip (otok.exe, otok-sandbox.dll beside it (docs/PLAN.md decision
+# 103), its license, the licenses of what it carries) and its .sha256, the files of a release that the Scoop manifest names (tools/scoop/otok.json).
 #
 #   windows-x64.ps1 [-Output DIR]      (default: build\release-windows in the checkout)
 #
@@ -45,12 +45,18 @@ Run $cmake -S $root -B $build -G 'Visual Studio 18 2026' -A x64 `
     "-DOTOK_REVISION=$env:OTOK_REVISION"
 Run $cmake --build $build --config Release --target otok --parallel
 $exe = Join-Path $build 'Release\otok.exe'
+$sandbox = Join-Path $build 'Release\otok-sandbox.dll'
+if (-not (Test-Path $sandbox)) { Fail "no $sandbox" }
 
-# the system's DLLs only: no Visual C++ runtime, no DLL of a dependency
-$dlls = & $dumpbin /nologo /dependents $exe | Where-Object { $_ -match '^\s+\S+\.dll\s*$' } | ForEach-Object { $_.Trim() }
-$foreign = $dlls | Where-Object { $_ -match '^(vcruntime|msvcp|concrt|ucrtbase|api-ms-win-crt-)' -or
-    -not (Test-Path (Join-Path $env:SystemRoot "System32\$_")) }
-if ($foreign) { Fail "otok.exe needs DLLs outside the system: $($foreign -join ', ')" }
+# the system's DLLs only: no Visual C++ runtime, no DLL of a dependency (otok-sandbox.dll loads in every process of a
+# sandboxed build)
+foreach ($binary in $exe, $sandbox) {
+    $needed = & $dumpbin /nologo /dependents $binary | Where-Object { $_ -match '^\s+\S+\.dll\s*$' } | ForEach-Object { $_.Trim() }
+    $foreign = $needed | Where-Object { $_ -match '^(vcruntime|msvcp|concrt|ucrtbase|api-ms-win-crt-)' -or
+        -not (Test-Path (Join-Path $env:SystemRoot "System32\$_")) }
+    if ($foreign) { Fail "$(Split-Path -Leaf $binary) needs DLLs outside the system: $($foreign -join ', ')" }
+    if ($binary -eq $exe) { $dlls = $needed }
+}
 
 $version = (& $exe --version | Select-Object -First 1) -replace '^otok (\S+).*$', '$1'
 if ($version -notmatch '^\d+\.\d+\.\d+') { Fail "no version from $exe --version" }
@@ -61,6 +67,7 @@ $stage = Join-Path $Output $name
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 $licenses = New-Item -ItemType Directory -Force (Join-Path $stage 'licenses')
 Copy-Item $exe $stage
+Copy-Item $sandbox $stage
 Copy-Item (Join-Path $root 'LICENSE') $stage
 Copy-Item (Join-Path $root 'LICENSE-EXCEPTION') $stage
 Copy-Item (Join-Path $root 'third_party\lua\LICENSE') (Join-Path $licenses 'lua.txt')

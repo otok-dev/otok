@@ -29,6 +29,11 @@
         "zstd"
       ]
     },
-    "gtest"
+    "gtest",
+    {
+      "$comment": "MIT; injects otok-sandbox.dll into the processes of sandboxed builds on Windows (docs/PLAN.md decision 103)",
+      "name": "detours",
+      "platform": "windows"
+    }
   ]
 }

@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "otok/core/fs.hpp"
+#include "otok/core/jobserver.hpp"
 #include "otok/core/process.hpp"
 #include "otok/core/sandbox.hpp"
 #include "test_util.hpp"
@@ -45,7 +46,7 @@ TEST(sandbox, writes_the_seatbelt_profile)
         "    (subpath \"/private/var/folders/x/T\")\n"
         "    (literal \"/c/tmp/1/jobserver\"))\n");
 
-    host_sandbox const seatbelt{host_sandbox::mechanism::seatbelt, "/usr/bin/sandbox-exec", {}};
+    host_sandbox const seatbelt{host_sandbox::mechanism::seatbelt, "/usr/bin/sandbox-exec", {}, {}};
     EXPECT_EQ(sandbox_command(seatbelt, spec, "/w/work/sandbox.sb"), (std::vector<std::string>{"/usr/bin/sandbox-exec", "-f", "/w/work/sandbox.sb"}));
 }
 
@@ -64,7 +65,7 @@ TEST(sandbox, writes_the_options_of_bubblewrap)
         "--remount-ro", "/home/me", "--unshare-net", "--unshare-pid", "--die-with-parent", "--"};
     EXPECT_EQ(bubblewrap_args(spec), options);
 
-    host_sandbox const bubblewrap{host_sandbox::mechanism::bubblewrap, "/usr/bin/bwrap", {}};
+    host_sandbox const bubblewrap{host_sandbox::mechanism::bubblewrap, "/usr/bin/bwrap", {}, {}};
     std::vector<std::string> command{"/usr/bin/bwrap"};
     command.insert(command.end(), options.begin(), options.end());
     EXPECT_EQ(sandbox_command(bubblewrap, spec, "/unused/sandbox.sb"), command);
@@ -112,6 +113,84 @@ TEST(sandbox, confines_processes)
     EXPECT_EQ(run({"/bin/sh", "-c", "cat ../secret/key.txt || echo denied"}), "denied\n");
     // the working directory under a denied one is what it is outside
     EXPECT_EQ(run({"/bin/pwd", "-P"}), path_to_utf8(root / "work") + "\n");
+}
+
+#else
+
+// docs/PLAN.md decision 103: the AppContainer with otok-sandbox.dll.
+TEST(sandbox, confines_processes)
+{
+    host_sandbox const host = find_host_sandbox({});
+    ASSERT_EQ(host.kind, host_sandbox::mechanism::appcontainer) << host.why_not;
+    test::temp_dir dir;
+    std::filesystem::path const root = std::filesystem::canonical(dir.path());
+    dir.write("work/mine.txt", "mine\n");
+    dir.write("secret/key.txt", "secret\n");
+    std::filesystem::path const child = path_from_utf8(OTOK_TEST_CHILD);
+    sandbox_spec spec;
+    spec.writable = {root / "work"};
+    spec.readable = {child.parent_path()};
+    ASSERT_TRUE(grant_sandbox_access(host, spec));
+    auto const launch = std::make_shared<sandbox_launch const>(sandbox_launch{host.container, host.program, root / "work" / "sandbox.log", root / "work"});
+
+    std::string const work = path_to_utf8(root / "work");
+    // no LOCALAPPDATA, as builds have none: CreateProcess wants it for a container and rewrites it, TEMP and TMP, the DLL
+    // sets them back
+    env_vars const env{{"PATH", "C:\\Windows\\System32"}, {"SystemRoot", "C:\\Windows"}, {"TEMP", work}, {"TMP", work}};
+    auto const run = [&](std::vector<std::string> argv) {
+        process_spec s{argv, env, root / "work", root / "work" / "log.txt", true};
+        s.sandbox = launch;
+        auto exit = run_process(s);
+        EXPECT_TRUE(exit) << exit.error().message;
+        return exit ? exit->output : std::string{"?"};
+    };
+    // no network: refused at once (WSAEACCES), where outside the address never answers
+    EXPECT_EQ(run({path_to_utf8(child), "connect"}), "10013\n");
+    // writes in the work directory, NUL through the DLL (closed to an AppContainer otherwise)
+    EXPECT_EQ(run({"cmd.exe", "/d", "/c", "(echo x)> made.txt && type mine.txt made.txt 2>nul && echo y> nul"}), "mine\nx\r\n");
+    run({"cmd.exe", "/d", "/c", "echo x> ..\\escaped.txt"});
+    EXPECT_FALSE(std::filesystem::exists(root / "escaped.txt"));
+    EXPECT_EQ(run({"cmd.exe", "/d", "/c", "type ..\\secret\\key.txt >nul 2>nul || echo denied"}), "denied\r\n");
+    // the user's profile is closed
+    env_vars const own = current_environment();
+    if (auto const profile = own.find("USERPROFILE"); profile != own.end()) {
+        EXPECT_EQ(run({"cmd.exe", "/d", "/c", "dir \"" + profile->second + "\" >nul 2>nul || echo denied"}), "denied\r\n");
+    }
+    EXPECT_EQ(run({path_to_utf8(child), "cwd"}), path_to_utf8(root / "work") + "\n");
+    // the ancestors of the work directory, to pass through them (mkdir -p) and nothing more: not listed, and nothing
+    // beside them reached
+    for (std::filesystem::path const& ancestor : {root, root.root_path()}) {
+        EXPECT_EQ(run({path_to_utf8(child), "traverse", path_to_utf8(ancestor)}), "opened\n") << path_to_utf8(ancestor);
+        EXPECT_EQ(run({path_to_utf8(child), "list", path_to_utf8(ancestor)}), "5\n") << path_to_utf8(ancestor);
+    }
+    EXPECT_EQ(run({path_to_utf8(child), "traverse", path_to_utf8(root / "secret")}), "5\n");
+    std::string const variables = work + "\n" + work + "\n<unset>\n";
+    EXPECT_EQ(run({path_to_utf8(child), "env", "TEMP", "TMP", "LOCALAPPDATA"}), variables);
+    // a child's child, started through the DLL
+    EXPECT_EQ(run({"cmd.exe", "/d", "/c", path_to_utf8(child) + " env TEMP TMP LOCALAPPDATA"}), variables);
+    // otok's jobserver, made outside and granted to the container, found by its programs through the DLL
+    use_container_jobservers(host.container);
+    auto jobs = jobserver::create(4, root);
+    use_container_jobservers("");
+    ASSERT_TRUE(jobs) << jobs.error().message;
+    std::string const makeflags = jobs->makeflags();
+    std::string const auth = makeflags.substr(makeflags.find("--jobserver-auth=") + 17);
+    EXPECT_EQ(run({path_to_utf8(child), "semaphore", auth}), "opened\n");
+    // what the container was refused (the escape, the secret, the profile) is noted in the work directory
+    EXPECT_TRUE(std::filesystem::exists(root / "work" / "sandbox.log"));
+}
+
+// What the container's processes cost the kernel at their exit: measured, and small on a healthy machine (the bad state
+// of decision 103 costs ~20 ms each).
+TEST(sandbox, measures_the_cost_of_exits)
+{
+    host_sandbox const host = find_host_sandbox({});
+    ASSERT_EQ(host.kind, host_sandbox::mechanism::appcontainer) << host.why_not;
+    auto const cost = sandbox_exit_cost(host, 10);
+    ASSERT_TRUE(cost) << cost.error().message;
+    EXPECT_LT(*cost, 0.005);
+    host_sandbox const none{host_sandbox::mechanism::none, {}, "none here", {}};
+    EXPECT_EQ(sandbox_exit_cost(none, 10), 0.0);
 }
 
 #endif
