@@ -61,6 +61,10 @@ TEST(virtual_drives, give_long_directories_short_letters)
     // both ways, the deeper directory first
     EXPECT_EQ(virtual_drives::to_virtual(real / "x" / "y.c"), *drive / "x" / "y.c");
     EXPECT_EQ(virtual_drives::to_virtual(real), *drive);
+    // with '/', as config.toml names the cache ("X:/Devel/otok-cache"), and a path appended to it with '\'
+    std::filesystem::path const forward{std::wstring{real.generic_wstring()}};
+    EXPECT_EQ(virtual_drives::to_virtual(forward / "x" / "y.c"), *drive / "x" / "y.c");
+    EXPECT_EQ(virtual_drives::to_virtual(forward), *drive);
     EXPECT_EQ(virtual_drives::to_real(*drive / "x" / "y.c"), real / "x" / "y.c");
     EXPECT_EQ(virtual_drives::to_virtual(dir.path()), dir.path());
     EXPECT_EQ(virtual_drives::to_real(std::filesystem::path{"C:\\Windows"}), std::filesystem::path{"C:\\Windows"});

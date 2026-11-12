@@ -203,6 +203,8 @@ fs::path to_virtual(fs::path const& p)
     if (st.drives.empty()) return p;
     std::wstring s = p.wstring();
     if (s.starts_with(L"\\\\?\\")) s.erase(0, 4);
+    // the drives' directories are kept with '\' (plain_dos); a path may have '/' (config.toml's cache-dir, "X:/…")
+    std::replace(s.begin(), s.end(), L'/', L'\\');
     for (drive const& d : st.drives) {
         std::wstring const& real = d.real.native();
         if (!under(s, real)) continue;

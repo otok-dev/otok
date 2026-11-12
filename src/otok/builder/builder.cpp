@@ -341,15 +341,28 @@ std::map<std::string, std::string> read_key(fs::path const& file)
 
 // ---- result.toml: what build returned, relative to the entry's prefix
 
-std::string write_result(build_output const& out, fs::path const& prefix)
+}  // namespace
+
+result<std::string> detail::write_result(build_output const& out, fs::path const& slice_prefix)
 {
+    // as build_script checks the paths build.lua returns, which are in this form: resolved, through the drive on Windows
+    std::error_code ec;
+    fs::path const prefix = virtual_drives::to_virtual(fs::weakly_canonical(slice_prefix, ec));
+    std::optional<std::string> wrong;
+    auto const relative = [&](std::string const& what, fs::path const& p) {
+        fs::path const r = p.lexically_relative(prefix);
+        if (!wrong && (r.empty() || r.has_root_name() || r.has_root_directory() || *r.begin() == "..")) {
+            wrong = "cannot record " + what + " ('" + slashed(p) + "') relative to the slice's prefix ('" + slashed(prefix) + "')";
+        }
+        return toml_string(slashed(r));
+    };
     std::string text = "# What build.lua returned, relative to prefix/.\n";
-    if (out.headers) text += "headers = " + toml_string(relative_to(*out.headers, prefix)) + "\n";
-    if (out.module_map) text += "module-map = " + toml_string(relative_to(*out.module_map, prefix)) + "\n";
+    if (out.headers) text += "headers = " + relative("headers", *out.headers) + "\n";
+    if (out.module_map) text += "module-map = " + relative("module-map", *out.module_map) + "\n";
     auto const table = [&](char const* name, std::map<std::string, fs::path> const& paths) {
         if (paths.empty() && std::string_view{name} != "libraries") return;
         text += std::string{"\n["} + name + "]\n";
-        for (auto const& [key, p] : paths) text += toml_string(key) + " = " + toml_string(relative_to(p, prefix)) + "\n";
+        for (auto const& [key, p] : paths) text += toml_string(key) + " = " + relative(std::string{name} + "." + key, p) + "\n";
     };
     table("libraries", out.libraries);
     table("runtimes", out.runtimes);
@@ -362,44 +375,69 @@ std::string write_result(build_output const& out, fs::path const& prefix)
         text += "\n[program-interpreters]\n";
         for (auto const& [program, toolchain] : out.interpreters) text += toml_string(program) + " = " + toml_string(toolchain) + "\n";
     }
+    if (wrong) return fail(*wrong);
     return text;
 }
 
+namespace {
+
+// What an entry's build returned, every path checked (cache.md 6.2): a damaged entry is an error saying why.
 result<build_output> read_result(fs::path const& entry)
 {
     fs::path const file = entry / "result.toml";
     fs::path const prefix = entry / "prefix";
+    std::string const damaged = "the cache entry '" + slashed(entry) + "' is damaged: ";
     auto content = read_file(file);
-    if (!content) return fail("the cache entry '" + slashed(entry) + "' is damaged: " + content.error().message);
+    if (!content) return fail(damaged + content.error().message);
     toml::table t;
     try {
         t = toml::parse(*content);
     } catch (toml::parse_error const& e) {
-        return fail("the cache entry '" + slashed(entry) + "' is damaged: " + std::string{e.description()});
+        return fail(damaged + std::string{e.description()});
     }
     build_output out;
-    auto const path = [&](std::string const& relative) { return prefix / path_from_utf8(relative); };
-    if (auto h = t["headers"].value<std::string>()) out.headers = path(*h);
-    if (auto m = t["module-map"].value<std::string>()) out.module_map = path(*m);
-    auto const table = [&](char const* name, std::map<std::string, fs::path>& paths) {
+    std::optional<std::string> wrong;
+    // a file, or (headers, data) anything that is there
+    auto const path = [&](std::string const& what, std::string const& relative, bool file) {
+        fs::path const r = path_from_utf8(relative);
+        fs::path const full = prefix / r;
+        if (wrong) return full;
+        std::error_code ec;
+        if (relative.empty()) {
+            wrong = what + " is empty";
+        } else if (r.has_root_name() || r.has_root_directory()) {
+            wrong = what + " '" + relative + "' is not relative to prefix/";
+        } else if (std::ranges::find(r, fs::path{".."}) != r.end()) {
+            wrong = what + " '" + relative + "' leaves prefix/";
+        } else if (file ? !fs::is_regular_file(long_path(full), ec) : !fs::exists(long_path(full), ec)) {
+            wrong = what + " '" + relative + "' is not " + (file ? "a file" : "there");
+        }
+        return full;
+    };
+    if (auto h = t["headers"].value<std::string>()) out.headers = path("headers", *h, false);
+    if (auto m = t["module-map"].value<std::string>()) out.module_map = path("module-map", *m, true);
+    auto const table = [&](char const* name, std::map<std::string, fs::path>& paths, bool files) {
         if (toml::table const* tt = t[name].as_table()) {
             for (auto const& [key, value] : *tt) {
-                if (auto s = value.value<std::string>()) paths.emplace(std::string{key.str()}, path(*s));
+                std::string const what = std::string{name} + "." + std::string{key.str()};
+                if (auto s = value.value<std::string>()) paths.emplace(std::string{key.str()}, path(what, *s, files));
+                else if (!wrong) wrong = what + " is not a string";
             }
         }
     };
-    table("libraries", out.libraries);
-    table("runtimes", out.runtimes);
-    table("symbols", out.symbols);
-    table("library-headers", out.library_headers);
-    table("library-module-maps", out.library_module_maps);
-    table("data", out.data);
-    table("programs", out.programs);
+    table("libraries", out.libraries, true);
+    table("runtimes", out.runtimes, true);
+    table("symbols", out.symbols, true);
+    table("library-headers", out.library_headers, false);
+    table("library-module-maps", out.library_module_maps, true);
+    table("data", out.data, false);
+    table("programs", out.programs, true);
     if (toml::table const* tt = t["program-interpreters"].as_table()) {
         for (auto const& [key, value] : *tt) {
             if (auto s = value.value<std::string>()) out.interpreters.emplace(std::string{key.str()}, *s);
         }
     }
+    if (wrong) return fail(damaged + *wrong);
     return out;
 }
 
@@ -1430,12 +1468,18 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
     std::error_code ec;
     if (!dev && fs::exists(out.entry, ec)) {
         auto result = read_result(out.entry);
-        if (!result) return std::unexpected{result.error()};
-        out.output = std::move(*result);
-        out.cached = true;
-        cache_.mark_used(out.entry);
-        say(label + " " + slice_label(spec) + ": cached" + slice_done(p.id, tool, entry));
-        return out;
+        if (result) {
+            out.output = std::move(*result);
+            out.cached = true;
+            cache_.mark_used(out.entry);
+            say(label + " " + slice_label(spec) + ": cached" + slice_done(p.id, tool, entry));
+            return out;
+        }
+        // damaged (by an older otok, or by hand): removed and built again (cache.md 6.2)
+        say("warning: " + result.error().message + "; building it again");
+        auto gone = cache_.discard(out.entry, "removing the damaged " + label + " for " + slice_label(spec),
+            [](fs::path const& entry) { return !read_result(entry); });
+        if (!gone) return std::unexpected{gone.error()};
     }
 
     // on a terminal the slice is shown below the lines while it builds (docs/PLAN.md decision 59); with -vv this heads its output
@@ -2063,9 +2107,12 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
 
         relocate_pkg_config(slice.prefix);
 
+        // before the prefix moves: an entry whose result.toml would be damaged is never made (cache.md 6.2)
+        auto const result_text = detail::write_result(*built, slice.prefix);
+        if (!result_text) return failed(result_text.error().message);
         if (dev) {
             // the entry is the work directory, last used now (cache.md 9)
-            std::ofstream{base / "result.toml", std::ios::binary} << write_result(*built, slice.prefix);
+            std::ofstream{base / "result.toml", std::ios::binary} << *result_text;
             std::ofstream{base / "key.txt", std::ios::binary} << text;
             follow.reset();
             fs::last_write_time(work, fs::file_time_type::clock::now(), ec);
@@ -2074,7 +2121,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         fs::create_directories(staging, ec);
         rename_path(virtual_drives::to_real(slice.prefix), staging / "prefix", ec);
         if (ec) return failed("cannot move the prefix into the cache: " + ec.message());
-        std::ofstream{staging / "result.toml", std::ios::binary} << write_result(*built, slice.prefix);
+        std::ofstream{staging / "result.toml", std::ios::binary} << *result_text;
         std::ofstream{staging / "key.txt", std::ios::binary} << text;
         follow.reset();
         fs::copy_file(log, staging / "build.log", ec);

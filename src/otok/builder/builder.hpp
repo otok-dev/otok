@@ -131,6 +131,15 @@ std::string meson_machine_file(slice_toolchain const& t, std::map<std::string, s
 // every build would otherwise spend ~2 s on it, one process at a time; the check itself is tested apart.
 void skip_sandbox_exit_checks() noexcept;
 
+namespace detail {
+
+// The text of a slice entry's result.toml: what build returned (`out`), relative to `slice_prefix` as build_script checks
+// those paths (resolved, through the drive on Windows); an error naming the first path it cannot write so (cache.md 6.2:
+// the entry would be damaged, so it is never made).
+result<std::string> write_result(build_output const& out, std::filesystem::path const& slice_prefix);
+
+}  // namespace detail
+
 class builder
 {
 public:

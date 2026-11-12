@@ -313,6 +313,31 @@ result<fs::path> cache_store::ensure(fs::path const& entry, std::string const& d
     return entry;
 }
 
+result<void> cache_store::discard(fs::path const& entry, std::string const& description, std::function<bool(fs::path const& entry)> const& damaged)
+{
+    fs::path lock_file = entry;
+    lock_file += ".lock";
+    std::optional<lent_job> lent;
+    auto lock = file_lock::acquire(lock_file, [&] {
+        state_->waiting(description);
+        lent.emplace("another build");
+    });
+    lent.reset();
+    if (!lock) return std::unexpected{lock.error()};
+    std::error_code ec;
+    if (!fs::exists(entry, ec) || !damaged(entry)) return {};
+    fs::path aside = state_->tmp / entry.filename();
+    aside += "-damaged";
+    fs::remove_all(long_path(aside), ec);
+    rename_path(entry, aside, ec);
+    if (ec) {
+        return fail("the damaged cache entry '" + path_to_utf8(entry) + "' cannot be removed (" + ec.message()
+            + "): remove it by hand, or run 'otok clean --builds'");
+    }
+    fs::remove_all(long_path(aside), ec);
+    return {};
+}
+
 std::vector<result<fs::path>> cache_store::fetch(std::span<cache_download const> downloads, http_settings const& settings)
 {
     std::vector<std::optional<result<fs::path>>> results(downloads.size());

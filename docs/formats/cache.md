@@ -155,6 +155,17 @@ Locks are advisory OS locks (`flock` on macOS and Linux, `LockFileEx` on Windows
 operating system when a process dies, so a crashed otok never leaves a stale lock. Readers take no
 lock: an entry under its final name is complete and never changes.
 
+### 6.2 Damaged entries
+
+A slice entry (`builds/…/slices/<key>/`) is damaged when its `result.toml` cannot be read, or names a
+path that is empty, absolute, leaves `prefix/` (`..`) or is not there (a file for `libraries`,
+`runtimes`, `symbols`, `library-module-maps`, `programs` and `module-map`). otok never writes one: the
+paths `build` returned are checked before the entry is made, and a path it cannot write relative to
+`prefix/` fails the build. One written by an older otok, or changed by hand, is found when the entry is
+used: otok warns, takes the entry's lock, and, if the entry is still damaged (another process may have
+built it again meanwhile), renames it into `tmp/<process>/` and removes it, then builds the slice as if
+it were missing. An entry it cannot rename (a file of it held open) is an error that names it.
+
 ### 6.1 Offline
 
 With `--offline` (or `--frozen`) otok uses only what the cache already holds. Nothing is downloaded or

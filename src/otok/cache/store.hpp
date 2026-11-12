@@ -134,6 +134,12 @@ public:
     result<std::filesystem::path> ensure(std::filesystem::path const& entry, std::string const& description,
         std::function<result<void>(std::filesystem::path const& staging)> const& make);
 
+    // Removes the entry `entry`, found damaged (cache.md 6.2): under its lock, and only if `damaged` still says so (another
+    // process may have built it again meanwhile), renamed into tmp() first so that nobody sees it half removed. Nothing
+    // when it is gone. An entry that cannot be renamed (a file of it held open) is an error naming it.
+    result<void> discard(std::filesystem::path const& entry, std::string const& description,
+        std::function<bool(std::filesystem::path const& entry)> const& damaged);
+
 private:
     // git/<url key>/ containing `commit`.
     result<std::filesystem::path> git_repository(std::string const& url, std::string const& commit, std::string const& tag,

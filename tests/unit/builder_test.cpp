@@ -605,6 +605,48 @@ TEST_F(builder_test, builds_and_reuses_slices)
     EXPECT_EQ(toolchain.profiles, 0);
 }
 
+// cache.md 6.2: an entry whose result.toml is damaged (an older otok wrote '' for a program on Windows) is removed and
+// built again, with a warning saying why; the slices depending on it are the cache's
+TEST_F(builder_test, builds_a_damaged_slice_again)
+{
+    ASSERT_EQ(run({"install"}), 0) << err.str();
+    std::filesystem::path entry;
+    for (auto const& d : std::filesystem::directory_iterator{slices_of("b", "2.0")}) {
+        if (d.is_directory()) entry = d.path();
+    }
+    ASSERT_FALSE(entry.empty());
+    std::string const good = read_file(entry / "result.toml").value_or("?");
+    std::string const absolute = path_to_utf8((entry / "prefix" / "lib" / "libb.a").generic_u8string());
+    std::pair<std::string, std::string> const damages[] = {
+        {"\"b\" = \"\"", "libraries.b is empty"},
+        {"\"b\" = \"" + absolute + "\"", "libraries.b '" + absolute + "' is not relative to prefix/"},
+        {"\"b\" = \"../prefix/lib/libb.a\"", "libraries.b '../prefix/lib/libb.a' leaves prefix/"},
+        {"\"b\" = \"lib/missing.a\"", "libraries.b 'lib/missing.a' is not a file"},
+        {"\"b\" = \"lib\"", "libraries.b 'lib' is not a file"},
+        {"\"b\" = 1", "libraries.b is not a string"},
+    };
+    for (auto const& [line, why] : damages) {
+        std::string damaged = good;
+        damaged.replace(damaged.find("\"b\" = \"lib/libb.a\""), std::string_view{"\"b\" = \"lib/libb.a\""}.size(), line);
+        ASSERT_TRUE(write_file_atomic(entry / "result.toml", damaged));
+        ASSERT_EQ(run({"install"}), 0) << why << "\n" << err.str();
+        std::string const e = err.str();
+        EXPECT_NE(e.find("warning: the cache entry '" + path_to_utf8(entry.generic_u8string()) + "' is damaged: " + why + "; building it again\n"),
+            std::string::npos) << e;
+        EXPECT_NE(out.str().find("slices: 2 (1 from the cache)\n"), std::string::npos) << why << "\n" << out.str();
+        EXPECT_EQ(read_file(entry / "result.toml").value_or("?"), good) << why;
+    }
+    // a result.toml that is not TOML
+    ASSERT_TRUE(write_file_atomic(entry / "result.toml", "[libraries\n"));
+    ASSERT_EQ(run({"install"}), 0) << err.str();
+    EXPECT_NE(err.str().find("warning: the cache entry '" + path_to_utf8(entry.generic_u8string()) + "' is damaged: "), std::string::npos) << err.str();
+    EXPECT_EQ(read_file(entry / "result.toml").value_or("?"), good);
+    // a sound entry stays
+    ASSERT_EQ(run({"install"}), 0) << err.str();
+    EXPECT_NE(out.str().find("slices: 2 (2 from the cache)\n"), std::string::npos) << out.str();
+    EXPECT_EQ(err.str().find("damaged"), std::string::npos) << err.str();
+}
+
 TEST_F(builder_test, reports_failures)
 {
     std::string const slice = "native-" + machine_arch();
@@ -1081,6 +1123,32 @@ TEST_F(builder_test, file_options_conditional_resources_and_data)
     write_recipe("b", "2.0", script("slice.configuration"), options);
     EXPECT_EQ(run({"install"}), 1);
     EXPECT_NE(err.str().find("the data file 'b.dat' differs between "), std::string::npos) << err.str();
+}
+
+// cache.md 6.2: result.toml is written relative to the prefix, and a path it cannot be written so for fails the build
+TEST(builder, writes_the_result_relative_to_the_prefix)
+{
+    test::temp_dir dir;
+    dir.write("prefix/bin/tool", "x\n");
+    dir.write("other/tool", "x\n");
+    std::filesystem::path const root = std::filesystem::canonical(dir.path());
+    build_output built;
+    built.programs.emplace("tool", root / "prefix" / "bin" / "tool");
+    auto text = detail::write_result(built, root / "prefix");
+    ASSERT_TRUE(text) << text.error().message;
+    EXPECT_NE(text->find("[programs]\n\"tool\" = \"bin/tool\"\n"), std::string::npos) << *text;
+
+    built.programs.emplace("other", root / "other" / "tool");
+    auto outside = detail::write_result(built, root / "prefix");
+    ASSERT_FALSE(outside);
+    EXPECT_EQ(outside.error().message, "cannot record programs.other ('" + path_to_utf8((root / "other" / "tool").generic_u8string())
+        + "') relative to the slice's prefix ('" + path_to_utf8((root / "prefix").generic_u8string()) + "')");
+#ifdef _WIN32
+    // another drive: lexically_relative gives nothing, which was written as "" (the cache-dir with '/' of otok 0.5.4)
+    build_output elsewhere;
+    elsewhere.programs.emplace("tool", std::filesystem::path{"Q:\\prefix\\bin\\tool.exe"});
+    EXPECT_FALSE(detail::write_result(elsewhere, root / "prefix"));
+#endif
 }
 
 TEST(builder, key_text_is_sorted_lines)
