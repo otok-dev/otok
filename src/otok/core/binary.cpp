@@ -8,6 +8,8 @@
 #include <fstream>
 #include <iterator>
 
+#include "otok/core/fs.hpp"
+
 namespace otok {
 
 namespace fs = std::filesystem;
@@ -33,7 +35,7 @@ std::uint16_t read16(std::string const& b, std::size_t at, bool little)
 
 binary_kind binary_kind_of(fs::path const& file)
 {
-    std::ifstream in{file, std::ios::binary};
+    std::ifstream in{long_path(file), std::ios::binary};
     std::string head(4096, '\0');
     in.read(head.data(), static_cast<std::streamsize>(head.size()));
     head.resize(static_cast<std::size_t>(in.gcount()));
@@ -155,7 +157,7 @@ load_names macho_names(std::string const& b, bool wide)
 
 load_names load_names_of(fs::path const& file)
 {
-    std::ifstream in{file, std::ios::binary};
+    std::ifstream in{long_path(file), std::ios::binary};
     std::string const bytes{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
     if (bytes.size() >= 0x40 && bytes.starts_with("\x7f" "ELF")) return elf_names(bytes);
     image_reader const r{bytes, true};
@@ -166,7 +168,7 @@ load_names load_names_of(fs::path const& file)
 
 std::vector<unsigned> elf_machines_of(fs::path const& file)
 {
-    std::ifstream in{file, std::ios::binary};
+    std::ifstream in{long_path(file), std::ios::binary};
     std::string const bytes{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
     std::vector<unsigned> machines;
     auto const add = [&](std::size_t at) {
@@ -191,7 +193,7 @@ std::vector<unsigned> elf_machines_of(fs::path const& file)
 
 std::vector<unsigned> coff_machines_of(fs::path const& file)
 {
-    std::ifstream in{file, std::ios::binary};
+    std::ifstream in{long_path(file), std::ios::binary};
     std::string const bytes{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
     std::vector<unsigned> machines;
     // the machines COFF knows; anything else is no object (LLVM bitcode, the linker members' data)
@@ -226,7 +228,7 @@ std::vector<unsigned> coff_machines_of(fs::path const& file)
 
 std::uint64_t elf_load_alignment_of(fs::path const& file)
 {
-    std::ifstream in{file, std::ios::binary};
+    std::ifstream in{long_path(file), std::ios::binary};
     std::string const bytes{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
     if (bytes.size() < 0x40 || !bytes.starts_with("\x7f" "ELF")) return 0;
     bool const wide = bytes[4] == 2;

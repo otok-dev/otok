@@ -23,6 +23,7 @@
 
 #include "otok/core/binary.hpp"
 #include "otok/core/fs.hpp"
+#include "otok/core/process.hpp"
 
 namespace otok::target::windows {
 
@@ -425,29 +426,16 @@ std::string link_name(fs::path const& file)
     return name;
 }
 
-// Copies the header directory `from` into `to`; a file both have must have the same contents.
+// Copies the header directory `from` into `to`; a file both have must have the same contents. Beyond 260 characters on Windows
+// (merge_tree): Boost's deepest header is 90 characters below include/.
 result<void> merge_headers(fs::path const& from, fs::path const& to, std::string const& slice)
 {
-    std::error_code ec;
-    for (auto it = fs::recursive_directory_iterator{from, ec}; !ec && it != fs::recursive_directory_iterator{}; it.increment(ec)) {
-        fs::path const relative = it->path().lexically_relative(from);
-        fs::path const dest = to / relative;
-        if (it->is_directory(ec)) {
-            fs::create_directories(dest, ec);
-            continue;
-        }
-        if (fs::exists(dest, ec)) {
-            auto const a = read_file(it->path());
-            auto const b = read_file(dest);
-            if (!a || !b || *a != *b) {
-                return fail("the header '" + path_to_utf8(relative.generic_u8string()) + "' of " + slice + " differs from that of another slice: "
-                    + "the Windows target keeps one include/ for all architectures and configurations");
-            }
-            continue;
-        }
-        fs::copy_file(it->path(), dest, ec);
+    auto const differing = merge_tree(from, to);
+    if (!differing) return fail("cannot copy the headers of '" + path_to_utf8(from) + "': " + differing.error().message);
+    if (!differing->empty()) {
+        return fail("the header '" + *differing + "' of " + slice + " differs from that of another slice: "
+            + "the Windows target keeps one include/ for all architectures and configurations");
     }
-    if (ec) return fail("cannot copy the headers of '" + path_to_utf8(from) + "': " + ec.message());
     return {};
 }
 
@@ -616,7 +604,7 @@ public:
         (void)rec;
         (void)products;
         std::error_code ec;
-        fs::create_directories(staging / "include", ec);
+        fs::create_directories(long_path(staging / "include"), ec);
         if (ec) return fail("cannot create '" + path_to_utf8(staging) + "': " + ec.message());
         package_files recorded;  // which file is which library (otok-toml.md 4.11)
         for (built_slice const& s : package.slices) {
@@ -640,8 +628,9 @@ public:
                     return fail("the libraries '" + it->second + "' and '" + name + "' are both files named '" + path_to_utf8(file.filename()) + "'");
                 }
                 fs::path const to = root / dir / s.spec.arch;
-                fs::create_directories(to, ec);
-                fs::copy_file(fs::canonical(file, ec), to / file.filename(), ec);
+                fs::create_directories(long_path(to), ec);
+                // canonical gives the path back without the extended prefix
+                fs::copy_file(long_path(fs::canonical(long_path(file), ec)), long_path(to / file.filename()), ec);
                 if (ec) return fail("cannot copy the library '" + name + "': " + ec.message());
                 return {};
             };
@@ -674,7 +663,7 @@ public:
         for (output_package const& p : packages) {
             for (char const* sub : {"lib", "bin", "debug/lib", "debug/bin"}) {
                 std::error_code ec;
-                for (auto arch = fs::directory_iterator{dir / p.dir / sub, ec}; !ec && arch != fs::directory_iterator{}; arch.increment(ec)) {
+                for (auto arch = fs::directory_iterator{long_path(dir / p.dir / sub), ec}; !ec && arch != fs::directory_iterator{}; arch.increment(ec)) {
                     std::string const at = std::string{sub} + "/" + path_to_utf8(arch->path().filename()) + "/";
                     std::error_code file_ec;
                     for (auto it = fs::directory_iterator{arch->path(), file_ec}; !file_ec && it != fs::directory_iterator{}; it.increment(file_ec)) {
@@ -749,6 +738,10 @@ private:
         t.cflags = configuration_flags(debug);
         t.cxxflags = t.cflags;
         t.env = v.env;
+        // cl /Zi and /FS write PDBs through mspdbsrv, one per user unless named: another otok's server sees that otok's
+        // drive letters, P:\ its work directories, and cl failed with C1041 (docs/PLAN.md decision 114). One per otok
+        // process, started in its job; not in the slice's key (the environment never is).
+        t.env["_MSPDBSRV_ENDPOINT_"] = "otok-" + std::to_string(current_process_id());
         common_parts(p, slice, names, v.crt, v.sdk, "");
         p.cmake_toolchain = windows_cmake_toolchain(t.cc, "", names.cmake_processor, slice.arch != machine_arch, debug);
         // b2 (build-lua-api.md 6.2): msvc.jam knows its versions by toolset, 14.51.36231 is 14.5 (vc145), and takes 32-bit x86

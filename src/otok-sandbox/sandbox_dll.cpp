@@ -29,7 +29,8 @@
 //  16. GetLongPathNameW refused for a path with no short name in it (it lists the ancestors, which the container may not
 //      outside the cache: an NDK on another drive) giving the path back as it is (LLVM's programs expand their own);
 //  17. FindFirstFile of one name refused (it lists the directory holding it) answered as the one entry found, from the
-//      name's attributes (b2 finds the canonical name of each component of a path so); the ancestors of the toolchains
+//      name's attributes (b2 finds the canonical name of each component of a path so), in each of the four exports, which
+//      do not reach one another on every build of Windows; the ancestors of the toolchains
 //      outside the cache handed as those of the work directory are (hook 8), for their attributes;
 //  18. a listing of a directory on those ways, refused, showing the next names on them alone (b2 tells whether a file
 //      exists by listing each of its ancestors).
@@ -938,10 +939,22 @@ DWORD WINAPI hook_get_long_path_name_w_kernel32(LPCWSTR short_path, LPWSTR long_
     return kept_long_path(real_get_long_path_name_w_kernel32, short_path, long_path, size);
 }
 
+// kernelbase's FindFirstFile entries reach the directory through an internal function, not through one another: on
+// Windows 11 23H2 FindFirstFileA and FindFirstFileExA call the exported FindFirstFileExW but FindFirstFileW does not; on
+// 24H2 and newer none does (docs/tasks/windows-sandbox-b2-24h2.md). Each export is hooked; where one still calls
+// another, the inner hook answers and the outer one sees the search found. kernel32's are jumps into these.
+using find_first_file_a_t = HANDLE(WINAPI*)(LPCSTR, LPWIN32_FIND_DATAA);
+using find_first_file_w_t = HANDLE(WINAPI*)(LPCWSTR, LPWIN32_FIND_DATAW);
+using find_first_file_ex_a_t = HANDLE(WINAPI*)(LPCSTR, FINDEX_INFO_LEVELS, LPVOID, FINDEX_SEARCH_OPS, LPVOID, DWORD);
 using find_first_file_ex_w_t = HANDLE(WINAPI*)(LPCWSTR, FINDEX_INFO_LEVELS, LPVOID, FINDEX_SEARCH_OPS, LPVOID, DWORD);
+using find_next_file_a_t = BOOL(WINAPI*)(HANDLE, LPWIN32_FIND_DATAA);
 using find_next_file_w_t = BOOL(WINAPI*)(HANDLE, LPWIN32_FIND_DATAW);
 using find_close_t = BOOL(WINAPI*)(HANDLE);
+find_first_file_a_t real_find_first_file_a;
+find_first_file_w_t real_find_first_file_w;
+find_first_file_ex_a_t real_find_first_file_ex_a;
 find_first_file_ex_w_t real_find_first_file_ex_w;
+find_next_file_a_t real_find_next_file_a;
 find_next_file_w_t real_find_next_file_w;
 find_close_t real_find_close;
 
@@ -1028,14 +1041,10 @@ HANDLE listed_way(std::wstring_view pattern, LPVOID data)
 // for the ancestors of a toolchain outside the cache: b2 finds the canonical name of each component of a path so (its
 // pathnt.cpp). Refused, a name with no '~' whose attributes the container can read (a directory otok handed, or what is
 // granted) is answered as the one entry found, its name as given; nothing beside it is told, and a name with another
-// wildcard or a '~' keeps the refusal. FindFirstFileA/W/ExA come here through kernelbase.
-HANDLE WINAPI hook_find_first_file_ex_w(LPCWSTR name, FINDEX_INFO_LEVELS level, LPVOID data, FINDEX_SEARCH_OPS op, LPVOID filter, DWORD flags)
+// wildcard or a '~' keeps the refusal. Called once the real search was refused (ERROR_ACCESS_DENIED): the search
+// answered, or INVALID_HANDLE_VALUE with the refusal.
+HANDLE answered_find(std::wstring_view path, LPWIN32_FIND_DATAW data)
 {
-    HANDLE const h = real_find_first_file_ex_w(name, level, data, op, filter, flags);
-    if (h != INVALID_HANDLE_VALUE || ::GetLastError() != ERROR_ACCESS_DENIED || !name || !data || op != FindExSearchNameMatch
-        || (level != FindExInfoStandard && level != FindExInfoBasic))
-        return h;
-    std::wstring_view const path = name;
     std::size_t const slash = path.find_last_of(L"\\/");
     std::wstring_view const leaf = slash == std::wstring_view::npos ? path : path.substr(slash + 1);
     if (leaf == L"*" || leaf == L"*.*") {
@@ -1043,10 +1052,9 @@ HANDLE WINAPI hook_find_first_file_ex_w(LPCWSTR name, FINDEX_INFO_LEVELS level, 
         if (listed == INVALID_HANDLE_VALUE) ::SetLastError(ERROR_ACCESS_DENIED);
         return listed;
     }
-    if (leaf.empty() || leaf.size() >= MAX_PATH || leaf == L"." || leaf == L".." || path.find_first_of(L"*?<>\"~") != std::wstring_view::npos)
-        return h;
     WIN32_FILE_ATTRIBUTE_DATA a{};
-    if (!::GetFileAttributesExW(name, GetFileExInfoStandard, &a)) {
+    if (leaf.empty() || leaf.size() >= MAX_PATH || leaf == L"." || leaf == L".." || path.find_first_of(L"*?<>\"~") != std::wstring_view::npos
+        || !::GetFileAttributesExW(std::wstring{path}.c_str(), GetFileExInfoStandard, &a)) {
         ::SetLastError(ERROR_ACCESS_DENIED);
         return INVALID_HANDLE_VALUE;
     }
@@ -1054,20 +1062,126 @@ HANDLE WINAPI hook_find_first_file_ex_w(LPCWSTR name, FINDEX_INFO_LEVELS level, 
         data);
 }
 
-BOOL WINAPI hook_find_next_file_w(HANDLE search, LPWIN32_FIND_DATAW data)
+// Whether a search the real function gave is one hooks 17 and 18 may answer: refused, of names, with data as the
+// standard level fills it (FindExInfoBasic leaves only the short name out, which these answers never give).
+bool refused_search(HANDLE h, void const* name, void const* data, FINDEX_INFO_LEVELS level = FindExInfoStandard,
+    FINDEX_SEARCH_OPS op = FindExSearchNameMatch)
+{
+    return h == INVALID_HANDLE_VALUE && ::GetLastError() == ERROR_ACCESS_DENIED && name && data && op == FindExSearchNameMatch
+           && (level == FindExInfoStandard || level == FindExInfoBasic);
+}
+
+// The code page of the A functions' file names in this process (SetFileApisToOEM).
+UINT file_code_page()
+{
+    return ::AreFileApisANSI() ? CP_ACP : CP_OEMCP;
+}
+
+// An entry of an answered search as the A functions give it; false when its name has no form in the code page.
+bool narrow_find_data(WIN32_FIND_DATAW const& wide, LPWIN32_FIND_DATAA out)
+{
+    WIN32_FIND_DATAA a{};
+    a.dwFileAttributes = wide.dwFileAttributes;
+    a.ftCreationTime = wide.ftCreationTime;
+    a.ftLastAccessTime = wide.ftLastAccessTime;
+    a.ftLastWriteTime = wide.ftLastWriteTime;
+    a.nFileSizeHigh = wide.nFileSizeHigh;
+    a.nFileSizeLow = wide.nFileSizeLow;
+    BOOL lossy = FALSE;
+    UINT const page = file_code_page();
+    bool const utf8 = page == CP_UTF8;  // which refuses the default-character arguments
+    if (!::WideCharToMultiByte(page, 0, wide.cFileName, -1, a.cFileName, MAX_PATH, nullptr, utf8 ? nullptr : &lossy) || lossy) return false;
+    *out = a;
+    return true;
+}
+
+// A name the A functions were given, as UTF-16; empty when it cannot be read.
+std::wstring widened_name(LPCSTR name)
+{
+    UINT const page = file_code_page();
+    int const n = ::MultiByteToWideChar(page, MB_ERR_INVALID_CHARS, name, -1, nullptr, 0);
+    if (n <= 1) return {};
+    std::wstring out(static_cast<std::size_t>(n), L'\0');
+    ::MultiByteToWideChar(page, MB_ERR_INVALID_CHARS, name, -1, out.data(), n);
+    out.pop_back();
+    return out;
+}
+
+BOOL WINAPI hook_find_close(HANDLE search);
+
+// The search answered for an A function: the first entry narrowed into `data`; an entry that cannot be narrowed keeps
+// the refusal.
+HANDLE answered_find_a(LPCSTR name, LPWIN32_FIND_DATAA data)
+{
+    std::wstring const path = widened_name(name);
+    WIN32_FIND_DATAW wide{};
+    HANDLE const search = path.empty() ? INVALID_HANDLE_VALUE : answered_find(path, &wide);
+    if (search == INVALID_HANDLE_VALUE || narrow_find_data(wide, data)) return search;
+    hook_find_close(search);
+    ::SetLastError(ERROR_ACCESS_DENIED);
+    return INVALID_HANDLE_VALUE;
+}
+
+HANDLE WINAPI hook_find_first_file_ex_w(LPCWSTR name, FINDEX_INFO_LEVELS level, LPVOID data, FINDEX_SEARCH_OPS op, LPVOID filter, DWORD flags)
+{
+    HANDLE const h = real_find_first_file_ex_w(name, level, data, op, filter, flags);
+    return refused_search(h, name, data, level, op) ? answered_find(name, static_cast<LPWIN32_FIND_DATAW>(data)) : h;
+}
+
+HANDLE WINAPI hook_find_first_file_w(LPCWSTR name, LPWIN32_FIND_DATAW data)
+{
+    HANDLE const h = real_find_first_file_w(name, data);
+    return refused_search(h, name, data) ? answered_find(name, data) : h;
+}
+
+HANDLE WINAPI hook_find_first_file_ex_a(LPCSTR name, FINDEX_INFO_LEVELS level, LPVOID data, FINDEX_SEARCH_OPS op, LPVOID filter, DWORD flags)
+{
+    HANDLE const h = real_find_first_file_ex_a(name, level, data, op, filter, flags);
+    return refused_search(h, name, data, level, op) ? answered_find_a(name, static_cast<LPWIN32_FIND_DATAA>(data)) : h;
+}
+
+HANDLE WINAPI hook_find_first_file_a(LPCSTR name, LPWIN32_FIND_DATAA data)
+{
+    HANDLE const h = real_find_first_file_a(name, data);
+    return refused_search(h, name, data) ? answered_find_a(name, data) : h;
+}
+
+// The next entry of an answered search: 1 given, 0 none left, -1 not one of ours.
+int next_answered(HANDLE search, WIN32_FIND_DATAW& data)
 {
     ::AcquireSRWLockExclusive(&answered_lock);
     auto const at = std::ranges::find(answered_searches, search, &answered_search::handle);
-    bool const ours = at != answered_searches.end();
-    bool const more = ours && !at->rest.empty();
-    if (more) {
-        *data = at->rest.front();
+    int const result = at == answered_searches.end() ? -1 : at->rest.empty() ? 0 : 1;
+    if (result == 1) {
+        data = at->rest.front();
         at->rest.erase(at->rest.begin());
     }
     ::ReleaseSRWLockExclusive(&answered_lock);
-    if (!ours) return real_find_next_file_w(search, data);
-    ::SetLastError(more ? ERROR_SUCCESS : ERROR_NO_MORE_FILES);
-    return more ? TRUE : FALSE;
+    if (result >= 0) ::SetLastError(result ? ERROR_SUCCESS : ERROR_NO_MORE_FILES);
+    return result;
+}
+
+BOOL WINAPI hook_find_next_file_w(HANDLE search, LPWIN32_FIND_DATAW data)
+{
+    WIN32_FIND_DATAW next{};
+    int const answered = next_answered(search, next);
+    if (answered < 0) return real_find_next_file_w(search, data);
+    if (answered) *data = next;
+    return answered;
+}
+
+// kernelbase's FindNextFileA calls the exported FindNextFileW on 23H2 and 26300 alike; hooked too, so that an answered
+// search never reaches the real function whatever a build of Windows does there. A name with no form in the code page
+// ends the search.
+BOOL WINAPI hook_find_next_file_a(HANDLE search, LPWIN32_FIND_DATAA data)
+{
+    WIN32_FIND_DATAW next{};
+    int const answered = next_answered(search, next);
+    if (answered < 0) return real_find_next_file_a(search, data);
+    if (!answered) return FALSE;
+    if (narrow_find_data(next, data)) return TRUE;
+    ::SetLastError(ERROR_NO_MORE_FILES);
+    return FALSE;
 }
 
 BOOL WINAPI hook_find_close(HANDLE search)
@@ -1141,7 +1255,11 @@ void install()
     attach(real_get_final_path_name_by_handle_w, kernelbase, "GetFinalPathNameByHandleW", &hook_get_final_path_name_by_handle_w);
     attach(real_get_long_path_name_w, kernelbase, "GetLongPathNameW", &hook_get_long_path_name_w);
     attach(real_get_long_path_name_w_kernel32, ::GetModuleHandleW(L"kernel32.dll"), "GetLongPathNameW", &hook_get_long_path_name_w_kernel32);
+    attach(real_find_first_file_a, kernelbase, "FindFirstFileA", &hook_find_first_file_a);
+    attach(real_find_first_file_w, kernelbase, "FindFirstFileW", &hook_find_first_file_w);
+    attach(real_find_first_file_ex_a, kernelbase, "FindFirstFileExA", &hook_find_first_file_ex_a);
     attach(real_find_first_file_ex_w, kernelbase, "FindFirstFileExW", &hook_find_first_file_ex_w);
+    attach(real_find_next_file_a, kernelbase, "FindNextFileA", &hook_find_next_file_a);
     attach(real_find_next_file_w, kernelbase, "FindNextFileW", &hook_find_next_file_w);
     attach(real_find_close, kernelbase, "FindClose", &hook_find_close);
     ::DetourTransactionCommit();

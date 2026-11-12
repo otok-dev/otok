@@ -152,6 +152,27 @@ TEST(tree_hash, links_must_stay_inside_the_tree)
     EXPECT_NE(files.error().message.find("points to the absolute path"), std::string::npos) << files.error().message;
 }
 
+TEST(tree_hash, hashes_trees_beyond_max_path)
+{
+    // the prefix of a dev slice (Boost's headers) below a cache on Windows; its files hashed one by one too
+    test::temp_dir dir;
+    std::string const deep = test::deep_path();
+    dir.write("tree/" + deep + "/x.h", "x");
+    dir.write("tree/top.h", "top");
+    auto sha = sha256_file(dir.path() / "tree" / path_from_utf8(deep) / "x.h");
+    ASSERT_TRUE(sha) << sha.error().message;
+    EXPECT_EQ(*sha, sha256_hex("x"));
+    auto files = list_tree(dir.path() / "tree", tree_links::reject);
+    ASSERT_TRUE(files) << files.error().message;
+    ASSERT_EQ(files->size(), 2u);
+    EXPECT_EQ((*files)[0].path, deep + "/x.h");
+    EXPECT_EQ((*files)[0].size, 1u);
+    EXPECT_EQ((*files)[1].path, "top.h");
+    auto hash = tree_hash(dir.path() / "tree", tree_links::reject);
+    ASSERT_TRUE(hash) << hash.error().message;
+    EXPECT_EQ(*hash, sha256_hex(sha256_hex("x") + "  " + deep + "/x.h\n" + sha256_hex("top") + "  top.h\n"));
+}
+
 TEST(recipe_tree, accepts_a_text_recipe)
 {
     test::temp_dir dir;

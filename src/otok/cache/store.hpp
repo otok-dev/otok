@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "otok/core/error.hpp"
+#include "otok/core/file_lock.hpp"
 #include "otok/fetch/git.hpp"
 #include "otok/fetch/http.hpp"
 #include "otok/fetch/locations.hpp"
@@ -139,6 +140,10 @@ public:
     // when it is gone. An entry that cannot be renamed (a file of it held open) is an error naming it.
     result<void> discard(std::filesystem::path const& entry, std::string const& description,
         std::function<bool(std::filesystem::path const& entry)> const& damaged);
+
+    // The lock of the project in `project_dir` (cache.md 6.3), exclusive for a command that writes it: waited for, with the
+    // PID of its holder in the notice; held while the returned lock lives.
+    result<file_lock> hold_project(std::filesystem::path const& project_dir, bool exclusive);
 
 private:
     // git/<url key>/ containing `commit`.

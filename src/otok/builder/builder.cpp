@@ -251,21 +251,21 @@ std::string keep_failure(cache_store const& cache, fs::path const& work, fs::pat
     std::error_code ec;
     // a second failure within the second: "-2"
     fs::path kept = cache.root() / "failed" / (name + "-" + timestamp());
-    for (int n = 2; fs::exists(kept, ec); ++n) kept.replace_filename(name + "-" + timestamp() + "-" + std::to_string(n));
-    fs::create_directories(kept.parent_path(), ec);
+    for (int n = 2; fs::exists(long_path(kept), ec); ++n) kept.replace_filename(name + "-" + timestamp() + "-" + std::to_string(n));
+    fs::create_directories(long_path(kept.parent_path()), ec);
     if (whole) {
         rename_path(work, kept, ec);
         if (!ec) {
-            std::ofstream{kept / "key.txt", std::ios::binary} << key;
+            std::ofstream{long_path(kept / "key.txt"), std::ios::binary} << key;
             return "\nthe work directory is kept in '" + slashed(kept) + "'";
         }
     }
-    fs::create_directories(kept, ec);
-    fs::copy_file(log, kept / log.filename(), fs::copy_options::overwrite_existing, ec);
+    fs::create_directories(long_path(kept), ec);
+    fs::copy_file(long_path(log), long_path(kept / log.filename()), fs::copy_options::overwrite_existing, ec);
     bool const copied = !ec;
     if (remove_work) fs::remove_all(long_path(work), ec);
     if (!copied) return "";
-    std::ofstream{kept / "key.txt", std::ios::binary} << key;
+    std::ofstream{long_path(kept / "key.txt"), std::ios::binary} << key;
     return "\nthe whole log is in '" + slashed(kept / log.filename()) + "'";
 }
 
@@ -1246,10 +1246,10 @@ result<void> builder::prepare_sources(resolved_package const& p, built_package& 
         };
         if (auto ok = copy_tree(inputs.source, work / "source"); !ok) return failed("cannot copy the source: " + ok.error().message);
         if (auto ok = apply_patches(rec, inputs.recipe_dir, work / "source", work, log); !ok) return failed(ok.error().message);
-        fs::create_directories(staging, ec);
+        fs::create_directories(long_path(staging), ec);
         rename_path(work / "source", staging / "source", ec);
         if (ec) return failed("cannot move the patched source into the cache: " + ec.message());
-        std::ofstream{staging / "key.txt", std::ios::binary} << text;
+        std::ofstream{long_path(staging / "key.txt"), std::ios::binary} << text;
         fs::remove_all(long_path(work), ec);
         return {};
     });
@@ -2118,13 +2118,13 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
             fs::last_write_time(work, fs::file_time_type::clock::now(), ec);
             return {};
         }
-        fs::create_directories(staging, ec);
+        fs::create_directories(long_path(staging), ec);
         rename_path(virtual_drives::to_real(slice.prefix), staging / "prefix", ec);
         if (ec) return failed("cannot move the prefix into the cache: " + ec.message());
-        std::ofstream{staging / "result.toml", std::ios::binary} << *result_text;
-        std::ofstream{staging / "key.txt", std::ios::binary} << text;
+        std::ofstream{long_path(staging / "result.toml"), std::ios::binary} << *result_text;
+        std::ofstream{long_path(staging / "key.txt"), std::ios::binary} << text;
         follow.reset();
-        fs::copy_file(log, staging / "build.log", ec);
+        fs::copy_file(long_path(log), long_path(staging / "build.log"), ec);
         fs::remove_all(long_path(work), ec);
         return {};
     };

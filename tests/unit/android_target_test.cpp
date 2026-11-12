@@ -343,6 +343,46 @@ TEST(android_target, packages_include_and_lib_per_abi)
                                       "for all ABIs and configurations");
 }
 
+TEST(android_target, packages_beyond_max_path)
+{
+    // as on Windows, where the NDK builds too (docs/tasks/windows-long-paths-otok-files.md)
+    test::temp_dir dir;
+    std::string const deep = test::deep_path();
+    std::string const header = "boost/" + std::string(80, 'h') + ".hpp";
+    auto target = target::android::make_build_target("", {});
+    built_package package;
+    package.library = "z";
+    auto const slice = [&](std::string const& prefix, std::string const& abi) {
+        std::string const at = "cache/" + deep + "/" + prefix;
+        dir.write(at + "/include/" + header, "h\n");
+        dir.write(at + "/lib/libz.a", "!<arch>\n");
+        built_slice s;
+        s.spec = {"android", abi, "24", "release", "static"};
+        s.output.headers = dir.path() / path_from_utf8(at) / "include";
+        s.output.libraries["z"] = dir.path() / path_from_utf8(at) / "lib" / "libz.a";
+        return s;
+    };
+    package.slices = {slice("a", "arm64-v8a"), slice("b", "x86_64")};
+    recipe const rec{};
+    std::filesystem::path const staging = dir.path() / "cache" / path_from_utf8(deep) / "staging";
+    auto made = target->make_package(package, rec, {}, staging);
+    ASSERT_TRUE(made) << made.error().message;
+    EXPECT_EQ(read_file(staging / "include" / path_from_utf8(header)).value_or("?"), "h\n");
+    EXPECT_EQ(read_file(staging / "lib" / "x86_64" / "libz.a").value_or("?"), "!<arch>\n");
+
+    std::filesystem::path const output = dir.path() / "project" / path_from_utf8(deep) / "Otok";
+    ASSERT_TRUE(copy_tree(staging, output / "z"));
+    product p;
+    p.name = "Z";
+    p.libraries = {"z"};
+    std::vector<output_package> const packages{{"z", &rec, {"z"}, {{&p, {{"z", "z"}}, {}}}, {}, {}, "z"}};
+    std::vector<std::string> warnings;
+    auto finished = target->finish_output(output, packages, {}, warnings);
+    ASSERT_TRUE(finished) << finished.error().message;
+    std::string const config = read_file(output / "otok-config.cmake").value_or("");
+    EXPECT_NE(config.find("z/lib/x86_64/libz.a"), std::string::npos) << config;
+}
+
 namespace {
 
 // A project of tests/data/projects for Android, installed by otok commands with the real targets of this machine.

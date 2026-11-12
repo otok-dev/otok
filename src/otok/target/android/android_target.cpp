@@ -175,29 +175,16 @@ std::string link_name(fs::path const& file)
     return name;
 }
 
-// Copies the header directory `from` into `to`; a file both have must have the same contents.
+// Copies the header directory `from` into `to`; a file both have must have the same contents. Beyond 260 characters on Windows
+// (merge_tree): Boost's deepest header is 90 characters below include/.
 result<void> merge_headers(fs::path const& from, fs::path const& to, std::string const& slice)
 {
-    std::error_code ec;
-    for (auto it = fs::recursive_directory_iterator{from, ec}; !ec && it != fs::recursive_directory_iterator{}; it.increment(ec)) {
-        fs::path const relative = it->path().lexically_relative(from);
-        fs::path const dest = to / relative;
-        if (it->is_directory(ec)) {
-            fs::create_directories(dest, ec);
-            continue;
-        }
-        if (fs::exists(dest, ec)) {
-            auto const a = read_file(it->path());
-            auto const b = read_file(dest);
-            if (!a || !b || *a != *b) {
-                return fail("the header '" + path_to_utf8(relative.generic_u8string()) + "' of " + slice + " differs from that of another slice: "
-                    + "the Android target keeps one include/ for all ABIs and configurations");
-            }
-            continue;
-        }
-        fs::copy_file(it->path(), dest, ec);
+    auto const differing = merge_tree(from, to);
+    if (!differing) return fail("cannot copy the headers of '" + path_to_utf8(from) + "': " + differing.error().message);
+    if (!differing->empty()) {
+        return fail("the header '" + *differing + "' of " + slice + " differs from that of another slice: "
+            + "the Android target keeps one include/ for all ABIs and configurations");
     }
-    if (ec) return fail("cannot copy the headers of '" + path_to_utf8(from) + "': " + ec.message());
     return {};
 }
 
@@ -339,7 +326,7 @@ public:
         (void)rec;
         (void)products;
         std::error_code ec;
-        fs::create_directories(staging / "include", ec);
+        fs::create_directories(long_path(staging / "include"), ec);
         if (ec) return fail("cannot create '" + path_to_utf8(staging) + "': " + ec.message());
         package_files recorded;  // which file is which library (otok-toml.md 4.11)
         for (built_slice const& s : package.slices) {
@@ -356,14 +343,14 @@ public:
                 if (auto ok = merge_headers(dir, staging / "include", slice_label(s.spec)); !ok) return ok;
             }
             fs::path const dir = (s.spec.configuration == "debug" ? staging / "debug" / "lib" : staging / "lib") / s.spec.arch;
-            fs::create_directories(dir, ec);
+            fs::create_directories(long_path(dir), ec);
             std::map<std::string, std::string> files;  // link name → library output name
             for (auto const& [name, lib] : out.libraries) {
                 if (auto [it, fresh] = files.emplace(link_name(lib), name); !fresh) {
                     return fail("the libraries '" + it->second + "' and '" + name + "' are both files named '" + path_to_utf8(lib.filename()) + "'");
                 }
                 // the file itself under the name the build gave it, a link or not
-                fs::copy_file(fs::canonical(lib, ec), dir / lib.filename(), ec);
+                fs::copy_file(long_path(fs::canonical(long_path(lib), ec)), long_path(dir / lib.filename()), ec);  // canonical drops the extended prefix
                 if (ec) return fail("cannot copy the library '" + name + "': " + ec.message());
                 package_library_file f{name, s.spec.arch, s.spec.configuration,
                     (s.spec.configuration == "debug" ? "debug/lib/" : "lib/") + s.spec.arch + "/" + path_to_utf8(lib.filename())};
@@ -387,7 +374,7 @@ public:
         for (output_package const& p : packages) {
             for (char const* sub : {"lib", "debug/lib"}) {
                 std::error_code ec;
-                for (auto abi = fs::directory_iterator{dir / p.dir / sub, ec}; !ec && abi != fs::directory_iterator{}; abi.increment(ec)) {
+                for (auto abi = fs::directory_iterator{long_path(dir / p.dir / sub), ec}; !ec && abi != fs::directory_iterator{}; abi.increment(ec)) {
                     std::error_code file_ec;
                     for (auto it = fs::directory_iterator{abi->path(), file_ec}; !file_ec && it != fs::directory_iterator{}; it.increment(file_ec)) {
                         std::string const where = std::string{sub} + "/" + path_to_utf8(abi->path().filename()) + "/" + path_to_utf8(it->path().filename());

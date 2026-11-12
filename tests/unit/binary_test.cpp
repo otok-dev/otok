@@ -166,3 +166,15 @@ TEST(binary, reads_the_load_alignment_of_shared_objects)
     EXPECT_EQ(elf_load_alignment_of(dir.path() / "small.so"), 4096u);
     EXPECT_EQ(elf_load_alignment_of(dir.path() / "text.txt"), 0u);
 }
+
+TEST(binary, reads_libraries_beyond_max_path)
+{
+    // the libraries of a package entry, deep below a cache on Windows (the Android target reads the soname of each)
+    test::temp_dir dir;
+    std::string const deep = test::deep_path();
+    dir.write(deep + "/z.lib", "!<arch>\n");
+    dir.write(deep + "/z.obj", image(20, {{0, std::string{"\x64\x86", 2}}}));
+    std::filesystem::path const at = dir.path() / path_from_utf8(deep);
+    EXPECT_EQ(binary_kind_of(at / "z.lib"), binary_kind::archive);
+    EXPECT_EQ(coff_machines_of(at / "z.obj"), std::vector<unsigned>{0x8664});
+}

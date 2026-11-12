@@ -34,20 +34,21 @@ result<std::string> link_target(std::filesystem::path const& link, std::string c
 
 }
 
-result<std::vector<tree_file>> list_tree(std::filesystem::path const& root, tree_links links)
+result<std::vector<tree_file>> list_tree(std::filesystem::path const& given_root, tree_links links)
 {
     namespace fs = std::filesystem;
+    fs::path const root = long_path(given_root);  // deep trees (Boost's headers in a prefix) on Windows
     std::error_code ec;
     if (!fs::is_directory(root, ec)) {
-        return fail("'" + path_to_utf8(root) + "' is not a directory");
+        return fail("'" + path_to_utf8(given_root) + "' is not a directory");
     }
 
     std::vector<tree_file> files;
     fs::recursive_directory_iterator it{root, fs::directory_options::none, ec};
-    if (ec) return fail("cannot read '" + path_to_utf8(root) + "': " + ec.message());
+    if (ec) return fail("cannot read '" + path_to_utf8(given_root) + "': " + ec.message());
 
     for (; it != fs::recursive_directory_iterator{}; it.increment(ec)) {
-        if (ec) return fail("cannot read '" + path_to_utf8(root) + "': " + ec.message());
+        if (ec) return fail("cannot read '" + path_to_utf8(given_root) + "': " + ec.message());
         fs::directory_entry const& entry = *it;
         std::string const relative = path_to_utf8(entry.path().lexically_relative(root).generic_u8string());
 

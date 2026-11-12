@@ -36,7 +36,7 @@ constexpr std::string_view cachedir_tag =
 bool is_layout_name(std::string const& name)
 {
     static std::set<std::string, std::less<>> const names{
-        "CACHEDIR.TAG", "layout", "downloads", "git", "index", "view", "sources", "builds", "dev", "failed", "tmp", "gc-stamp"};
+        "CACHEDIR.TAG", "layout", "downloads", "git", "index", "view", "sources", "builds", "dev", "projects", "failed", "tmp", "gc-stamp"};
     return names.contains(name) || name.ends_with(".lock") || name.ends_with(".tmp");
 }
 
@@ -336,6 +336,26 @@ result<void> cache_store::discard(fs::path const& entry, std::string const& desc
     }
     fs::remove_all(long_path(aside), ec);
     return {};
+}
+
+result<file_lock> cache_store::hold_project(fs::path const& project_dir, bool exclusive)
+{
+    std::error_code ec;
+    // the key of dev/ (otok-dev-toml.md 4)
+    std::string const key = sha256_hex(path_to_utf8(fs::absolute(project_dir, ec))).substr(0, 32);
+    fs::path const dir = state_->root / "projects";
+    fs::create_directories(dir, ec);
+    if (ec) return fail("cannot create '" + path_to_utf8(dir) + "': " + ec.message());
+    fs::path const owner = dir / (key + ".owner");
+    auto lock = file_lock::acquire(dir / (key + ".lock"), [&] {
+        std::string holder = read_file(owner).value_or("");
+        while (!holder.empty() && (holder.back() == '\n' || holder.back() == '\r')) holder.pop_back();
+        state_->waiting("working in the project '" + path_to_utf8(project_dir) + "'" + (holder.empty() ? std::string{} : " (PID " + holder + ")"));
+    }, exclusive ? lock_mode::exclusive : lock_mode::shared);
+    if (!lock) return std::unexpected{lock.error()};
+    // for whoever waits next; not needed to work
+    (void)write_file_atomic(owner, std::to_string(current_process_id()) + "\n");
+    return lock;
 }
 
 std::vector<result<fs::path>> cache_store::fetch(std::span<cache_download const> downloads, http_settings const& settings)

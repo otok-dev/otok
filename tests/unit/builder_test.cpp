@@ -1207,6 +1207,53 @@ TEST_F(builder_test, writes_the_output)
     EXPECT_TRUE(std::filesystem::exists(output / "b" / "include" / "b.h"));
 }
 
+TEST_F(builder_test, writes_an_output_beyond_max_path)
+{
+    // what otok itself copies after the build, past 260 characters on Windows: a license file deep in the source, a data file
+    // with a long name, an output deep in the project (docs/tasks/windows-long-paths-otok-files.md)
+    std::string const deep = test::deep_path();
+    std::string const data = std::string(240, 'd') + ".dat";
+    std::filesystem::path const archive = upstream.path() / "b-deep.tar.gz";
+    test::write_tar_gz(archive, {{"b-1.0/b.c", "int b;\n"}, {"b-1.0/" + deep + "/LICENSE", "The deep license of b.\n"}});
+    urls["b"] = file_url(archive);
+    hashes["b"] = sha256_file(archive).value_or("?");
+    write_recipe("b", "2.0",
+        "function build(slice, options, deps)\n"
+        "    otok.write(slice.prefix .. '/lib/libb.a', '!<arch>\\n')\n"
+        "    otok.write(slice.prefix .. '/include/b.h', 'int b;\\n')\n"
+        "    otok.write(slice.prefix .. '/share/b.dat', 'data\\n')\n"
+        "    return { libraries = { b = slice.prefix .. '/lib/libb.a' }, headers = slice.prefix .. '/include',\n"
+        "        data = { ['" + data + "'] = slice.prefix .. '/share/b.dat' } }\n"
+        "end\n",
+        options_of_b);
+    std::string text = read_file(project.path() / "recipes" / "b" / "recipe.toml").value_or("?");
+    std::string const files = "license-files = [\"LICENSE\"]";
+    text.replace(text.find(files), files.size(), "license-files = [\"" + deep + "/LICENSE\"]");
+    project.write("recipes/b/recipe.toml", text);
+    std::string with_output = manifest;
+    std::string const platforms = "platforms = [\"native\"]\n";
+    with_output.insert(with_output.find(platforms) + platforms.size(), "output = \"" + deep + "/Otok\"\n");
+    project.write("otok.toml", with_output);
+
+    ASSERT_EQ(run({"install"}), 0) << err.str();
+    EXPECT_NE(out.str().find(": 2 copied, 0 unchanged, 0 removed\n"), std::string::npos) << out.str();
+    std::filesystem::path const output = project.path() / path_from_utf8(deep) / "Otok";
+    EXPECT_EQ(read_file(output / "b" / "licenses" / path_from_utf8(deep) / "LICENSE").value_or("?"), "The deep license of b.\n");
+    EXPECT_EQ(read_file(output / "b" / "data" / path_from_utf8(data)).value_or("?"), "data\n");
+    EXPECT_EQ(read_file(output / "a" / "include" / "a.h").value_or("?"), "int a;\n");
+    EXPECT_NE(read_file(output / "Acknowledgements.md").value_or("").find("The deep license of b.\n"), std::string::npos);
+    EXPECT_FALSE(std::filesystem::exists(long_path(output / "b" / "key.txt")));
+
+    // its state read back; a library no longer resolved removed
+    ASSERT_EQ(run({"install"}), 0) << err.str();
+    EXPECT_NE(out.str().find(": 0 copied, 2 unchanged, 0 removed\n"), std::string::npos) << out.str();
+    with_output.erase(with_output.find("[deps.a]"), with_output.find("[deps.b]") - with_output.find("[deps.a]"));
+    project.write("otok.toml", with_output);
+    ASSERT_EQ(run({"install"}), 0) << err.str();
+    EXPECT_NE(out.str().find(": 0 copied, 1 unchanged, 1 removed\n"), std::string::npos) << out.str();
+    EXPECT_FALSE(std::filesystem::exists(long_path(output / "a")));
+}
+
 TEST_F(builder_test, products_hold_the_dependencies_whose_condition_holds)
 {
     // a needs b only with its option; the project names b itself, so b is built either way

@@ -175,7 +175,7 @@ result<consumer_package> consumer_package_of(fs::path const& dir, std::span<outp
     std::optional<std::set<std::string>> arches, configurations;
     for (output_package const& p : packages) {
         std::error_code ec;
-        if (fs::is_directory(dir / p.dir / "include", ec)) include_of[p.library] = slashed(p.dir / "include");
+        if (fs::is_directory(long_path(dir / p.dir / "include"), ec)) include_of[p.library] = slashed(p.dir / "include");
         if (!p.data.empty()) c.data_dirs.emplace_back(p.library, slashed(p.dir / "data"));
         if (p.libraries.empty()) continue;
         auto files = read_package_files(dir / p.dir);

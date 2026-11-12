@@ -10,7 +10,7 @@
 namespace otok::build_info {
 
 // The release version of otok (semantic versioning).
-inline constexpr std::string_view version = "0.5.6";
+inline constexpr std::string_view version = "0.5.7";
 
 // The years of the copyright notice: the first year, or the first and the last release's year (written by
 // tools/release/release.sh).

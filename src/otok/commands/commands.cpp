@@ -112,8 +112,9 @@ struct project
     std::size_t configuration = 0;        // --profile
     machine_config config;
     std::optional<cache_store> cache;
+    std::optional<file_lock> held;        // the project's lock (cache.md 6.3), for as long as the command works in it
     std::optional<git_tool> git;
-    dev_manifest dev;                     // otok.dev.toml, unless --no-dev (otok-dev-toml.md)
+    dev_manifest dev;                    // otok.dev.toml, unless --no-dev (otok-dev-toml.md)
     std::optional<resolution> dev_full;   // the resolution with its recipes, when it names one (3)
     std::optional<resolution> dev_r;      // of the graphs this machine builds
     // where the recipes come from, kept for the recipe trees of the graphs chosen later (select_graphs)
@@ -343,9 +344,6 @@ std::unique_ptr<project> load_project(command_context& ctx, parsed_command const
         diags.error({}, "no otok.toml in '" + path_to_utf8(ctx.project_dir) + "'");
         return nullptr;
     }
-    auto m = load_manifest(manifest_path, ctx.targets, diags);
-    if (!m) return nullptr;
-
     auto config = load_config(ctx.env, diags);
     if (!config) return nullptr;
     cache_notices notices{
@@ -357,12 +355,23 @@ std::unique_ptr<project> load_project(command_context& ctx, parsed_command const
         diags.error({}, cache.error().message);
         return nullptr;
     }
+    // one otok at a time writes a project, readers beside each other (cache.md 6.3): the manifest and the lock are read
+    // once it is held, as the otok waited for may have changed them
+    bool const writes = cmd.command == "install" || cmd.command == "update" || cmd.command == "fetch";
+    auto held = cache->hold_project(ctx.project_dir, writes);
+    if (!held) {
+        diags.error({}, held.error().message);
+        return nullptr;
+    }
+    auto m = load_manifest(manifest_path, ctx.targets, diags);
+    if (!m) return nullptr;
     cache->set_offline(offline(cmd));
     cache->set_mirrors({m->fetch, config->mirrors});
 
     // on the heap: the recipe providers it keeps point into it
     auto owned = std::make_unique<project>();
     project& p = *owned;
+    p.held = std::move(*held);
     p.m = std::move(*m);
     p.config = std::move(*config);
     p.cache = std::move(*cache);
@@ -750,7 +759,7 @@ std::optional<std::map<std::string, package_inputs>> fetch_project_inputs(projec
         for (license_entry const& file : named.second->license_files) {
             if (file.in_recipe) continue;  // checked with the recipe
             std::error_code ec;
-            if (!std::filesystem::is_regular_file(source / path_from_utf8(file.path), ec)) {
+            if (!std::filesystem::is_regular_file(long_path(source / path_from_utf8(file.path)), ec)) {
                 diags.error({}, named.first + ": the license file " + in_quotes(file.path) + " named in license-files is not in the source");
             }
         }

@@ -322,6 +322,63 @@ TEST(windows_target, packages_include_lib_and_bin_per_architecture)
                                       "for all architectures and configurations");
 }
 
+TEST(windows_target, packages_beyond_max_path)
+{
+    // a cache and a project deep enough that a package entry and the output pass 260 characters, with a header 90 characters
+    // below include/ as Boost has (docs/tasks/windows-long-paths-otok-files.md)
+    test::temp_dir dir;
+    std::string const deep = test::deep_path();
+    std::string const header = "boost/" + std::string(80, 'h') + ".hpp";
+    auto target = target::windows::make_build_target("", "", "", {});
+    built_package package;
+    package.library = "z";
+    auto const slice = [&](std::string const& prefix, std::string const& arch) {
+        std::string const at = "cache/" + deep + "/" + prefix;
+        dir.write(at + "/include/" + header, "h\n");
+        dir.write(at + "/lib/z.lib", "!<arch>\n");
+        dir.write(at + "/bin/z.dll", "MZ");
+        dir.write(at + "/key.txt", "toolchain.crt = 14.44.35207\n");
+        built_slice s;
+        s.spec = {"windows", arch, "", "release", "dynamic"};
+        s.entry = dir.path() / path_from_utf8(at);
+        s.output.headers = s.entry / "include";
+        s.output.libraries["z"] = s.entry / "lib" / "z.lib";
+        s.output.runtimes["z"] = s.entry / "bin" / "z.dll";
+        return s;
+    };
+    package.slices = {slice("a", "x86_64"), slice("b", "arm64")};
+    recipe const rec{};
+    std::filesystem::path const staging = dir.path() / "cache" / path_from_utf8(deep) / "staging";
+    auto made = target->make_package(package, rec, {}, staging);
+    ASSERT_TRUE(made) << made.error().message;
+    EXPECT_EQ(read_file(staging / "include" / path_from_utf8(header)).value_or("?"), "h\n");
+    EXPECT_EQ(read_file(staging / "lib" / "arm64" / "z.lib").value_or("?"), "!<arch>\n");
+    EXPECT_EQ(read_file(staging / "bin" / "x86_64" / "z.dll").value_or("?"), "MZ");
+    EXPECT_EQ(read_package_files(staging).value_or(package_files{}).properties, (std::map<std::string, std::string>{{"crt", "14.44"}}));
+
+    // a header of another slice that differs: named as it is below include/
+    dir.write("cache/" + deep + "/b/include/" + header, "other\n");
+    auto differ = target->make_package(package, rec, {}, staging.parent_path() / "staging2");
+    ASSERT_FALSE(differ);
+    EXPECT_EQ(differ.error().message, "the header '" + header + "' of windows-arm64 differs from that of another slice: the Windows target "
+                                      "keeps one include/ for all architectures and configurations");
+
+    // the output's consumer files, its libraries read
+    std::filesystem::path const output = dir.path() / "project" / path_from_utf8(deep) / "Otok";
+    ASSERT_TRUE(copy_tree(staging, output / "z"));
+    product p;
+    p.name = "Z";
+    p.libraries = {"z"};
+    std::vector<output_package> const packages{{"z", &rec, {"z"}, {{&p, {{"z", "z"}}, {}}}, {}, {}, "z"}};
+    std::vector<std::string> warnings;
+    auto finished = target->finish_output(output, packages, {}, warnings);
+    ASSERT_TRUE(finished) << finished.error().message;
+    std::string const config = read_file(output / "otok-config.cmake").value_or("");
+    EXPECT_NE(config.find("z/lib/arm64/z.lib"), std::string::npos) << config;
+    EXPECT_NE(config.find("z/include"), std::string::npos) << config;
+    EXPECT_TRUE(std::filesystem::is_regular_file(long_path(output / "otok.props")));
+}
+
 TEST(windows_target, reads_the_toolset_of_the_crt)
 {
     EXPECT_EQ(crt_of_key("library = z\ntoolchain.crt = 14.44.35220\r\ntoolchain.windows-sdk = 10.0.26100\n"), "14.44");

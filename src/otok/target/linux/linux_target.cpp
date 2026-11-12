@@ -315,7 +315,7 @@ public:
             std::map<std::string, std::string> owners;  // file name → library
             for (output_package const& p : packages) {
                 std::error_code ec;
-                for (auto it = fs::directory_iterator{dir / p.dir / sub, ec}; !ec && it != fs::directory_iterator{}; it.increment(ec)) {
+                for (auto it = fs::directory_iterator{long_path(dir / p.dir / sub), ec}; !ec && it != fs::directory_iterator{}; it.increment(ec)) {
                     if (auto [o, fresh] = owners.emplace(path_to_utf8(it->path().filename()), p.library); !fresh) {
                         warnings.push_back("the libraries '" + o->second + "' and '" + p.library + "' both have '" + sub + "/"
                             + path_to_utf8(it->path().filename()) + "': a consumer linking through search paths gets only one of them");

@@ -101,6 +101,15 @@ inline std::optional<git_tool> find_test_git()
     return std::nullopt;
 }
 
+// A relative path with `/` of more than 260 characters, so that a path ending in it is longer than MAX_PATH below any
+// directory, however short the temporary directory of the machine: the paths otok must reach on Windows through long_path.
+inline std::string deep_path()
+{
+    std::string path;
+    for (char c = 'a'; c < 'a' + 6; ++c) path += (path.empty() ? "" : "/") + std::string(48, c);
+    return path;
+}
+
 // A fresh directory under the system temporary directory, removed with everything in it.
 class temp_dir
 {
@@ -116,17 +125,17 @@ public:
     ~temp_dir()
     {
         std::error_code ec;
-        std::filesystem::remove_all(path_, ec);
+        std::filesystem::remove_all(long_path(path_), ec);
     }
     temp_dir(temp_dir const&) = delete;
     temp_dir& operator=(temp_dir const&) = delete;
 
     std::filesystem::path const& path() const noexcept { return path_; }
 
-    // Writes `content` byte for byte to `relative` (with `/`), creating directories.
+    // Writes `content` byte for byte to `relative` (with `/`), creating directories; beyond 260 characters too (deep_path).
     void write(std::string_view relative, std::string_view content) const
     {
-        std::filesystem::path const file = path_ / path_from_utf8(relative);
+        std::filesystem::path const file = long_path(path_ / path_from_utf8(relative));
         std::filesystem::create_directories(file.parent_path());
         std::ofstream out{file, std::ios::binary};
         out.write(content.data(), static_cast<std::streamsize>(content.size()));

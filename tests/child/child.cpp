@@ -19,6 +19,8 @@
 //   semaphore N   Windows: opens the semaphore named N and prints opened, or the error
 //   traverse D    Windows: opens the directory D to pass through it and prints opened, or the error
 //   list D        Windows: opens the directory D to list it and prints opened, or the error
+//   find API P    Windows: FindFirstFile (API A, W, ExA or ExW) of P, then FindNextFile, and prints the names found, or
+//                 the error
 //   connect       Windows: connects to 192.0.2.1:80 (TEST-NET, never answers) and prints the Winsock error, or
 //                 timeout after 2 s (an AppContainer without capabilities is refused at once: 10013)
 //
@@ -153,17 +155,29 @@ int run(std::vector<std::string> args)
         buffer.resize(2048);
         DWORD const n = ::GetLongPathNameW(buffer.c_str(), buffer.data(), 2048);
         std::cout << (n && n < 2048 ? utf8(std::wstring{buffer.c_str(), n}) : std::to_string(::GetLastError())) << '\n';
-    } else if (command == "find" && args.size() == 2) {
-        // FindFirstFileA of one name, as b2 finds the canonical name of each component of a path: the entry's name, whether
-        // it is a directory, then what FindNextFileA says
-        WIN32_FIND_DATAA data{};
-        HANDLE const h = ::FindFirstFileA(args[1].c_str(), &data);
+    } else if (command == "find" && args.size() == 3) {
+        // FindFirstFile of one name through the API named (A, W, ExA, ExW; kernelbase reaches the directory by other ways
+        // on other builds of Windows), as b2 finds the canonical name of each component of a path: the entry's name,
+        // whether it is a directory, then what FindNextFile of the same kind says
+        std::string const& api = args[1];
+        bool const wide = api == "W" || api == "ExW";
+        bool const ex = api == "ExA" || api == "ExW";
+        if (!wide && !ex && api != "A") return 2;
+        WIN32_FIND_DATAA a{};
+        WIN32_FIND_DATAW w{};
+        std::wstring const wide_name = std::filesystem::path{std::u8string{args[2].begin(), args[2].end()}}.wstring();
+        HANDLE const h = wide ? (ex ? ::FindFirstFileExW(wide_name.c_str(), FindExInfoBasic, &w, FindExSearchNameMatch, nullptr, 0)
+                                    : ::FindFirstFileW(wide_name.c_str(), &w))
+                              : (ex ? ::FindFirstFileExA(args[2].c_str(), FindExInfoStandard, &a, FindExSearchNameMatch, nullptr, 0)
+                                    : ::FindFirstFileA(args[2].c_str(), &a));
         if (h == INVALID_HANDLE_VALUE) {
             std::cout << ::GetLastError() << '\n';
             return 0;
         }
-        std::cout << data.cFileName << ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? " dir" : " file");
-        while (::FindNextFileA(h, &data)) std::cout << ' ' << data.cFileName;
+        auto const name = [&] { return wide ? utf8(std::wstring{w.cFileName}) : std::string{a.cFileName}; };
+        DWORD const attributes = wide ? w.dwFileAttributes : a.dwFileAttributes;
+        std::cout << name() << ((attributes & FILE_ATTRIBUTE_DIRECTORY) ? " dir" : " file");
+        while (wide ? ::FindNextFileW(h, &w) : ::FindNextFileA(h, &a)) std::cout << ' ' << name();
         std::cout << ' ' << ::GetLastError() << (::FindClose(h) ? " closed" : " not closed") << '\n';
     } else if (command == "volume" && args.size() == 2) {
         // whether GetVolumeInformationW tells of a volume preserving case (perlglob lowercases names otherwise)

@@ -26,6 +26,7 @@ sharing safe.
 │   ├── sources/<sources key>/        # cache-key.md 3.1; source/ (patched) and key.txt
 │   └── packages/<package key>/       # cache-key.md 4; the packaged output and key.txt
 ├── dev/<project key>/<library>-<slice>/  # the kept work directories of dev slices (otok-dev-toml.md 4)
+├── projects/<project key>.lock       # held by the otok working in a project, and its PID in .owner (6.3)
 ├── failed/<library>-<slice>-<time>/  # what failed builds left: their logs, or work directories (7.1)
 ├── tmp/<process>/                    # temporary files of one otok process (7)
 ├── cache.lock                        # shared by running otok processes, exclusive for `otok clean` (8)
@@ -165,6 +166,16 @@ paths `build` returned are checked before the entry is made, and a path it canno
 used: otok warns, takes the entry's lock, and, if the entry is still damaged (another process may have
 built it again meanwhile), renames it into `tmp/<process>/` and removes it, then builds the slice as if
 it were missing. An entry it cannot rename (a file of it held open) is an error that names it.
+
+### 6.3 Projects
+
+Two otok processes in one project (an IDE's build and a terminal) would both write `otok.lock` and the outputs, one
+after the other or into each other. Each command that reads a project holds `projects/<project key>.lock`, the key being
+the first 32 hex digits of the SHA-256 of the project directory's absolute path (as `dev/`): `install`, `update` and
+`fetch`, which write, exclusively; the others (`tree`, `why`, `metadata`, `audit`, `outdated`) shared. A process that
+cannot have it waits, saying so with the PID of the holder, which writes it into `projects/<project key>.owner` when it
+takes the lock. The lock is the operating system's (6), so a holder that dies releases it; the processes a build
+starts never hold it. Nothing of this is in the project directory.
 
 ### 6.1 Offline
 

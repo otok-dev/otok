@@ -198,8 +198,8 @@ result<void> package_data(std::span<built_slice const> slices, fs::path const& d
                     + "; every slice must return the same data");
             }
         }
-        fs::create_directories(dir, ec);
-        fs::copy_file(file, dir / path_from_utf8(name), fs::copy_options::overwrite_existing, ec);
+        fs::create_directories(long_path(dir), ec);
+        fs::copy_file(long_path(file), long_path(dir / path_from_utf8(name)), fs::copy_options::overwrite_existing, ec);
         if (ec) return fail("cannot copy the data file '" + name + "': " + ec.message());
     }
     for (built_slice const& s : slices) {
@@ -282,22 +282,22 @@ result<std::vector<packaged>> package_all(resolution const& r, std::size_t confi
             if (!mine.slices.empty()) pk.linkage = mine.slices.front().spec.linkage;
 
             std::error_code ec;
-            pk.cached = fs::exists(pk.entry, ec);
+            pk.cached = fs::exists(long_path(pk.entry), ec);
             if (pk.cached) cache.mark_used(pk.entry);
             if (!pk.cached) {
                 std::string const label = bp.library + " " + rec.version->str() + " for " + pk.target;
                 progress << "packaging " << label << "\n";
                 if (packaging) packaging(bp.library, pk.target);
                 auto made = cache.ensure(pk.entry, "packaging " + label, [&](fs::path const& staging) -> result<void> {
-                    fs::create_directories(staging, ec);
+                    fs::create_directories(long_path(staging), ec);
                     if (ec) return fail("cannot create '" + slashed(staging) + "': " + ec.message());
                     if (auto ok = target->make_package(mine, rec, pk.products, staging); !ok) return fail("packaging " + label + ": " + ok.error().message);
                     if (auto ok = package_data(mine.slices, staging / "data"); !ok) return fail("packaging " + label + ": " + ok.error().message);
                     for (license_entry const& file : rec.license_files) {
                         fs::path const to = staging / "licenses" / path_from_utf8(file.path);
-                        fs::create_directories(to.parent_path(), ec);
+                        fs::create_directories(long_path(to.parent_path()), ec);
                         fs::path const from = (file.in_recipe ? bp.recipe_dir : bp.source) / path_from_utf8(file.path);
-                        fs::copy_file(from, to, fs::copy_options::overwrite_existing, ec);
+                        fs::copy_file(long_path(from), long_path(to), fs::copy_options::overwrite_existing, ec);
                         if (ec) return fail("packaging " + label + ": cannot copy the license file '" + file.path + "': " + ec.message());
                     }
                     return write_file_atomic(staging / "key.txt", text);
@@ -318,7 +318,7 @@ result<std::map<std::string, std::string>> read_output_state(fs::path const& dir
 {
     fs::path const file = dir / output_state_file;
     std::error_code ec;
-    if (!fs::exists(file, ec)) return output_state{};
+    if (!fs::exists(long_path(file), ec)) return output_state{};
     auto state = read_state(file);
     if (!state) return fail("the state file of the output '" + slashed(dir) + "' is damaged (" + state.error().message + ")");
     return state;
@@ -329,20 +329,21 @@ result<output_changes> write_output(fs::path const& dir, build_target const& tar
 {
     std::string const name = slashed(dir);
     fs::path const state_file = dir / output_state_file;
+    fs::path const long_dir = long_path(dir);
     std::error_code ec;
     output_state state;
-    if (fs::exists(dir, ec)) {
-        if (!fs::is_directory(dir, ec)) return fail("the output '" + name + "' is not a directory");
-        if (fs::exists(state_file, ec)) {
+    if (fs::exists(long_dir, ec)) {
+        if (!fs::is_directory(long_dir, ec)) return fail("the output '" + name + "' is not a directory");
+        if (fs::exists(long_path(state_file), ec)) {
             auto read = read_state(state_file);
             if (!read) return fail("the state file of the output '" + name + "' is damaged (" + read.error().message + "); remove the directory");
             state = std::move(*read);
-        } else if (!fs::is_empty(dir, ec)) {
+        } else if (!fs::is_empty(long_dir, ec)) {
             return fail("the output directory '" + name + "' was not created by otok (it has no " + output_state_file
                 + "); remove it or set another 'output'");
         }
     }
-    fs::create_directories(dir, ec);
+    fs::create_directories(long_dir, ec);
     if (ec) return fail("cannot create the output directory '" + name + "': " + ec.message());
 
     std::map<std::string, packaged const*> current;
@@ -371,7 +372,7 @@ result<output_changes> write_output(fs::path const& dir, build_target const& tar
     }
     for (auto const& [library, p] : current) {
         fs::path const out = dir / target.package_output(library);
-        if (auto it = state.find(library); it != state.end() && it->second == p->key && fs::is_directory(out, ec)) {
+        if (auto it = state.find(library); it != state.end() && it->second == p->key && fs::is_directory(long_path(out), ec)) {
             ++changes.unchanged;
             continue;
         }
@@ -380,7 +381,7 @@ result<output_changes> write_output(fs::path const& dir, build_target const& tar
         }
         if (auto ok = remove(library); !ok) return std::unexpected{ok.error()};
         if (auto ok = copy_tree(p->entry, out); !ok) return fail("cannot copy '" + library + "' into the output: " + ok.error().message);
-        fs::remove(out / "key.txt", ec);
+        fs::remove(long_path(out / "key.txt"), ec);
         state[library] = p->key;
         ++changes.copied;
         if (auto ok = write_state(state_file, state); !ok) return std::unexpected{ok.error()};

@@ -139,6 +139,7 @@ TEST(sandbox, confines_processes)
     dir.write("work/mine.txt", "mine\n");
     dir.write("work/short~1.txt", "short\n");
     dir.write("secret/key.txt", "secret\n");
+    dir.write("secret~1/key.txt", "secret\n");
     // a toolchain outside the cache, granted to the container, its ancestors not (an NDK on another drive)
     dir.write("outer/inner/tool/cc.exe", "cc\n");
     dir.write("outer/other/x.txt", "x\n");
@@ -183,26 +184,34 @@ TEST(sandbox, confines_processes)
     EXPECT_EQ(run({path_to_utf8(child), "traverse", path_to_utf8(root / "secret")}), "5\n");
     // GetLongPathNameW lists each ancestor for a name that could be a short one ("AppData" in the user's profile): refused,
     // a path with no short name in it is given back as it is (LLVM's programs expand their own path at the start);
-    // a path with a short name keeps the refusal, one that is not there its own error
+    // a path with a short name in a directory the container may not list keeps the refusal, one that is not there its own
+    // error. (kernelbase's GetLongPathNameW looks for each name with FindFirstFileW: the ancestors handed are answered by
+    // hook 17, a name in the work directory found by listing it.)
     std::string const mine = path_to_utf8(root / "work" / "mine.txt");
     EXPECT_EQ(run({path_to_utf8(child), "long", mine}), mine + "\n");
-    EXPECT_EQ(run({path_to_utf8(child), "long", path_to_utf8(root / "work" / "short~1.txt")}), "5\n");
+    std::string const short_name = path_to_utf8(root / "work" / "short~1.txt");
+    EXPECT_EQ(run({path_to_utf8(child), "long", short_name}), short_name + "\n");
+    EXPECT_EQ(run({path_to_utf8(child), "long", path_to_utf8(root / "secret~1" / "key.txt")}), "5\n");
     EXPECT_EQ(run({path_to_utf8(child), "long", path_to_utf8(root / "work" / "missing.txt")}), "2\n");
     // FindFirstFile of one name lists the directory holding it: the ancestors of the toolchain, handed, and the toolchain,
-    // granted, are found as one entry each; nothing is listed, nothing beside them found (decision 111)
-    auto const find = [&](std::filesystem::path const& p) { return run({path_to_utf8(child), "find", path_to_utf8(p)}); };
-    EXPECT_EQ(find(root / "outer"), "outer dir 18 closed\n");
-    EXPECT_EQ(find(root / "outer" / "inner"), "inner dir 18 closed\n");
-    EXPECT_EQ(find(root / "outer" / "inner" / "tool"), "tool dir 18 closed\n");
-    EXPECT_EQ(find(root / "outer" / "inner" / "tool" / "cc.exe"), "cc.exe file 18 closed\n");
-    EXPECT_EQ(find(root / "outer" / "other"), "5\n");
-    EXPECT_EQ(find(root / "outer" / "o*"), "5\n");
-    // a listing of a directory on the ways shows the next names on them alone (b2 lists each ancestor of a file), the
-    // directory itself still not opened for listing
-    EXPECT_EQ(find(root / "*"), "work dir outer 18 closed\n");
-    EXPECT_EQ(find(root / "outer" / "*"), "inner dir 18 closed\n");
-    EXPECT_EQ(find(root / "outer" / "inner" / "*.*"), "tool dir 18 closed\n");
-    EXPECT_EQ(find(root / "secret" / "*"), "5\n");
+    // granted, are found as one entry each; nothing is listed, nothing beside them found (decision 111). Through each
+    // exported entry: kernelbase's FindFirstFileW did not come through FindFirstFileExW on Windows 11 23H2, nor did any of
+    // them on 24H2 and newer (b2's FindFirstFileA there)
+    for (std::string const api : {"A", "W", "ExA", "ExW"}) {
+        auto const find = [&](std::filesystem::path const& p) { return run({path_to_utf8(child), "find", api, path_to_utf8(p)}); };
+        EXPECT_EQ(find(root / "outer"), "outer dir 18 closed\n") << api;
+        EXPECT_EQ(find(root / "outer" / "inner"), "inner dir 18 closed\n") << api;
+        EXPECT_EQ(find(root / "outer" / "inner" / "tool"), "tool dir 18 closed\n") << api;
+        EXPECT_EQ(find(root / "outer" / "inner" / "tool" / "cc.exe"), "cc.exe file 18 closed\n") << api;
+        EXPECT_EQ(find(root / "outer" / "other"), "5\n") << api;
+        EXPECT_EQ(find(root / "outer" / "o*"), "5\n") << api;
+        // a listing of a directory on the ways shows the next names on them alone (b2 lists each ancestor of a file), the
+        // directory itself still not opened for listing
+        EXPECT_EQ(find(root / "*"), "work dir outer 18 closed\n") << api;
+        EXPECT_EQ(find(root / "outer" / "*"), "inner dir 18 closed\n") << api;
+        EXPECT_EQ(find(root / "outer" / "inner" / "*.*"), "tool dir 18 closed\n") << api;
+        EXPECT_EQ(find(root / "secret" / "*"), "5\n") << api;
+    }
     EXPECT_EQ(run({path_to_utf8(child), "list", path_to_utf8(root / "outer")}), "5\n");
     std::string const variables = work + "\n" + work + "\n<unset>\n";
     EXPECT_EQ(run({path_to_utf8(child), "env", "TEMP", "TMP", "LOCALAPPDATA"}), variables);

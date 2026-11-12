@@ -214,3 +214,81 @@ TEST(fs, rename_path)
     rename_path(dir.path() / "missing", dir.path() / "elsewhere", ec);
     EXPECT_TRUE(ec);
 }
+
+TEST(fs, files_beyond_max_path)
+{
+    // the files of package entries and outputs on Windows: deep below a cache or a project (docs/tasks/windows-long-paths-otok-files.md)
+    test::temp_dir dir;
+    std::filesystem::path const deep = dir.path() / path_from_utf8(test::deep_path());
+    std::filesystem::create_directories(long_path(deep));
+    ASSERT_TRUE(write_file_atomic(deep / "f.txt", "one").has_value());
+    EXPECT_EQ(read_file(deep / "f.txt").value_or("?"), "one");
+    EXPECT_EQ(write_file_if_changed(deep / "f.txt", "one").value_or(true), false);
+    EXPECT_EQ(write_file_if_changed(deep / "f.txt", "two").value_or(false), true);
+    EXPECT_EQ(read_file(deep / "f.txt").value_or("?"), "two");
+    std::error_code ec;
+    rename_path(deep / "f.txt", deep / "g.txt", ec);
+    EXPECT_FALSE(ec) << ec.message();
+    EXPECT_EQ(read_file(deep / "g.txt").value_or("?"), "two");
+
+    // messages show the path as the user gave it
+    auto missing = read_file(deep / "missing.txt");
+    ASSERT_FALSE(missing);
+    EXPECT_EQ(missing.error().message, "cannot open '" + path_to_utf8(deep / "missing.txt") + "'");
+#ifdef _WIN32
+    EXPECT_EQ(path_to_utf8(plain_path(path_from_utf8(R"(\\?\C:\a\c)"))), R"(C:\a\c)");
+    EXPECT_EQ(path_to_utf8(plain_path(path_from_utf8(R"(\\?\UNC\server\share\x)"))), R"(\\server\share\x)");
+#endif
+    EXPECT_EQ(plain_path(deep), deep);
+}
+
+TEST(fs, merges_trees_beyond_max_path)
+{
+    // the headers of the slices into one include/ (the Windows and Android targets): Boost's deepest is 90 characters below it
+    test::temp_dir dir;
+    std::string const deep = test::deep_path();
+    dir.write("a/" + deep + "/x.h", "x");
+    dir.write("a/top.h", "top");
+    dir.write("b/" + deep + "/x.h", "x");
+    dir.write("b/" + deep + "/y.h", "y");
+    std::filesystem::path const to = dir.path() / path_from_utf8(deep) / "include";
+    auto merged = merge_tree(dir.path() / "a", to);
+    ASSERT_TRUE(merged) << merged.error().message;
+    EXPECT_EQ(*merged, "");
+    merged = merge_tree(dir.path() / "b", to);
+    ASSERT_TRUE(merged) << merged.error().message;
+    EXPECT_EQ(*merged, "");
+    EXPECT_EQ(read_file(to / path_from_utf8(deep) / "x.h").value_or("?"), "x");
+    EXPECT_EQ(read_file(to / path_from_utf8(deep) / "y.h").value_or("?"), "y");
+    EXPECT_EQ(read_file(to / "top.h").value_or("?"), "top");
+
+    // a file both have with other contents: returned, nothing more copied
+    dir.write("c/" + deep + "/x.h", "other");
+    merged = merge_tree(dir.path() / "c", to);
+    ASSERT_TRUE(merged) << merged.error().message;
+    EXPECT_EQ(*merged, deep + "/x.h");
+    EXPECT_EQ(read_file(to / path_from_utf8(deep) / "x.h").value_or("?"), "x");
+}
+
+TEST(fs, compares_and_generates_trees_beyond_max_path)
+{
+    test::temp_dir dir;
+    std::string const deep = test::deep_path();
+    dir.write("a/" + deep + "/1.h", "one");
+    dir.write("b/" + deep + "/1.h", "one");
+    EXPECT_EQ(first_difference(dir.path() / "a", dir.path() / "b"), "");
+    dir.write("b/" + deep + "/1.h", "eno");
+    EXPECT_EQ(first_difference(dir.path() / "a", dir.path() / "b"), deep + "/1.h");
+
+    // written, then removed when no longer generated
+    std::vector<std::string> const owned{"site"};
+    auto written = write_generated_files(dir.path(), {{"site/" + deep + "/page.html", "page"}, {"site/index.html", "index"}}, owned);
+    ASSERT_TRUE(written) << written.error().message;
+    EXPECT_EQ(written->written, 2u);
+    EXPECT_EQ(read_file(dir.path() / "site" / path_from_utf8(deep) / "page.html").value_or("?"), "page");
+    written = write_generated_files(dir.path(), {{"site/index.html", "index"}}, owned);
+    ASSERT_TRUE(written) << written.error().message;
+    EXPECT_EQ(written->unchanged, 1u);
+    EXPECT_EQ(written->removed, 1u);
+    EXPECT_FALSE(std::filesystem::exists(dir.path() / "site" / std::string(48, 'a')));  // the directories left empty too
+}

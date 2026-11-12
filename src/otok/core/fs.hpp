@@ -22,8 +22,13 @@ std::string path_to_utf8(std::filesystem::path const& path);
 
 // The path as the file functions of the OS take it beyond 260 characters: on Windows the extended-length
 // form of the absolute path (`\\?\C:\…`, `\\?\UNC\server\…`), so trees with deep paths (Boost's
-// documentation) can be copied and removed; elsewhere the path itself.
+// documentation) can be copied and removed; elsewhere the path itself. otok.exe has no `longPathAware` manifest, which would
+// need `LongPathsEnabled` on the machine too: its own file operations on paths that may be long (the cache, package entries, the
+// project's output) go through this, and messages show the path as given (plain_path).
 std::filesystem::path long_path(std::filesystem::path const& path);
+
+// The path as the user knows it, for messages: on Windows without the extended-length prefix long_path gives it.
+std::filesystem::path plain_path(std::filesystem::path const& path);
 
 // std::filesystem::rename that waits out another process holding a file in `from` open: Windows refuses meanwhile
 // with access denied (an indexer or an antivirus reading what was just unpacked, another thread replacing the same
@@ -45,6 +50,11 @@ result<bool> write_file_if_changed(std::filesystem::path const& path, std::strin
 // permissions, symbolic links as links. On macOS a `clonefile` (APFS copy-on-write) when the file
 // system supports it (docs/formats/cache.md 5).
 result<void> copy_tree(std::filesystem::path const& from, std::filesystem::path const& to);
+
+// Copies the regular files of the tree `from` into the directory `to`, created with the directories on the way; a file `to`
+// has already must have the same contents. The first that does not is returned, relative to the roots with `/`, and nothing
+// more is copied; empty when everything was merged. The headers of the slices merged into one include/ by the targets.
+result<std::string> merge_tree(std::filesystem::path const& from, std::filesystem::path const& to);
 
 // The first regular file, as a path relative to the roots with `/`, that only one of two directory trees
 // has or that differs between them; empty when they hold the same files. Reads the files a piece at a

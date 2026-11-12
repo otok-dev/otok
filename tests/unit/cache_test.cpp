@@ -9,6 +9,7 @@
 #include <chrono>
 #include <fstream>
 #include <future>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -19,6 +20,7 @@
 #include "otok/cache/store.hpp"
 #include "otok/core/file_lock.hpp"
 #include "otok/core/fs.hpp"
+#include "otok/core/process.hpp"
 #include "otok/core/sha256.hpp"
 #include "otok/fetch/git.hpp"
 #include "otok/fetch/http.hpp"
@@ -62,6 +64,65 @@ TEST(cache, opens_and_marks_the_directory)
     EXPECT_FALSE(std::filesystem::exists(tmp));  // removed when the process is done with the cache
     auto again = cache_store::open(root);
     EXPECT_TRUE(again.has_value()) << again.error().message;
+}
+
+// cache.md 6.3: one otok writes a project at a time, with the holder's PID in the notice of who waits; readers together
+TEST(cache, holds_projects)
+{
+    test::temp_dir dir;
+    std::filesystem::path const project = dir.path() / "app";
+    std::atomic<int> waits{0};
+    std::string notice;
+    std::mutex m;
+    auto cache = cache_store::open(dir.path() / "cache", {.waiting = [&](std::string const& what) {
+        std::lock_guard lock{m};
+        notice = what;
+        ++waits;
+    }});
+    ASSERT_TRUE(cache) << cache.error().message;
+
+    // readers beside each other
+    {
+        auto a = cache->hold_project(project, false);
+        ASSERT_TRUE(a) << a.error().message;
+        auto b = cache->hold_project(project, false);
+        ASSERT_TRUE(b) << b.error().message;
+    }
+    EXPECT_EQ(waits.load(), 0);
+
+    // a writer waits for a writer, told who it is; another project is not held
+    auto first = cache->hold_project(project, true);
+    ASSERT_TRUE(first) << first.error().message;
+    auto elsewhere = cache->hold_project(dir.path() / "other", true);
+    ASSERT_TRUE(elsewhere) << elsewhere.error().message;
+    EXPECT_EQ(waits.load(), 0);
+    std::atomic<bool> got{false};
+    std::thread second{[&] {
+        auto lock = cache->hold_project(project, true);
+        EXPECT_TRUE(lock) << lock.error().message;
+        got = true;
+    }};
+    while (waits.load() == 0) std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    EXPECT_FALSE(got.load());
+    {
+        std::lock_guard lock{m};
+        EXPECT_EQ(notice, "waiting for another otok process: working in the project '" + path_to_utf8(project) + "' (PID "
+            + std::to_string(current_process_id()) + ")");
+    }
+    first->release();  // as when its process ends
+    second.join();
+    EXPECT_TRUE(got.load());
+
+    // a reader waits for a writer too
+    waits = 0;
+    auto writer = cache->hold_project(project, true);
+    ASSERT_TRUE(writer) << writer.error().message;
+    std::thread reader{[&] { EXPECT_TRUE(cache->hold_project(project, false)); }};
+    while (waits.load() == 0) std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    writer->release();
+    reader.join();
+    // nothing of it in the project
+    EXPECT_FALSE(std::filesystem::exists(project));
 }
 
 TEST(cache, refuses_foreign_and_newer_directories)

@@ -69,9 +69,9 @@ std::string sha256_hex(std::string_view bytes)
 
 result<std::string> sha256_file(std::filesystem::path const& path)
 {
-    std::ifstream in{path, std::ios::binary};
+    std::ifstream in{long_path(path), std::ios::binary};
     if (!in) {
-        return fail("cannot open '" + path_to_utf8(path) + "'");
+        return fail("cannot open '" + path_to_utf8(plain_path(path)) + "'");
     }
     std::string hex;
     auto it = make_iterator(hex);
@@ -83,7 +83,7 @@ result<std::string> sha256_file(std::filesystem::path const& path)
         }
     }
     if (in.bad()) {
-        return fail("cannot read '" + path_to_utf8(path) + "'");
+        return fail("cannot read '" + path_to_utf8(plain_path(path)) + "'");
     }
     it.finish();
     return hex;
