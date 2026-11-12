@@ -1828,8 +1828,18 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
             auto const command = sandbox_command_of(base, slice.recipe, read_paths, lease->server().fifo());
             if (!command) return failed(command.error().message);
             std::shared_ptr<sandbox_launch const> launch;
-            if (settings_.sandbox.kind == host_sandbox::mechanism::appcontainer)
-                launch = std::make_shared<sandbox_launch const>(sandbox_launch{settings_.sandbox.container, settings_.sandbox.program, base / "sandbox.log", base});
+            if (settings_.sandbox.kind == host_sandbox::mechanism::appcontainer) {
+                // the toolchains outside the cache, whose ancestors the DLL hands (decision 111); the cache's are the work
+                // directory's
+                std::vector<fs::path> reached;
+                auto const cache_root = resolved_path(cache_.root());
+                for (fs::path const& path : read_paths) {
+                    auto const r = resolved_path(path);
+                    if (r && !(cache_root && is_within(*r, *cache_root)) && std::ranges::find(reached, *r) == reached.end()) reached.push_back(*r);
+                }
+                launch = std::make_shared<sandbox_launch const>(
+                    sandbox_launch{settings_.sandbox.container, settings_.sandbox.program, base / "sandbox.log", base, std::move(reached)});
+            }
             slice.run = [command = *command, launch](process_spec const& s) -> result<process_exit> {
                 // looked up here, so a missing program fails as it does outside the sandbox
                 auto program = find_program(s.argv.front(), s.env, s.cwd);

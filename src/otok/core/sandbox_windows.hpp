@@ -77,7 +77,9 @@ struct payload
         unsigned present;
         wchar_t value[1024];
     } variables[restored_count];
-    // The ancestors of the work directory, opened outside with ancestor_access: each NT name (\??\C:\, \??\C:\Users,
+    // The ways to the work directory and to what the build reads outside the cache, each directory on them down to
+    // these themselves (docs/PLAN.md decision 111: a listing of one of them shows the next names alone), opened outside
+    // with ancestor_access: each NT name (\??\C:\, \??\C:\Users,
     // ..., without a backslash at the end but the root's) and its handle (0 for none). The DLL hands a duplicate for
     // exactly these names.
     unsigned ancestor_count;

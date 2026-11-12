@@ -50,6 +50,10 @@ struct sandbox_launch
     // sandbox_windows::ancestor_access for the DLL to hand, so that the build's programs can pass through them
     // (`mkdir -p`); empty: none.
     std::filesystem::path work;
+    // What the build reads outside the cache (the toolchains' directories): their ancestors are handed the same way, so
+    // that programs finding the canonical names of their components (b2, through FindFirstFile on each) reach them
+    // (docs/PLAN.md decision 111).
+    std::vector<std::filesystem::path> reached{};
 };
 
 // Windows: lets the AppContainer of `host` reach what `spec` names, through inheritable entries for its SID in the

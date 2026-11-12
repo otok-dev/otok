@@ -25,7 +25,14 @@
 //      inherited, set on every child before it runs: by the DLL itself outside a container, by otok's broker in one,
 //      where a process may not set it;
 //  15. GetFinalPathNameByHandleW giving a path under a virtual drive's directory through the letter, as the build named it
-//      (realpath of Python, CMake, LLVM).
+//      (realpath of Python, CMake, LLVM);
+//  16. GetLongPathNameW refused for a path with no short name in it (it lists the ancestors, which the container may not
+//      outside the cache: an NDK on another drive) giving the path back as it is (LLVM's programs expand their own);
+//  17. FindFirstFile of one name refused (it lists the directory holding it) answered as the one entry found, from the
+//      name's attributes (b2 finds the canonical name of each component of a path so); the ancestors of the toolchains
+//      outside the cache handed as those of the work directory are (hook 8), for their attributes;
+//  18. a listing of a directory on those ways, refused, showing the next names on them alone (b2 tells whether a file
+//      exists by listing each of its ancestors).
 // The DLL passes itself and the payload (otok/core/sandbox_windows.hpp) to every child through CreateProcessW/A. Without a
 // container in the payload (sandbox = false) it does 14 and 15 alone.
 
@@ -895,6 +902,184 @@ DWORD WINAPI hook_get_final_path_name_by_handle_w(HANDLE file, LPWSTR buffer, DW
     return static_cast<DWORD>(out.size());
 }
 
+// --- long names ------------------------------------------------------------------------------------------------------
+
+using get_long_path_name_w_t = DWORD(WINAPI*)(LPCWSTR, LPWSTR, DWORD);
+get_long_path_name_w_t real_get_long_path_name_w;  // kernelbase's (the api-ms-win sets)
+get_long_path_name_w_t real_get_long_path_name_w_kernel32;  // kernel32 has its own, which LLVM imports
+
+// Hook 16: GetLongPathNameW lists each ancestor in which a name could be a short one (S:\Developments for "Android"); the
+// container may not list the ancestors of a toolchain outside the cache, and LLVM's programs, which expand their own
+// path at the start, end with "Permission denied". Refused, a path with no '~' (a short name NTFS makes always has one)
+// that the container can reach is its own long form and is given back as it is. Nothing is listed; a path with a '~'
+// keeps the refusal.
+DWORD kept_long_path(get_long_path_name_w_t real, LPCWSTR short_path, LPWSTR long_path, DWORD size)
+{
+    // the call may be in place (LLVM's is): the path is kept before the real one writes into the buffer
+    std::wstring const path = short_path ? std::wstring{short_path} : std::wstring{};
+    DWORD const n = real(short_path, long_path, size);
+    if (n != 0 || ::GetLastError() != ERROR_ACCESS_DENIED || path.empty() || path.find(L'~') != std::wstring::npos) return n;
+    if (::GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        ::SetLastError(ERROR_ACCESS_DENIED);
+        return 0;
+    }
+    if (path.size() + 1 > size) return static_cast<DWORD>(path.size() + 1);
+    std::wmemcpy(long_path, path.c_str(), path.size() + 1);
+    return static_cast<DWORD>(path.size());
+}
+
+DWORD WINAPI hook_get_long_path_name_w(LPCWSTR short_path, LPWSTR long_path, DWORD size)
+{
+    return kept_long_path(real_get_long_path_name_w, short_path, long_path, size);
+}
+
+DWORD WINAPI hook_get_long_path_name_w_kernel32(LPCWSTR short_path, LPWSTR long_path, DWORD size)
+{
+    return kept_long_path(real_get_long_path_name_w_kernel32, short_path, long_path, size);
+}
+
+using find_first_file_ex_w_t = HANDLE(WINAPI*)(LPCWSTR, FINDEX_INFO_LEVELS, LPVOID, FINDEX_SEARCH_OPS, LPVOID, DWORD);
+using find_next_file_w_t = BOOL(WINAPI*)(HANDLE, LPWIN32_FIND_DATAW);
+using find_close_t = BOOL(WINAPI*)(HANDLE);
+find_first_file_ex_w_t real_find_first_file_ex_w;
+find_next_file_w_t real_find_next_file_w;
+find_close_t real_find_close;
+
+// The searches hooks 17 and 18 answered: each an event of its own, a handle no other search has, with the entries
+// FindNextFile still gives; closed by FindClose.
+struct answered_search
+{
+    HANDLE handle;
+    std::vector<WIN32_FIND_DATAW> rest;
+};
+SRWLOCK answered_lock = SRWLOCK_INIT;
+std::vector<answered_search> answered_searches;
+
+// A search answered with `entries` (the first written into `data`), or the refusal kept when there is none.
+HANDLE answer_search(std::vector<WIN32_FIND_DATAW> entries, LPVOID data)
+{
+    HANDLE const search = entries.empty() ? nullptr : ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!search) {
+        ::SetLastError(ERROR_ACCESS_DENIED);
+        return INVALID_HANDLE_VALUE;
+    }
+    *static_cast<WIN32_FIND_DATAW*>(data) = entries.front();
+    entries.erase(entries.begin());
+    ::AcquireSRWLockExclusive(&answered_lock);
+    answered_searches.push_back({search, std::move(entries)});
+    ::ReleaseSRWLockExclusive(&answered_lock);
+    ::SetLastError(ERROR_SUCCESS);
+    return search;
+}
+
+WIN32_FIND_DATAW find_data(std::wstring_view name, DWORD attributes, FILETIME created, FILETIME accessed, FILETIME written, DWORD size_high,
+    DWORD size_low)
+{
+    WIN32_FIND_DATAW found{};
+    found.dwFileAttributes = attributes;
+    found.ftCreationTime = created;
+    found.ftLastAccessTime = accessed;
+    found.ftLastWriteTime = written;
+    found.nFileSizeHigh = size_high;
+    found.nFileSizeLow = size_low;
+    std::wmemcpy(found.cFileName, name.data(), std::min<std::size_t>(name.size(), MAX_PATH - 1));
+    return found;
+}
+
+// "X:\a\b", "X:/a/b/" as the payload names directories: "\??\X:\a\b"; the root "\??\X:\". Empty for another form.
+std::wstring nt_directory(std::wstring_view dos)
+{
+    if (dos.size() < 3 || dos[1] != L':' || (dos[2] != L'\\' && dos[2] != L'/')) return {};
+    std::wstring out = L"\\??\\";
+    for (wchar_t const c : dos) out += c == L'/' ? L'\\' : c;
+    while (out.size() > 7 && out.back() == L'\\') out.pop_back();
+    return out;
+}
+
+// Hook 18: a listing ("dir\*", "dir\*.*") of a directory on the ways the payload names, refused, shows the next names on
+// those ways alone, from their handles: b2 tells whether a file exists by listing each of its ancestors (filent.cpp), so
+// the NDK's compiler was missing to it. What the container learns is what otok named to it.
+HANDLE listed_way(std::wstring_view pattern, LPVOID data)
+{
+    std::size_t const slash = pattern.find_last_of(L"\\/");
+    if (slash == std::wstring_view::npos) return INVALID_HANDLE_VALUE;
+    std::wstring_view const mask = pattern.substr(slash + 1);
+    if (mask != L"*" && mask != L"*.*") return INVALID_HANDLE_VALUE;
+    std::wstring const directory = nt_directory(pattern.substr(0, slash + 1));
+    if (directory.empty()) return INVALID_HANDLE_VALUE;
+    std::vector<WIN32_FIND_DATAW> entries;
+    for (unsigned i = 0; i < the_payload.ancestor_count && i < max_ancestors; ++i) {
+        std::wstring_view const name = the_payload.ancestors[i].name;
+        std::size_t const last = name.find_last_of(L'\\');
+        if (last == std::wstring_view::npos || last + 1 >= name.size()) continue;  // a root, or no name
+        // the parent of \??\X:\a is the root \??\X:\, with its backslash
+        std::wstring_view const parent = name.substr(0, name[last - 1] == L':' ? last + 1 : last);
+        if (!equals_ci(parent, directory)) continue;
+        BY_HANDLE_FILE_INFORMATION information{};
+        HANDLE const handle = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(the_payload.ancestors[i].handle));
+        if (!::GetFileInformationByHandle(handle, &information)) continue;
+        entries.push_back(find_data(name.substr(last + 1), information.dwFileAttributes, information.ftCreationTime,
+            information.ftLastAccessTime, information.ftLastWriteTime, information.nFileSizeHigh, information.nFileSizeLow));
+    }
+    return answer_search(std::move(entries), data);
+}
+
+// Hook 17: FindFirstFile of one name, no wildcard in it, lists the directory holding it, which the container may not
+// for the ancestors of a toolchain outside the cache: b2 finds the canonical name of each component of a path so (its
+// pathnt.cpp). Refused, a name with no '~' whose attributes the container can read (a directory otok handed, or what is
+// granted) is answered as the one entry found, its name as given; nothing beside it is told, and a name with another
+// wildcard or a '~' keeps the refusal. FindFirstFileA/W/ExA come here through kernelbase.
+HANDLE WINAPI hook_find_first_file_ex_w(LPCWSTR name, FINDEX_INFO_LEVELS level, LPVOID data, FINDEX_SEARCH_OPS op, LPVOID filter, DWORD flags)
+{
+    HANDLE const h = real_find_first_file_ex_w(name, level, data, op, filter, flags);
+    if (h != INVALID_HANDLE_VALUE || ::GetLastError() != ERROR_ACCESS_DENIED || !name || !data || op != FindExSearchNameMatch
+        || (level != FindExInfoStandard && level != FindExInfoBasic))
+        return h;
+    std::wstring_view const path = name;
+    std::size_t const slash = path.find_last_of(L"\\/");
+    std::wstring_view const leaf = slash == std::wstring_view::npos ? path : path.substr(slash + 1);
+    if (leaf == L"*" || leaf == L"*.*") {
+        HANDLE const listed = listed_way(path, data);
+        if (listed == INVALID_HANDLE_VALUE) ::SetLastError(ERROR_ACCESS_DENIED);
+        return listed;
+    }
+    if (leaf.empty() || leaf.size() >= MAX_PATH || leaf == L"." || leaf == L".." || path.find_first_of(L"*?<>\"~") != std::wstring_view::npos)
+        return h;
+    WIN32_FILE_ATTRIBUTE_DATA a{};
+    if (!::GetFileAttributesExW(name, GetFileExInfoStandard, &a)) {
+        ::SetLastError(ERROR_ACCESS_DENIED);
+        return INVALID_HANDLE_VALUE;
+    }
+    return answer_search({find_data(leaf, a.dwFileAttributes, a.ftCreationTime, a.ftLastAccessTime, a.ftLastWriteTime, a.nFileSizeHigh, a.nFileSizeLow)},
+        data);
+}
+
+BOOL WINAPI hook_find_next_file_w(HANDLE search, LPWIN32_FIND_DATAW data)
+{
+    ::AcquireSRWLockExclusive(&answered_lock);
+    auto const at = std::ranges::find(answered_searches, search, &answered_search::handle);
+    bool const ours = at != answered_searches.end();
+    bool const more = ours && !at->rest.empty();
+    if (more) {
+        *data = at->rest.front();
+        at->rest.erase(at->rest.begin());
+    }
+    ::ReleaseSRWLockExclusive(&answered_lock);
+    if (!ours) return real_find_next_file_w(search, data);
+    ::SetLastError(more ? ERROR_SUCCESS : ERROR_NO_MORE_FILES);
+    return more ? TRUE : FALSE;
+}
+
+BOOL WINAPI hook_find_close(HANDLE search)
+{
+    ::AcquireSRWLockExclusive(&answered_lock);
+    auto const at = std::ranges::find(answered_searches, search, &answered_search::handle);
+    bool const ours = at != answered_searches.end();
+    if (ours) answered_searches.erase(at);
+    ::ReleaseSRWLockExclusive(&answered_lock);
+    return ours ? ::CloseHandle(search) : real_find_close(search);
+}
+
 // --- start -----------------------------------------------------------------------------------------------------------
 
 // The container's SID from the token, or from the payload where the token cannot be read (a forked Cygwin child).
@@ -954,6 +1139,11 @@ void install()
     attach(real_create_process_w, kernelbase, "CreateProcessW", &hook_create_process_w);
     attach(real_create_process_a, kernelbase, "CreateProcessA", &hook_create_process_a);
     attach(real_get_final_path_name_by_handle_w, kernelbase, "GetFinalPathNameByHandleW", &hook_get_final_path_name_by_handle_w);
+    attach(real_get_long_path_name_w, kernelbase, "GetLongPathNameW", &hook_get_long_path_name_w);
+    attach(real_get_long_path_name_w_kernel32, ::GetModuleHandleW(L"kernel32.dll"), "GetLongPathNameW", &hook_get_long_path_name_w_kernel32);
+    attach(real_find_first_file_ex_w, kernelbase, "FindFirstFileExW", &hook_find_first_file_ex_w);
+    attach(real_find_next_file_w, kernelbase, "FindNextFileW", &hook_find_next_file_w);
+    attach(real_find_close, kernelbase, "FindClose", &hook_find_close);
     ::DetourTransactionCommit();
 }
 

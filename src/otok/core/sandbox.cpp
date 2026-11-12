@@ -335,17 +335,23 @@ result<void> give_payload(sandbox_launch const& launch, PSID container, HANDLE c
     if (container && !launch.work.empty()) copy_text(p.object_scope, std::size(p.object_scope), detail::object_scope_of(launch.work));
     if (!launch.log.empty()) copy_text(p.log, std::size(p.log), launch.log.wstring());
     sandbox_windows::take_variables(p, environment);
-    // the ancestors of the work directory, from the drive root down to its parent, to pass through and nothing more
+    // the ancestors of the work directory, from the drive root down to its parent, then those of what the build reads
+    // outside the cache, to pass through and nothing more; and these directories themselves, the last names of the way,
+    // which a listing of their parent shows (decision 111)
     if (container && !launch.work.empty()) {
-        std::error_code ec;
-        // on a virtual drive as it is: resolved, it would be the long real path, whose ancestors the build never walks
-        bool const virtual_work = virtual_drives::to_real(launch.work) != launch.work;
-        fs::path const work = virtual_work ? launch.work.lexically_normal() : fs::weakly_canonical(launch.work, ec);
         std::vector<fs::path> ancestors;
-        for (fs::path a = work.parent_path(); !a.empty(); a = a.parent_path()) {
-            ancestors.push_back(a);
-            if (a == a.root_path()) break;
-        }
+        auto const add_ancestors = [&](fs::path const& path) {
+            std::error_code ec;
+            // on a virtual drive as it is: resolved, it would be the long real path, whose ancestors the build never walks
+            bool const on_virtual = virtual_drives::to_real(path) != path;
+            fs::path const full = on_virtual ? path.lexically_normal() : fs::weakly_canonical(path, ec);
+            for (fs::path a = full; !a.empty(); a = a.parent_path()) {
+                if (std::ranges::find(ancestors, a) == ancestors.end()) ancestors.push_back(a);
+                if (a == a.root_path()) break;
+            }
+        };
+        add_ancestors(launch.work);
+        for (fs::path const& path : launch.reached) add_ancestors(path);
         for (fs::path const& a : ancestors) {
             if (p.ancestor_count == sandbox_windows::max_ancestors) break;
             std::wstring name = L"\\??\\" + a.wstring();

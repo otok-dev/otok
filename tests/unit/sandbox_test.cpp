@@ -137,13 +137,18 @@ TEST(sandbox, confines_processes)
     test::temp_dir dir;
     std::filesystem::path const root = std::filesystem::canonical(dir.path());
     dir.write("work/mine.txt", "mine\n");
+    dir.write("work/short~1.txt", "short\n");
     dir.write("secret/key.txt", "secret\n");
+    // a toolchain outside the cache, granted to the container, its ancestors not (an NDK on another drive)
+    dir.write("outer/inner/tool/cc.exe", "cc\n");
+    dir.write("outer/other/x.txt", "x\n");
     std::filesystem::path const child = path_from_utf8(OTOK_TEST_CHILD);
     sandbox_spec spec;
     spec.writable = {root / "work"};
-    spec.readable = {child.parent_path()};
+    spec.readable = {child.parent_path(), root / "outer" / "inner" / "tool"};
     ASSERT_TRUE(grant_sandbox_access(host, spec));
-    auto const launch = std::make_shared<sandbox_launch const>(sandbox_launch{host.container, host.program, root / "work" / "sandbox.log", root / "work"});
+    auto const launch = std::make_shared<sandbox_launch const>(
+        sandbox_launch{host.container, host.program, root / "work" / "sandbox.log", root / "work", {root / "outer" / "inner" / "tool"}});
 
     std::string const work = path_to_utf8(root / "work");
     // no LOCALAPPDATA, as builds have none: CreateProcess wants it for a container and rewrites it, TEMP and TMP, the DLL
@@ -176,6 +181,29 @@ TEST(sandbox, confines_processes)
         EXPECT_EQ(run({path_to_utf8(child), "list", path_to_utf8(ancestor)}), "5\n") << path_to_utf8(ancestor);
     }
     EXPECT_EQ(run({path_to_utf8(child), "traverse", path_to_utf8(root / "secret")}), "5\n");
+    // GetLongPathNameW lists each ancestor for a name that could be a short one ("AppData" in the user's profile): refused,
+    // a path with no short name in it is given back as it is (LLVM's programs expand their own path at the start);
+    // a path with a short name keeps the refusal, one that is not there its own error
+    std::string const mine = path_to_utf8(root / "work" / "mine.txt");
+    EXPECT_EQ(run({path_to_utf8(child), "long", mine}), mine + "\n");
+    EXPECT_EQ(run({path_to_utf8(child), "long", path_to_utf8(root / "work" / "short~1.txt")}), "5\n");
+    EXPECT_EQ(run({path_to_utf8(child), "long", path_to_utf8(root / "work" / "missing.txt")}), "2\n");
+    // FindFirstFile of one name lists the directory holding it: the ancestors of the toolchain, handed, and the toolchain,
+    // granted, are found as one entry each; nothing is listed, nothing beside them found (decision 111)
+    auto const find = [&](std::filesystem::path const& p) { return run({path_to_utf8(child), "find", path_to_utf8(p)}); };
+    EXPECT_EQ(find(root / "outer"), "outer dir 18 closed\n");
+    EXPECT_EQ(find(root / "outer" / "inner"), "inner dir 18 closed\n");
+    EXPECT_EQ(find(root / "outer" / "inner" / "tool"), "tool dir 18 closed\n");
+    EXPECT_EQ(find(root / "outer" / "inner" / "tool" / "cc.exe"), "cc.exe file 18 closed\n");
+    EXPECT_EQ(find(root / "outer" / "other"), "5\n");
+    EXPECT_EQ(find(root / "outer" / "o*"), "5\n");
+    // a listing of a directory on the ways shows the next names on them alone (b2 lists each ancestor of a file), the
+    // directory itself still not opened for listing
+    EXPECT_EQ(find(root / "*"), "work dir outer 18 closed\n");
+    EXPECT_EQ(find(root / "outer" / "*"), "inner dir 18 closed\n");
+    EXPECT_EQ(find(root / "outer" / "inner" / "*.*"), "tool dir 18 closed\n");
+    EXPECT_EQ(find(root / "secret" / "*"), "5\n");
+    EXPECT_EQ(run({path_to_utf8(child), "list", path_to_utf8(root / "outer")}), "5\n");
     std::string const variables = work + "\n" + work + "\n<unset>\n";
     EXPECT_EQ(run({path_to_utf8(child), "env", "TEMP", "TMP", "LOCALAPPDATA"}), variables);
     // a child's child, started through the DLL

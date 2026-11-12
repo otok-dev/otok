@@ -145,6 +145,26 @@ int run(std::vector<std::string> args)
         DWORD const n = ::GetFinalPathNameByHandleW(h, final_path, 2048, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
         ::CloseHandle(h);
         std::cout << (n && n < 2048 ? utf8(std::wstring{final_path, n}) : std::string{"?"}) << '\n';
+    } else if (command == "long" && args.size() == 2) {
+        // GetLongPathNameW of a path, in place as LLVM calls it for its own program (otok-sandbox.dll keeps a path with no
+        // short name the container cannot expand)
+        std::filesystem::path const path{std::u8string{args[1].begin(), args[1].end()}};
+        std::wstring buffer = path.wstring();
+        buffer.resize(2048);
+        DWORD const n = ::GetLongPathNameW(buffer.c_str(), buffer.data(), 2048);
+        std::cout << (n && n < 2048 ? utf8(std::wstring{buffer.c_str(), n}) : std::to_string(::GetLastError())) << '\n';
+    } else if (command == "find" && args.size() == 2) {
+        // FindFirstFileA of one name, as b2 finds the canonical name of each component of a path: the entry's name, whether
+        // it is a directory, then what FindNextFileA says
+        WIN32_FIND_DATAA data{};
+        HANDLE const h = ::FindFirstFileA(args[1].c_str(), &data);
+        if (h == INVALID_HANDLE_VALUE) {
+            std::cout << ::GetLastError() << '\n';
+            return 0;
+        }
+        std::cout << data.cFileName << ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? " dir" : " file");
+        while (::FindNextFileA(h, &data)) std::cout << ' ' << data.cFileName;
+        std::cout << ' ' << ::GetLastError() << (::FindClose(h) ? " closed" : " not closed") << '\n';
     } else if (command == "volume" && args.size() == 2) {
         // whether GetVolumeInformationW tells of a volume preserving case (perlglob lowercases names otherwise)
         std::filesystem::path const root{std::u8string{args[1].begin(), args[1].end()}};
