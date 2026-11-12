@@ -98,6 +98,11 @@ result<double> sandbox_exit_cost(host_sandbox const& host, int count);
 
 namespace detail {
 
+// The name that tells the objects of one build from another build's in the Windows sandbox (decision 110): 16 hex digits of
+// FNV-1a over the work directory's real path, case-insensitive (the virtual drive's letter is the same in every otok process, the
+// real path holds the process's own directory).
+std::wstring object_scope_of(std::filesystem::path const& work);
+
 // Windows, for run_process: starts `program` suspended in the AppContainer of `launch` with its DLL injected and the
 // DLL's payload copied in (null device, drive table and roots, MountPointManager, SIDs, the log), inheriting only
 // `inherited`. `startup` is the STARTUPINFOW with the standard handles, `information` the PROCESS_INFORMATION filled;

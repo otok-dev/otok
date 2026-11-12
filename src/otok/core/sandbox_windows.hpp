@@ -22,7 +22,7 @@ inline constexpr GUID payload_guid = {0x9b3f61d2, 0x4c8e, 0x4f0a, {0xb5, 0xd7, 0
 
 // Raised whenever the layout changes: a DLL and an otok of different versions never meet (the DLL lies beside
 // otok.exe), but the check costs nothing.
-inline constexpr unsigned payload_version = 3;
+inline constexpr unsigned payload_version = 4;
 
 // The DLL's file name, beside otok.exe.
 inline constexpr wchar_t dll_name[] = L"otok-sandbox.dll";
@@ -66,6 +66,9 @@ struct payload
     wchar_t container_sid[192];
     wchar_t user_sid[192];
     wchar_t container_objects[320];
+    // Told apart from the objects of the container's other builds: the first name of an object directory the DLL moves into the
+    // container's namespace begins with it (Cygwin's shared tables, with the mount of /tmp, are one per name; "" for none).
+    wchar_t object_scope[32];
     // Where the DLL appends what the container was refused ("" for nowhere): a file in the work directory.
     wchar_t log[1024];
     // restored_variables as the creator gave them; not present: removed.

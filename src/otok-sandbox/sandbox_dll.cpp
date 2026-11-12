@@ -62,6 +62,7 @@ char dll_path[MAX_PATH * 3];  // the ANSI path Detours writes into each child's 
 PSID container_sid;
 std::vector<char> container_sid_buffer;
 std::wstring container_objects;
+std::wstring object_scope;  // the payload's: begins the first name of what is moved into the container's namespace
 
 // --- the log of refusals ---------------------------------------------------------------------------------------------
 
@@ -174,6 +175,7 @@ bool container_object_name(POBJECT_ATTRIBUTES oa, std::wstring& out)
     for (auto const& prefix : prefixes)
         if (name.size() > prefix.size() && starts_with_ci(name, prefix)) {
             out = container_objects + L"\\";
+            if (!object_scope.empty()) out.append(object_scope).append(L"-");
             out.append(name.substr(prefix.size()));
             return true;
         }
@@ -912,6 +914,7 @@ void find_container()
         if (::ConvertStringSidToSidW(the_payload.container_sid, &sid)) container_sid = sid;
     }
     container_objects = the_payload.container_objects;
+    object_scope = the_payload.object_scope;
 }
 
 template <class T>

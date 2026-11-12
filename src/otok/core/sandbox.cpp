@@ -4,10 +4,14 @@
 #include "otok/core/sandbox.hpp"
 
 #include <algorithm>
+#include <cstdint>
+#include <cwchar>
+#include <cwctype>
 #include <iterator>
 #include <string_view>
 
 #include "otok/core/fs.hpp"
+#include "otok/core/virtual_drives.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -18,7 +22,6 @@
 
 #include <detours/detours.h>
 
-#include <cstdint>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -28,7 +31,6 @@
 
 #include "otok/core/build_info.hpp"
 #include "otok/core/sandbox_windows.hpp"
-#include "otok/core/virtual_drives.hpp"
 #endif
 
 namespace otok {
@@ -330,6 +332,7 @@ result<void> give_payload(sandbox_launch const& launch, PSID container, HANDLE c
         copy_text(p.container_objects, std::size(p.container_objects),
             L"\\Sessions\\" + std::to_wstring(session) + L"\\AppContainerNamedObjects\\" + container_text);
     }
+    if (container && !launch.work.empty()) copy_text(p.object_scope, std::size(p.object_scope), detail::object_scope_of(launch.work));
     if (!launch.log.empty()) copy_text(p.log, std::size(p.log), launch.log.wstring());
     sandbox_windows::take_variables(p, environment);
     // the ancestors of the work directory, from the drive root down to its parent, to pass through and nothing more
@@ -709,6 +712,19 @@ result<double> sandbox_exit_cost([[maybe_unused]] host_sandbox const& host, [[ma
 #else
     return 0.0;
 #endif
+}
+
+std::wstring detail::object_scope_of(fs::path const& work)
+{
+    std::wstring const text = virtual_drives::to_real(work).lexically_normal().wstring();
+    std::uint64_t h = 14695981039346656037ull;
+    for (wchar_t c : text) {
+        h ^= static_cast<std::uint64_t>(std::towlower(c));
+        h *= 1099511628211ull;
+    }
+    wchar_t out[17];
+    std::swprintf(out, std::size(out), L"%016llx", static_cast<unsigned long long>(h));
+    return out;
 }
 
 result<void> detail::create_sandboxed_process([[maybe_unused]] sandbox_launch const& launch, [[maybe_unused]] fs::path const& program,

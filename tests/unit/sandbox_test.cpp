@@ -71,6 +71,16 @@ TEST(sandbox, writes_the_options_of_bubblewrap)
     EXPECT_EQ(sandbox_command(bubblewrap, spec, "/unused/sandbox.sb"), command);
 }
 
+TEST(sandbox, tells_builds_by_the_object_scope)
+{
+    auto const a = detail::object_scope_of("/w/work/gmp-debug");
+    EXPECT_EQ(a.size(), 16u);
+    EXPECT_EQ(a, detail::object_scope_of("/w/work/./gmp-debug"));
+    EXPECT_EQ(a, detail::object_scope_of("/W/Work/GMP-debug"));
+    EXPECT_NE(a, detail::object_scope_of("/w/work/gmp-release"));
+    EXPECT_NE(a, detail::object_scope_of("/x/work/gmp-debug"));
+}
+
 #ifndef _WIN32
 
 TEST(sandbox, confines_processes)
