@@ -91,6 +91,7 @@ struct fake_toolchain
     std::optional<std::set<std::string>> system;  // build_target::system_library; none: every library is the system's
     std::vector<std::string> problems;          // build_target::output_problems
     std::vector<std::string> unchecked;         // and its warnings: what it could not check
+    std::vector<std::filesystem::path> read_paths;  // toolchain_profile::read_paths
 };
 
 class fake_target final : public build_target
@@ -123,6 +124,7 @@ public:
         p.toolchain.env["PATH"] = "";
         p.toolchain.cflags = {"-fake"};
         p.cmake_toolchain = "# the fake toolchain\n";
+        p.read_paths = t_.read_paths;
         return p;
     }
 
@@ -1205,6 +1207,38 @@ TEST_F(builder_test, builds_in_the_sandbox)
     EXPECT_EQ(err.str().find("not isolated"), std::string::npos) << err.str();
 }
 
+// docs/PLAN.md decision 109: a toolchain outside the cache the AppContainer cannot read fails the builds before any starts,
+// saying how to open it; otok changes nothing there
+TEST_F(builder_test, refuses_toolchains_the_sandbox_cannot_read)
+{
+    host_sandbox const host = find_host_sandbox({});
+    ASSERT_EQ(host.kind, host_sandbox::mechanism::appcontainer) << host.why_not;
+    // in the user's profile, which no AppContainer reads
+    test::temp_dir ndk;
+    ndk.write("bin/cc.txt", "the compiler\n");
+    std::filesystem::path const root = std::filesystem::canonical(ndk.path());
+    toolchain.read_paths = {ndk.path(), ndk.path() / "missing"};
+    EXPECT_EQ(run({"install"}), 1);
+    std::string const message = "the sandbox cannot read what the builds need; otok does not change the access of files outside its cache "
+                                "(docs/PLAN.md decision 109):\n  '" + path_to_utf8(root) + "', for the toolchain of 'native' (the fake "
+                                "toolchain 1)\nlet it read them, once (as their owner or an administrator):\n  icacls \"" + path_to_utf8(root)
+        + "\" /grant \"*" + host.container + ":(OI)(CI)(RX)\"\nor build without the sandbox: --no-sandbox, OTOK_SANDBOX=0 or "
+          "'sandbox = false' in config.toml";
+    EXPECT_NE(err.str().find(message), std::string::npos) << err.str();
+    EXPECT_EQ(err.str().find(message), err.str().rfind(message)) << err.str();  // once
+    // before any slice was built, and nothing granted
+    EXPECT_FALSE(std::filesystem::exists(cache.path() / "builds" / "b")) << err.str();
+    auto const unreadable = sandbox_unreadable(host, {root});
+    ASSERT_TRUE(unreadable) << unreadable.error().message;
+    EXPECT_EQ(*unreadable, (std::vector<std::filesystem::path>{root}));
+
+    // opened as the message says, the builds go on
+    sandbox_spec spec;
+    spec.readable = {root};
+    ASSERT_TRUE(grant_sandbox_access(host, spec));
+    ASSERT_EQ(run({"install"}), 0) << err.str();
+}
+
 #endif
 
 TEST_F(builder_test, warns_when_the_sandbox_is_off)
@@ -1451,6 +1485,19 @@ TEST_F(builder_test, checks_toolchains)
         build_lua("b", "    assert(slice.toolchains.cmake == [[" + cmake + "]], slice.toolchains.cmake)\n"
                        "    assert(slice.toolchain.env.PATH:find([[" + dir + "]], 1, true), slice.toolchain.env.PATH)\n"),
         options_of_b + "[toolchains]\ncmake = \">= 3.20\"\nninja = \">= 1.10\"\n");
+#ifdef _WIN32
+    // programs found installed where the AppContainer cannot read: known when the slice starts, refused then, and built
+    // once opened (docs/PLAN.md decision 109)
+    EXPECT_EQ(run({"install"}), 1);
+    std::string const refused = "error: b 2.0 for native-" + machine_arch() + ": the sandbox cannot read what the builds need";
+    EXPECT_NE(err.str().find(refused), std::string::npos) << err.str();
+    EXPECT_NE(err.str().find("  '" + path_to_utf8(std::filesystem::canonical(tools.path())) + "', for the toolchain 'cmake' ('"), std::string::npos)
+        << err.str();
+    EXPECT_EQ(err.str().find("the end of the log"), std::string::npos) << err.str();
+    sandbox_spec opened;
+    opened.readable = {std::filesystem::canonical(tools.path())};
+    ASSERT_TRUE(grant_sandbox_access(find_host_sandbox({}), opened));
+#endif
     ASSERT_EQ(run({"install"}), 0) << err.str();
     std::filesystem::path entry;
     for (auto const& d : std::filesystem::directory_iterator{slices_of("b", "2.0")}) {

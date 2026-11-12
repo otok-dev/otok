@@ -605,6 +605,33 @@ build_target* target_of_platform(std::span<build_target* const> targets, std::st
     return nullptr;
 }
 
+// The target that builds a slice: of its platform, or the one whose tool slices it is (`native` for Android, docs/PLAN.md
+// decision 56).
+build_target* target_of_slice(std::span<build_target* const> targets, slice_spec const& spec)
+{
+    if (build_target* t = target_of_platform(targets, spec.platform)) return t;
+    build_target* found = nullptr;
+    for (build_target* t : targets) {
+        if (t->info().tool_platform == spec.platform) found = t;
+    }
+    return found;
+}
+
+// The path as the kernel compares it; nothing when it is not there.
+std::optional<fs::path> resolved_path(fs::path const& p)
+{
+    std::error_code ec;
+    fs::path r = fs::canonical(p, ec);
+    if (ec) return std::nullopt;
+    return r;
+}
+
+bool is_within(fs::path const& p, fs::path const& dir)
+{
+    auto const [d, q] = std::mismatch(dir.begin(), dir.end(), p.begin(), p.end());
+    return d == dir.end();
+}
+
 // A task of the build: one entry of one slice.
 struct slice_task
 {
@@ -813,6 +840,27 @@ std::expected<std::vector<built_package>, std::vector<error>> builder::build_all
         }
     }
 
+    // what the toolchains of the slices need outside the cache, readable to the AppContainer before any build starts, not
+    // when a slice in the middle comes to it (docs/PLAN.md decision 109); a slice whose toolchain fails says so itself
+    if (settings_.isolation == build_isolation::sandbox && settings_.sandbox.kind == host_sandbox::mechanism::appcontainer) {
+        // the targets keep what they discover: a profile per task costs little
+        std::vector<std::pair<fs::path, std::string>> needed;
+        for (slice_task const& t : tasks) {
+            build_target* target = target_of_slice(targets_, t.spec);
+            if (!target) continue;
+            result<toolchain_profile> profile = fail("");
+            {
+                std::lock_guard lock{mutex_};
+                profile = target->profile(t.spec);
+            }
+            if (!profile) continue;
+            for (fs::path const& p : profile->read_paths) {
+                needed.emplace_back(p, "the toolchain of '" + target->info().name + "' (" + profile->description + ")");
+            }
+        }
+        if (auto ok = check_sandbox_reads(needed); !ok) return failed(ok.error().message);
+    }
+
     broker_ = settings_.broker;
     if (!broker_) {
         own_broker_ = std::make_unique<job_broker>(settings_.jobs, cache_.tmp());
@@ -943,12 +991,7 @@ result<std::vector<std::string>> builder::sandbox_command_of(fs::path const& wor
     fs::path const& jobserver_fifo) const
 {
     // the kernel compares resolved paths
-    auto const resolved = [](fs::path const& p) -> std::optional<fs::path> {
-        std::error_code ec;
-        fs::path r = fs::canonical(p, ec);
-        if (ec) return std::nullopt;
-        return r;
-    };
+    auto const resolved = resolved_path;
     sandbox_spec spec;
     spec.writable.push_back(work);
     if (!jobserver_fifo.empty()) {
@@ -980,13 +1023,53 @@ result<std::vector<std::string>> builder::sandbox_command_of(fs::path const& wor
         auto const launcher = settings_.launcher.empty() ? std::nullopt : resolved(settings_.launcher);
         std::erase_if(granted.readable, [&](fs::path const& p) {
             if (launcher && p == *launcher) return false;
-            if (!root) return true;
-            auto const [r, q] = std::mismatch(root->begin(), root->end(), p.begin(), p.end());
-            return r != root->end();
+            return !root || !is_within(p, *root);
         });
         if (auto ok = grant_sandbox_access(settings_.sandbox, granted); !ok) return std::unexpected{ok.error()};
     }
     return sandbox_command(settings_.sandbox, spec, file);
+}
+
+result<void> builder::check_sandbox_reads(std::vector<std::pair<fs::path, std::string>> const& needed)
+{
+    if (settings_.isolation != build_isolation::sandbox || settings_.sandbox.kind != host_sandbox::mechanism::appcontainer) return {};
+    // what lies in the cache and otok itself are granted by otok (sandbox_command_of); the rest is the user's
+    auto const root = resolved_path(cache_.root());
+    std::vector<fs::path> paths;
+    std::map<fs::path, std::string> who;
+    std::vector<std::pair<fs::path, std::string>> refused;
+    {
+        std::lock_guard lock{mutex_};
+        for (auto const& [p, what] : needed) {
+            auto const r = resolved_path(p);
+            if (!r || (root && is_within(*r, *root)) || who.contains(*r)) continue;
+            if (auto const known = sandbox_reads_.find(*r); known != sandbox_reads_.end()) {
+                if (!known->second) refused.emplace_back(*r, what);
+                continue;
+            }
+            paths.push_back(*r);
+            who.emplace(*r, what);
+        }
+    }
+    auto unreadable = sandbox_unreadable(settings_.sandbox, paths);
+    if (!unreadable) return std::unexpected{unreadable.error()};
+    {
+        std::lock_guard lock{mutex_};
+        for (fs::path const& p : paths) {
+            bool const readable = std::ranges::find(*unreadable, p) == unreadable->end();
+            sandbox_reads_.insert_or_assign(p, readable);
+            if (!readable) refused.emplace_back(p, who.at(p));
+        }
+    }
+    if (refused.empty()) return {};
+    std::ranges::sort(refused);
+    std::string text = "the sandbox cannot read what the builds need; otok does not change the access of files outside its cache "
+                       "(docs/PLAN.md decision 109):";
+    for (auto const& [p, what] : refused) text += "\n  '" + path_to_utf8(fs::path{p}.make_preferred()) + "', for " + what;
+    text += "\nlet it read them, once (as their owner or an administrator):";
+    for (auto const& [p, what] : refused) text += "\n  " + sandbox_read_command(settings_.sandbox, p);
+    text += "\nor build without the sandbox: --no-sandbox, OTOK_SANDBOX=0 or 'sandbox = false' in config.toml";
+    return fail(text);
 }
 
 void builder::check_sandbox_exits()
@@ -1149,13 +1232,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
     if (in == inputs_.end()) return fail(label + ": its inputs were not fetched");
     package_inputs const& inputs = in->second;
 
-    // a tool slice by the target its platform belongs to (`native` for Android, docs/PLAN.md decision 56)
-    build_target* target = target_of_platform(targets_, spec.platform);
-    if (!target) {
-        for (build_target* t : targets_) {
-            if (t->info().tool_platform == spec.platform) target = t;
-        }
-    }
+    build_target* const target = target_of_slice(targets_, spec);
     if (!target) return fail(label + ": no target builds platform '" + spec.platform + "'");
     std::string const os = target->info().name;
     result<toolchain_profile> profile = fail("");
@@ -1395,6 +1472,18 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         std::string const& why = settings_.sandbox.why_not;
         return fail("builds cannot be isolated on this host" + (why.empty() ? std::string{} : " (" + why + ")")
             + "; to build without the sandbox, give --no-sandbox, set OTOK_SANDBOX=0 or 'sandbox = false' in config.toml");
+    }
+    // what the container must read outside the cache (docs/PLAN.md decision 109): the programs found installed are known
+    // only now; the profile's paths were checked before the builds, so a refusal here is theirs
+    {
+        std::vector<std::pair<fs::path, std::string>> needed;
+        for (fs::path const& path : profile->read_paths) needed.emplace_back(path, "the toolchain of '" + os + "' (" + profile->description + ")");
+        if (toolchains) {
+            for (auto const& [name, found] : *toolchains) {
+                if (slice_needs(name)) needed.emplace_back(found.program.parent_path(), "the toolchain '" + name + "' ('" + path_to_utf8(found.program) + "')");
+            }
+        }
+        if (auto ok = check_sandbox_reads(needed); !ok) return fail(label + " for " + slice_label(spec) + ": " + ok.error().message);
     }
     // before the first sandboxed process, the slices that come meanwhile waiting, so the check counts its own processes
     if (settings_.isolation == build_isolation::sandbox && settings_.sandbox.kind == host_sandbox::mechanism::appcontainer

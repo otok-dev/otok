@@ -12,6 +12,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <aclapi.h>
+#include <authz.h>
 #include <sddl.h>
 #include <userenv.h>
 
@@ -480,6 +481,77 @@ result<void> grant_sandbox_access([[maybe_unused]] host_sandbox const& host, [[m
     }
 #endif
     return {};
+}
+
+result<std::vector<fs::path>> sandbox_unreadable([[maybe_unused]] host_sandbox const& host, [[maybe_unused]] std::vector<fs::path> const& paths)
+{
+    std::vector<fs::path> out;
+#ifdef _WIN32
+    if (host.kind != host_sandbox::mechanism::appcontainer || paths.empty()) return out;
+    local_sid sid;
+    if (!parse_sid(host.container, sid)) return fail("the AppContainer's SID '" + host.container + "' cannot be read");
+    AUTHZ_RESOURCE_MANAGER_HANDLE manager = nullptr;
+    if (!::AuthzInitializeResourceManager(AUTHZ_RM_FLAG_NO_AUDIT, nullptr, nullptr, nullptr, L"otok", &manager)) {
+        return fail("cannot check what the sandbox reads: " + windows_error(::GetLastError()));
+    }
+    struct manager_guard
+    {
+        AUTHZ_RESOURCE_MANAGER_HANDLE h;
+        ~manager_guard() { ::AuthzFreeResourceManager(h); }
+    } manager_closed{manager};
+    HANDLE token = nullptr;
+    if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        return fail("cannot check what the sandbox reads: " + windows_error(::GetLastError()));
+    }
+    // the container's token is this one made a lowbox: the user's access and the container's both needed
+    AUTHZ_CLIENT_CONTEXT_HANDLE context = nullptr;
+    BOOL const made = ::AuthzInitializeContextFromToken(0, token, manager, nullptr, LUID{}, nullptr, &context);
+    DWORD const made_error = ::GetLastError();
+    ::CloseHandle(token);
+    if (!made) return fail("cannot check what the sandbox reads: " + windows_error(made_error));
+    struct context_guard
+    {
+        AUTHZ_CLIENT_CONTEXT_HANDLE h;
+        ~context_guard() { ::AuthzFreeContext(h); }
+    } context_freed{context};
+    if (!::AuthzSetAppContainerInformation(context, sid.sid, 0, nullptr)) {
+        return fail("cannot check what the sandbox reads: " + windows_error(::GetLastError()));
+    }
+    for (fs::path const& path : paths) {
+        PSECURITY_DESCRIPTOR sd = nullptr;
+        DWORD const r = ::GetNamedSecurityInfoW(path.c_str(), SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, nullptr, nullptr, nullptr, nullptr, &sd);
+        if (r == ERROR_FILE_NOT_FOUND || r == ERROR_PATH_NOT_FOUND) continue;
+        if (r != ERROR_SUCCESS) return fail("cannot read the ACL of '" + path_to_utf8(path) + "': " + windows_error(r));
+        struct sd_guard
+        {
+            PSECURITY_DESCRIPTOR sd;
+            ~sd_guard() { ::LocalFree(sd); }
+        } sd_freed{sd};
+        AUTHZ_ACCESS_REQUEST request{};
+        request.DesiredAccess = file_read_execute;
+        ACCESS_MASK granted = 0;
+        DWORD error = ERROR_SUCCESS;
+        AUTHZ_ACCESS_REPLY reply{};
+        reply.ResultListLength = 1;
+        reply.GrantedAccessMask = &granted;
+        reply.Error = &error;
+        if (!::AuthzAccessCheck(0, context, &request, nullptr, sd, nullptr, 0, &reply, nullptr)) {
+            return fail("cannot check what the sandbox reads of '" + path_to_utf8(path) + "': " + windows_error(::GetLastError()));
+        }
+        if (error != ERROR_SUCCESS || (granted & file_read_execute) != file_read_execute) out.push_back(path);
+    }
+#endif
+    return out;
+}
+
+std::string sandbox_read_command(host_sandbox const& host, fs::path const& path)
+{
+    std::error_code ec;
+    std::string const inherited = fs::is_directory(path, ec) ? "(OI)(CI)" : "";
+    // an inheritable entry is carried to what is in the directory by icacls itself (no /T, which would write one more
+    // entry in every file)
+    return "icacls \"" + path_to_utf8(fs::path{path}.make_preferred()) + "\" /grant \"*" + host.container + ":" + inherited + "(RX)\"";
 }
 
 std::string seatbelt_profile(sandbox_spec const& spec)

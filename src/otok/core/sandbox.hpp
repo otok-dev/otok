@@ -59,6 +59,17 @@ struct sandbox_launch
 // every AppContainer anyway. Elsewhere nothing.
 result<void> grant_sandbox_access(host_sandbox const& host, sandbox_spec const& spec);
 
+// Windows: of `paths`, those the AppContainer of `host` cannot read and run (a directory listed and passed through, a
+// file read and executed), as the kernel decides for a process of the container started by this one: Authz with the
+// container's SID over this process's token, on each path's own ACL. otok never changes the ACLs of what lies outside
+// its cache (docs/PLAN.md decision 109): the caller tells the user how to open them. A path that is not there is not
+// one of them (whoever needs it says so). Elsewhere, and for another mechanism, none.
+result<std::vector<std::filesystem::path>> sandbox_unreadable(host_sandbox const& host, std::vector<std::filesystem::path> const& paths);
+
+// What lets the AppContainer of `host` read the directory or file `path`: an icacls command granting its SID read and
+// execute, inherited by what is in it.
+std::string sandbox_read_command(host_sandbox const& host, std::filesystem::path const& path);
+
 // The Seatbelt profile (SBPL) of `spec`: everything allowed but the network (Unix sockets excepted),
 // writes outside `writable` and reads of file data in `denied_reads` outside `readable`.
 std::string seatbelt_profile(sandbox_spec const& spec);

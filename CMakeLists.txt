@@ -135,7 +135,7 @@ if(WIN32)
     include(SelectLibraryConfigurations)
     select_library_configurations(OTOK_DETOURS)
     target_include_directories(otok-core SYSTEM PUBLIC ${OTOK_DETOURS_INCLUDE_DIR})
-    target_link_libraries(otok-core PUBLIC ${OTOK_DETOURS_LIBRARIES} userenv)
+    target_link_libraries(otok-core PUBLIC ${OTOK_DETOURS_LIBRARIES} userenv authz)
 endif()
 
 file(GLOB_RECURSE OTOK_TARGET_LINUX_SOURCES CONFIGURE_DEPENDS ${OTOK_SRC}/target/linux/*.cpp)

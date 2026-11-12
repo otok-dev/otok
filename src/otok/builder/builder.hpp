@@ -185,6 +185,12 @@ private:
     result<std::vector<std::string>> sandbox_command_of(std::filesystem::path const& work, std::filesystem::path const& recipe_dir,
         std::vector<std::filesystem::path> const& read_paths, std::filesystem::path const& jobserver_fifo) const;
 
+    // Windows, in the AppContainer: fails, naming each path the container cannot read and the command that lets it, when
+    // some of `needed` (a path and what needs it, "the toolchain of 'android' (…)") outside the cache is not readable to
+    // it; otok never changes their ACLs (docs/PLAN.md decision 109). Each path is checked once per builder. Elsewhere
+    // nothing.
+    result<void> check_sandbox_reads(std::vector<std::pair<std::filesystem::path, std::string>> const& needed);
+
     // Windows: what the processes of the AppContainer cost the kernel at their exit (sandbox_exit_cost), checked with a
     // task of its own on the display, told in a line and warned of when it is much (docs/PLAN.md decision 103).
     void check_sandbox_exits();
@@ -213,6 +219,7 @@ private:
     std::map<std::string, built_slice> built_;          // slice id (slice_id) → its entry
     std::map<std::string, jobserver_protocol> jobserver_clients_;     // program → jobserver_client
     bool isolation_told_ = false;                       // the warning on unisolated builds was printed
+    std::map<std::filesystem::path, bool> sandbox_reads_;  // check_sandbox_reads: a path → whether the container reads it
     std::map<std::string, std::string> recipe_hashes_;  // package key → recipe_hash; filled before building
     std::map<std::string, std::pair<std::size_t, std::size_t>> slices_done_;  // package key → slices done, of all
     // Windows: check_sandbox_exits, by the first sandboxed slice while the others wait

@@ -182,6 +182,35 @@ TEST(sandbox, confines_processes)
     EXPECT_TRUE(std::filesystem::exists(root / "work" / "sandbox.log"));
 }
 
+// docs/PLAN.md decision 109: what the container cannot read, as the kernel decides, and the command that opens it.
+TEST(sandbox, tells_what_the_container_cannot_read)
+{
+    host_sandbox const host = find_host_sandbox({});
+    ASSERT_EQ(host.kind, host_sandbox::mechanism::appcontainer) << host.why_not;
+    test::temp_dir dir;
+    dir.write("closed/a.txt", "a\n");
+    dir.write("opened/b.txt", "b\n");
+    std::filesystem::path const root = std::filesystem::canonical(dir.path());
+    sandbox_spec spec;
+    spec.readable = {root / "opened"};
+    ASSERT_TRUE(grant_sandbox_access(host, spec));
+    // the user's profile closed, what is granted and inherited open, the system open to every AppContainer; what is not
+    // there left out
+    std::filesystem::path const system = std::filesystem::canonical("C:\\Windows\\System32");
+    auto const unreadable = sandbox_unreadable(host, {root / "closed", root / "closed" / "a.txt", root / "opened", root / "opened" / "b.txt",
+        system, system / "cmd.exe", root / "missing"});
+    ASSERT_TRUE(unreadable) << unreadable.error().message;
+    EXPECT_EQ(*unreadable, (std::vector<std::filesystem::path>{root / "closed", root / "closed" / "a.txt"}));
+
+    EXPECT_EQ(sandbox_read_command(host, root / "closed"),
+        "icacls \"" + path_to_utf8(root / "closed") + "\" /grant \"*" + host.container + ":(OI)(CI)(RX)\"");
+    EXPECT_EQ(sandbox_read_command(host, root / "closed" / "a.txt"), "icacls \"" + path_to_utf8(root / "closed" / "a.txt") + "\" /grant \"*" + host.container + ":(RX)\"");
+    host_sandbox const none{host_sandbox::mechanism::none, {}, "none here", {}};
+    auto const elsewhere = sandbox_unreadable(none, {root / "closed"});
+    ASSERT_TRUE(elsewhere);
+    EXPECT_TRUE(elsewhere->empty());
+}
+
 // What the container's processes cost the kernel at their exit: measured, and small on a healthy machine (the bad state
 // of decision 103 costs ~20 ms each).
 TEST(sandbox, measures_the_cost_of_exits)
