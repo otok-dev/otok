@@ -717,6 +717,19 @@ private:
     }
 
     // `windows/msvc` (otok-toml.md 4.8): cl.exe, link.exe and lib.exe of Visual Studio's environment for the slice.
+    // What a build reads of Visual Studio's environment: the VC directory (the compilers, vcvarsall.bat) and the Windows
+    // SDK. Readable to every AppContainer; named so that otok-sandbox.dll hands their ancestors and shows them in a listing
+    // of C:\ (docs/PLAN.md decision 111: b2's msvc.jam lists every ancestor of cl.exe, and found no compiler).
+    std::vector<fs::path> visual_studio_reads(visual_studio_environment const& v)
+    {
+        std::vector<fs::path> out;
+        if (!v.vc_dir.empty()) out.push_back(path_from_utf8(v.vc_dir));
+        std::string sdk = variable(v.env, "WindowsSdkDir").value_or("");
+        while (!sdk.empty() && (sdk.back() == '\\' || sdk.back() == '/' || sdk.back() == ' ')) sdk.pop_back();
+        if (!sdk.empty()) out.push_back(path_from_utf8(sdk));
+        return out;
+    }
+
     result<toolchain_profile> msvc_profile(slice_spec const& slice, detail::arch_names const& names)
     {
         auto vs = visual_studio(slice.arch);
@@ -726,6 +739,7 @@ private:
         if (!cl) return fail("cl.exe is not in the environment of " + v.description + ": " + cl.error().message);
         bool const debug = slice.configuration == "debug";
         toolchain_profile p;
+        p.read_paths = visual_studio_reads(v);
         p.triple = names.triple;
         p.identity = {{"msvc", v.crt}, {"crt", v.crt}, {"windows-sdk", v.sdk}};
         p.description = v.description + " (MSVC " + v.crt + ", Windows SDK " + v.sdk + ")";
@@ -780,7 +794,8 @@ private:
         llvm_tools const& l = **llvm;
         bool const debug = slice.configuration == "debug";
         toolchain_profile p;
-        p.read_paths = {path_from_utf8(l.bin)};
+        p.read_paths = visual_studio_reads(v);
+        p.read_paths.push_back(path_from_utf8(l.bin));
         p.triple = names.triple;
         p.identity = {{"clang-cl", l.version}, {"crt", v.crt}, {"windows-sdk", v.sdk}};
         p.description = "clang-cl " + l.version + " at '" + l.bin + "' with " + v.description + " (CRT " + v.crt + ", Windows SDK " + v.sdk + ")";
