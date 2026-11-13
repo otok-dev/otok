@@ -1461,7 +1461,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
     std::string const work_name = p.library + "-" + slice_name(spec) + (spec.configuration == "debug" ? "-debug" : "") + (tool ? "-tool" : building_tools ? "-tools" : "");
     // a dev slice: built every time in its work directory, kept in dev/, which is its entry (otok-dev-toml.md 4)
     if (dev) {
-        std::string const project_key = sha256_hex(path_to_utf8(fs::absolute(project_dir_))).substr(0, 32);
+        std::string const project_key = cache_store::project_key(project_dir_);
         out.entry = cache_.root() / "dev" / project_key / work_name;
     }
 

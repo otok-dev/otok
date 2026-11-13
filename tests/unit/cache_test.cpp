@@ -5,8 +5,10 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cwctype>
 #include <fstream>
 #include <future>
 #include <mutex>
@@ -123,6 +125,37 @@ TEST(cache, holds_projects)
     reader.join();
     // nothing of it in the project
     EXPECT_FALSE(std::filesystem::exists(project));
+}
+
+// cache.md 6.3: one key for every way to name a project's directory, so two otok reaching it otherwise still wait for
+// each other
+TEST(cache, keys_projects_by_their_directory)
+{
+    test::temp_dir dir;
+    std::filesystem::create_directories(dir.path() / "App" / "sub");
+    std::filesystem::path const project = dir.path() / "App";
+    std::string const key = cache_store::project_key(project);
+    EXPECT_EQ(key.size(), 32u);
+    EXPECT_EQ(cache_store::project_key(project / "sub" / ".."), key);
+    EXPECT_EQ(cache_store::project_key(project / "."), key);
+    EXPECT_EQ(cache_store::project_key(dir.path() / "App" / ""), key);
+    EXPECT_NE(cache_store::project_key(project / "sub"), key);
+#ifdef _WIN32
+    // the drive letter and the components in another case
+    std::wstring text = project.native();
+    for (auto& c : text) c = static_cast<wchar_t>(std::iswupper(c) ? std::towlower(c) : std::towupper(c));
+    EXPECT_EQ(cache_store::project_key(std::filesystem::path{text}), key) << path_to_utf8(std::filesystem::path{text});
+    std::wstring slashes = project.native();
+    std::replace(slashes.begin(), slashes.end(), L'\\', L'/');
+    EXPECT_EQ(cache_store::project_key(std::filesystem::path{slashes}), key);
+#else
+    std::filesystem::create_directory_symlink(project, dir.path() / "link");
+    EXPECT_EQ(cache_store::project_key(dir.path() / "link"), key);
+#endif
+    // a directory that is not there yet keeps its key once made
+    std::string const later = cache_store::project_key(dir.path() / "later");
+    std::filesystem::create_directory(dir.path() / "later");
+    EXPECT_EQ(cache_store::project_key(dir.path() / "later"), later);
 }
 
 TEST(cache, refuses_foreign_and_newer_directories)

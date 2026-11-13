@@ -338,11 +338,15 @@ result<void> cache_store::discard(fs::path const& entry, std::string const& desc
     return {};
 }
 
+std::string cache_store::project_key(fs::path const& project_dir)
+{
+    return sha256_hex(path_to_utf8(identity_path(project_dir))).substr(0, 32);
+}
+
 result<file_lock> cache_store::hold_project(fs::path const& project_dir, bool exclusive)
 {
     std::error_code ec;
-    // the key of dev/ (otok-dev-toml.md 4)
-    std::string const key = sha256_hex(path_to_utf8(fs::absolute(project_dir, ec))).substr(0, 32);
+    std::string const key = project_key(project_dir);
     fs::path const dir = state_->root / "projects";
     fs::create_directories(dir, ec);
     if (ec) return fail("cannot create '" + path_to_utf8(dir) + "': " + ec.message());

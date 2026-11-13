@@ -27,6 +27,11 @@ std::string path_to_utf8(std::filesystem::path const& path);
 // project's output) go through this, and messages show the path as given (plain_path).
 std::filesystem::path long_path(std::filesystem::path const& path);
 
+// The path that names a directory however it was reached, for keys made from it: absolute, with `.`, `..`, symbolic links,
+// junctions and substituted drives resolved by the file system, which gives each existing component in its own case; on
+// Windows the drive letter upper-cased. A path the file system cannot resolve is taken absolute and lexically normal.
+std::filesystem::path identity_path(std::filesystem::path const& path);
+
 // The path as the user knows it, for messages: on Windows without the extended-length prefix long_path gives it.
 std::filesystem::path plain_path(std::filesystem::path const& path);
 

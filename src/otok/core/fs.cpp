@@ -52,6 +52,21 @@ std::filesystem::path long_path(std::filesystem::path const& path)
 #endif
 }
 
+std::filesystem::path identity_path(std::filesystem::path const& path)
+{
+    std::error_code ec;
+    std::filesystem::path out = plain_path(std::filesystem::weakly_canonical(long_path(path), ec));
+    if (ec) out = std::filesystem::absolute(path, ec).lexically_normal();
+#ifdef _WIN32
+    std::wstring text = out.native();
+    if (text.size() >= 2 && text[1] == L':' && text[0] >= L'a' && text[0] <= L'z') {
+        text[0] = static_cast<wchar_t>(text[0] - L'a' + L'A');
+        out = std::filesystem::path{text};
+    }
+#endif
+    return out;
+}
+
 std::filesystem::path plain_path(std::filesystem::path const& path)
 {
 #ifdef _WIN32

@@ -141,6 +141,10 @@ public:
     result<void> discard(std::filesystem::path const& entry, std::string const& description,
         std::function<bool(std::filesystem::path const& entry)> const& damaged);
 
+    // The key of the project in `project_dir` in `projects/` and `dev/`: the first 32 hex digits of the SHA-256 of its
+    // identity_path, so every way to name the directory (a drive letter in another case, a link) gives the same key.
+    static std::string project_key(std::filesystem::path const& project_dir);
+
     // The lock of the project in `project_dir` (cache.md 6.3), exclusive for a command that writes it: waited for, with the
     // PID of its holder in the notice; held while the returned lock lives.
     result<file_lock> hold_project(std::filesystem::path const& project_dir, bool exclusive);

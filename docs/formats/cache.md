@@ -171,7 +171,9 @@ it were missing. An entry it cannot rename (a file of it held open) is an error 
 
 Two otok processes in one project (an IDE's build and a terminal) would both write `otok.lock` and the outputs, one
 after the other or into each other. Each command that reads a project holds `projects/<project key>.lock`, the key being
-the first 32 hex digits of the SHA-256 of the project directory's absolute path (as `dev/`): `install`, `update` and
+the first 32 hex digits of the SHA-256 of the project directory's canonical path (as `dev/`: absolute, with `.`, `..`,
+links, junctions and substituted drives resolved, each component in the case the file system keeps, a Windows drive
+letter upper-cased, so every way to name the directory gives one key): `install`, `update` and
 `fetch`, which write, exclusively; the others (`tree`, `why`, `metadata`, `audit`, `outdated`) shared. A process that
 cannot have it waits, saying so with the PID of the holder, which writes it into `projects/<project key>.owner` when it
 takes the lock. The lock is the operating system's (6), so a holder that dies releases it; the processes a build

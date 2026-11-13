@@ -64,8 +64,8 @@ Every slice of a library of the file is a **dev slice**: built in a work directo
 in the cache's `builds/`, whatever else its key holds.
 
 - **Work directory.** `<cache-dir>/dev/<project key>/<library>-<slice>/` (`-debug`, `-tool` and `-tools` as in
-  `cache.md` 7.1), where the project key is the first 32 hex digits of the SHA-256 of the project directory's absolute
-  path. It has the layout of a build's work directory (`source/`, `build/`, `prefix/`, `home/`, `tmp/`,
+  `cache.md` 7.1), where the project key is the first 32 hex digits of the SHA-256 of the project directory's canonical
+  path (`cache.md` 6.3). It has the layout of a build's work directory (`source/`, `build/`, `prefix/`, `home/`, `tmp/`,
   `toolchain.cmake`, `build.log`) and `dev.toml`, otok's record of it (4.1). While a slice builds, otok holds the lock
   `<work directory>.lock`.
 - **Dev key.** The slice key of `cache-key.md` 3 with `source`, `resource.<name>` of the named resources and, with
