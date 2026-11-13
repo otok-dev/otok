@@ -808,6 +808,80 @@ std::optional<toolchain_choice> project_toolchains(project& p, std::span<build_t
     return std::nullopt;
 }
 
+// The tools of [tool-deps] with `deliver` into `[otok] tools-output` (otok-toml.md 7.1), after the outputs of the targets
+// (an output that otok creates must be empty); a tools output left from before is emptied and removed when none is.
+bool deliver_tools(project const& p, manifest const& built_m, std::span<built_package const> built, std::span<build_target* const> targets,
+    command_context& ctx, diagnostics& diags)
+{
+    namespace fs = std::filesystem;
+    fs::path const dir = ctx.project_dir / path_from_utf8(p.m.tools_output);
+    std::error_code ec;
+    bool const wanted = std::ranges::any_of(p.m.tool_deps, &dependency::deliver);
+    if (!wanted && !fs::exists(long_path(dir / output_state_file), ec)) return true;
+
+    // a library of an output may not be where the tools are (`<output>/tools/` of a library named so)
+    auto const lowered = [](fs::path const& path) {
+        std::string s = path_to_utf8(path.lexically_normal().generic_u8string());
+        while (!s.empty() && s.back() == '/') s.pop_back();
+        std::ranges::transform(s, s.begin(), [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; });
+        return s;
+    };
+    std::string const tools = lowered(path_from_utf8(p.m.tools_output));
+    for (target_settings const& ts : built_m.targets) {
+        auto const target = std::ranges::find_if(targets, [&](build_target* t) { return t->info().name == ts.target; });
+        if (target == targets.end()) continue;
+        for (resolved_package const& rp : p.built().packages) {
+            if (rp.target != ts.target) continue;
+            std::string const library = lowered(path_from_utf8(ts.output) / (*target)->package_output(rp.library));
+            if (library == tools || library.starts_with(tools + "/") || tools.starts_with(library + "/")) {
+                diags.error({}, "'tools-output' of [otok] (" + in_quotes(p.m.tools_output) + ") is where the output '" + ts.output + "' has '"
+                    + rp.library + "'; set another 'tools-output'");
+                return false;
+            }
+        }
+    }
+
+    std::vector<delivered_tool> delivered;
+    for (dependency const& d : p.m.tool_deps) {
+        if (!d.deliver) continue;
+        resolved_package const* rp = p.built().find_tool(d.library);
+        auto const bp = rp ? std::ranges::find_if(built, [&](built_package const& b) { return b.tool && b.id == rp->id; }) : built.end();
+        if (bp == built.end() || bp->slices.empty()) {
+            diags.error({}, "[tool-deps." + d.library + "] has 'deliver', but it was not built for this machine");
+            return false;
+        }
+        built_slice const& slice = bp->slices.front();
+        delivered_tool t{d.library, slice.key, slice.entry / "prefix", {}};
+        for (auto const& [name, program] : slice.output.programs) {
+            if (slice.output.interpreters.contains(name)) {
+                diags.error({}, "[tool-deps." + d.library + "] has 'deliver', but its program '" + name
+                    + "' is a script run by another tool, which is not delivered");
+                return false;
+            }
+            t.programs.emplace(name, path_to_utf8(program.lexically_relative(t.prefix).generic_u8string()));
+        }
+        if (t.programs.empty()) {
+            diags.error({}, "[tool-deps." + d.library + "] has 'deliver', but its recipe builds no programs ([tool] programs)");
+            return false;
+        }
+        delivered.push_back(std::move(t));
+    }
+    auto changes = write_tools_output(dir, delivered);
+    if (!changes) {
+        diags.error({}, changes.error().message);
+        return false;
+    }
+    if (delivered.empty()) {
+        fs::remove(long_path(dir / output_state_file), ec);
+        fs::remove(long_path(dir / tools_file), ec);
+        fs::remove(long_path(dir), ec);  // when empty
+    } else {
+        ctx.out << "tools '" << p.m.tools_output << "': " << changes->copied << " copied, " << changes->unchanged << " unchanged, "
+                << changes->removed << " removed\n";
+    }
+    return true;
+}
+
 // Builds the selected configuration (docs/PLAN.md decision 19) with the targets of project_targets, for the target tables
 // not in `skipped` (decision 100): the outputs of those are left as they are. False after an error.
 bool build_project(parsed_command const& cmd, project& p, lock_file const& lock, std::map<std::string, package_inputs> inputs,
@@ -944,7 +1018,7 @@ bool build_project(parsed_command const& cmd, project& p, lock_file const& lock,
         ctx.out << "output '" << ts.output << "': " << changes->copied << " copied, " << changes->unchanged << " unchanged, "
                 << changes->removed << " removed\n";
     }
-    return true;
+    return deliver_tools(p, built_m, *built, targets, ctx, diags);
 }
 
 // The locked versions of index recipes that this otok cannot read (index.md 3.2): an error while the lock keeps them

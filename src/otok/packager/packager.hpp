@@ -69,6 +69,25 @@ result<std::map<std::string, std::string>> read_output_state(std::filesystem::pa
 result<output_changes> write_output(std::filesystem::path const& dir, build_target const& target, std::span<packaged const> packages,
     std::map<std::string, std::string> const& deployment);
 
+// A tool the project delivers (otok-toml.md 7.1): the prefix of its tool slice.
+struct delivered_tool
+{
+    std::string library;
+    std::string key;                                // of its slice: 64 hex digits, or "dev:<hash>" (otok-dev-toml.md 4)
+    std::filesystem::path prefix;                   // <entry>/prefix
+    std::map<std::string, std::string> programs;    // name → its path relative to the prefix, with '/'
+};
+
+// The file of the tools output naming their programs (otok-toml.md 7.1).
+inline constexpr char const* tools_file = "otok-tools.toml";
+
+// Its text: the programs of `tools`, relative to the file.
+std::string tools_file_text(std::span<delivered_tool const> tools);
+
+// Makes the tools output `dir` hold exactly `tools`, `<dir>/<library>/` each, as write_output does with libraries (the
+// state file records the keys of their slices), and writes otok-tools.toml. Refuses a directory otok did not create.
+result<output_changes> write_tools_output(std::filesystem::path const& dir, std::span<delivered_tool const> tools);
+
 // The option values of a package as wrappers see them (recipe-toml.md 8.2).
 std::vector<option_define> option_defines(recipe const& rec, merged_options const& options);
 

@@ -504,7 +504,13 @@ std::optional<dependency> manifest_reader::dependency_entry(toml_table& deps, st
             t->ignore("bundle-data");
             ok = false;
         }
+        dep.deliver = t->boolean("deliver").value_or(false);
     } else {
+        if (t->contains("deliver")) {
+            t->error(t->position("deliver"), t->describe("deliver") + " is allowed in [tool-deps] only: the outputs hold the libraries of [deps]");
+            t->ignore("deliver");
+            ok = false;
+        }
         if (t->contains("platforms")) {
             dep.platforms = platforms(*t, "platforms", nullptr, need::optional);
             if (!dep.platforms) ok = false;
@@ -896,6 +902,13 @@ manifest manifest_reader::read(toml_table& root, std::string const& file, fragme
             return "names a system no target of this otok builds tools for";
         });
         if (tools) m.tool_build_on = std::move(*tools);
+        if (auto output = otok->string("tools-output")) {
+            if (classify_file_path(*output) != file_path_kind::inside) {
+                otok->error(otok->position("tools-output"), otok->describe("tools-output") + " must be a directory inside the project, not " + in_quotes(*output));
+            } else {
+                m.tools_output = std::move(*output);
+            }
+        }
         otok->finish();
     }
     if (m.format != manifest_format) {
@@ -921,6 +934,15 @@ manifest manifest_reader::read(toml_table& root, std::string const& file, fragme
                     + ") overlaps 'output' of [" + m.targets[j].target + "] (" + in_quotes(m.targets[j].output)
                     + "); set a separate 'output' for one of them");
             }
+        }
+    }
+    // the tools may be inside an output, never one or around one (otok-toml.md 7.1)
+    for (target_settings const& ts : m.targets) {
+        auto const tools = output_components(m.tools_output);
+        auto const output = output_components(ts.output);
+        if (tools.size() <= output.size() && std::equal(tools.begin(), tools.end(), output.begin())) {
+            diags_.error(ts.where, "'output' of [" + ts.target + "] (" + in_quotes(ts.output) + ") is or is inside 'tools-output' of [otok] ("
+                + in_quotes(m.tools_output) + "); set another 'tools-output'");
         }
     }
 

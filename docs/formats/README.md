@@ -17,7 +17,7 @@ them and their text may be published with the documentation; their examples may 
 | [recipe-toml.md](recipe-toml.md) | `recipe.toml` — recipe metadata | the recipe publisher |
 | [build-lua-api.md](build-lua-api.md) | `build.lua` — recipe build script, API 1 | the recipe publisher |
 | [otok-lock.md](otok-lock.md) | `otok.lock` — resolved inputs | otok |
-| [otok-dev-toml.md](otok-dev-toml.md) | `otok.dev.toml` — working trees for incremental builds, not committed | the user |
+| [otok-dev-toml.md](otok-dev-toml.md) | `otok.dev.toml` — working trees for incremental builds, usually not committed | the user |
 | [index.md](index.md) | index entries, library and publisher files, advisories, HTTPS view | `otok publish`, index maintainers |
 | [config.md](config.md) | `config.toml` — machine settings | the user |
 | [recipe-hash.md](recipe-hash.md) | tree hash: `recipe-sha256`, local sources | — |

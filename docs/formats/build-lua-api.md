@@ -57,7 +57,9 @@ end
   - `build(slice, options, deps)` — required; called once per target slice.
   - `build_tools(slice, options, deps)` — optional; called once for the tool slice before any target
     slice, for libraries that build their own tools first (ICU's `--with-cross-build`). Its `slice.prefix` is kept
-    and offered to target slices as `slice.tools.prefix`. Its return value is ignored.
+    and offered to target slices as `slice.tools.prefix`. Its return value is ignored. A tool package (`recipe-toml.md` 13) runs
+    it too, before its own `build` in the tool slice, which gets `slice.tools` the same way (Boost's b2 for a tool that
+    links Boost).
 - **Fresh inputs.** `slice.source` is a fresh, patched copy of the source (and resources with
   `dest`) for this slice only, so in-tree builds of different slices never collide.
 - **Short paths on Windows.** With `virtual-paths` (`config.md`) the paths of the slice (`slice.source`, `slice.build`,

@@ -1496,8 +1496,9 @@ std::optional<resolution> resolve(manifest const& m, std::span<target_info const
             target_tool_edges[{name, g}] = std::move(*ids);
         }
     }
-    if (settings.tool_roots) {
-        for (dependency const& d : m.tool_deps) {
+    // the [tool-deps] of a tool recipe otok publish builds, or those the project wants delivered (otok-toml.md 7.1)
+    for (dependency const& d : m.tool_deps) {
+        if (settings.tool_roots || d.deliver) {
             tool_request req;
             req.library = d.library;
             // in the first graph of each system: the library goes into its own from there
@@ -1510,7 +1511,7 @@ std::optional<resolution> resolve(manifest const& m, std::span<target_info const
     }
     if (!tools_ok) return std::nullopt;
     for (dependency const& d : m.tool_deps) {
-        if (!tools.uses(d.library)) {
+        if (!d.deliver && !tools.uses(d.library)) {
             diags.warning(d.where, "[tool-deps." + d.library + "] is not used: no recipe has " + in_quotes(d.library) + " as a tool dependency");
         }
     }

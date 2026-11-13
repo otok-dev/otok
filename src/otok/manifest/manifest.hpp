@@ -68,6 +68,7 @@ struct dependency
     std::optional<std::string> linkage;                 // "static", "dynamic"; never for tool dependencies
     language_standards standards;                       // tool dependencies only (otok-toml.md 5.1)
     bool bundle_data = false;                           // its data files as resources (otok-toml.md 6); never for tool dependencies
+    bool deliver = false;                               // tool dependencies only: built for the machine and copied into the tools output (otok-toml.md 7.1)
     source_position where;                              // the table; `where.file` names the defining file
 };
 
@@ -144,6 +145,7 @@ struct manifest
     std::int64_t format = 0;
     std::vector<std::string> includes;
     std::vector<build_environment> tool_build_on;  // `[otok] tool-build-on` as written, one per system (otok-toml.md 3)
+    std::string tools_output = "Otok/tools";       // `[otok] tools-output`: where the tools with `deliver` go (otok-toml.md 7.1)
     std::vector<target_settings> targets;
     std::vector<dependency> deps;       // the manifest's, then each fragment's, in file order
     std::vector<dependency> tool_deps;

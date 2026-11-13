@@ -402,6 +402,29 @@ TEST(manifest, checks_configurations_and_linkage)
     EXPECT_TRUE(apple("[build]\nconfiguration = \"debug\"\n").reports("unknown key 'build'"));
 }
 
+TEST(manifest, delivered_tools)
+{
+    std::string const apple_table = "[apple]\nplatforms = [\"ios\"]\ndeployment = { ios = \"15.0\" }\n";
+    auto delivered = parse("[otok]\nformat = 1\n" + apple_table + "[tool-deps.a]\nrecipe = { path = \"a\" }\ndeliver = true\n[tool-deps.b]\nrecipe = { path = \"b\" }\n");
+    ASSERT_TRUE(delivered.m.has_value()) << messages(delivered.diags);
+    EXPECT_TRUE(delivered.m->find_tool_dep("a")->deliver);
+    EXPECT_FALSE(delivered.m->find_tool_dep("b")->deliver);
+    EXPECT_EQ(delivered.m->tools_output, "Otok/tools");
+    EXPECT_TRUE(parse("[otok]\nformat = 1\n" + apple_table + "[deps.a]\nrecipe = { path = \"a\" }\ndeliver = true\n")
+            .reports("'deliver' in deps.a is allowed in [tool-deps] only: the outputs hold the libraries of [deps]"));
+
+    auto moved = parse("[otok]\nformat = 1\ntools-output = \"tools\"\n" + apple_table);
+    ASSERT_TRUE(moved.m.has_value()) << messages(moved.diags);
+    EXPECT_EQ(moved.m->tools_output, "tools");
+    EXPECT_TRUE(parse("[otok]\nformat = 1\ntools-output = \"../tools\"\n" + apple_table)
+            .reports("'tools-output' in otok must be a directory inside the project, not '../tools'"));
+    // inside an output, never one or around one
+    EXPECT_TRUE(parse("[otok]\nformat = 1\ntools-output = \"Otok\"\n" + apple_table)
+            .reports("'output' of [apple] ('Otok') is or is inside 'tools-output' of [otok] ('Otok'); set another 'tools-output'"));
+    EXPECT_TRUE(parse("[otok]\nformat = 1\ntools-output = \"out\"\n" + apple_table + "output = \"OUT/apple\"\n")
+            .reports("is or is inside 'tools-output'"));
+}
+
 TEST(manifest, output_stays_in_the_project)
 {
     EXPECT_TRUE(parse("[otok]\nformat = 1\n[apple]\nplatforms = [\"ios\"]\ndeployment = { ios = \"15.0\" }\noutput = \"../Otok\"\n")

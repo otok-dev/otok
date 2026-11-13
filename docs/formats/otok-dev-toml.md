@@ -3,8 +3,10 @@
 Status: draft. Common rules are in [README.md](README.md); the manifest in [otok-toml.md](otok-toml.md), the lock in
 [otok-lock.md](otok-lock.md), the cache in [cache.md](cache.md).
 
-`otok.dev.toml` is written by the user next to `otok.toml` and **not** committed (the project's `.gitignore` lists it).
-It names libraries of the project that the developer works on, with the working trees to build them from: the source,
+`otok.dev.toml` is written by the user next to `otok.toml`, usually **not** committed (the project's `.gitignore` lists
+it): the working trees are those of one machine. A project whose working trees are part of its own layout, the same on
+every machine (a project inside a superproject, building a library from the superproject's submodules), may commit it;
+`--no-dev` still builds what the lock says. It names libraries of the project that the developer works on, with the working trees to build them from: the source,
 the resources, the recipe, as they are on disk, with uncommitted changes. otok builds such a library incrementally in a
 work directory it keeps (4), so that a change of a few files recompiles those files only, as the library's own build
 does in its checkout.

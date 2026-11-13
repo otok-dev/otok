@@ -753,10 +753,9 @@ std::expected<std::vector<built_package>, std::vector<error>> builder::build_all
         }
     }
     for (resolved_package const& p : r_.packages) visit(visit, p, false);
-    if (settings_.tool_roots) {
-        for (dependency const& d : m_.tool_deps) {
-            if (resolved_package const* dp = r_.find_tool(d.library)) visit(visit, *dp, true);
-        }
+    for (dependency const& d : m_.tool_deps) {
+        if (!settings_.tool_roots && !d.deliver) continue;
+        if (resolved_package const* dp = r_.find_tool(d.library)) visit(visit, *dp, true);
     }
 
     // the tasks, each after the ones it needs (docs/PLAN.md decision 20)
@@ -851,17 +850,18 @@ std::expected<std::vector<built_package>, std::vector<error>> builder::build_all
         for (std::string const& d : p->tool_dependencies) {
             for (std::string const& id : slices_of[package_key(d, true)]) tool_after.push_back(index.at(id));
         }
-        // build_tools first, once, on the tool slice (build-lua-api.md 2)
+        // build_tools first, once, on the tool slice (build-lua-api.md 2); also for a tool package, whose build runs in the
+        // tool slice too (boost for MSVC builds b2 there)
         std::string tools;
-        if (!tool) {
-            auto const in = inputs_.find(package_key(p->id, false));
+        {
+            auto const in = inputs_.find(package_key(p->id, tool));
             if (in == inputs_.end()) return failed(p->library + ": its inputs were not fetched");
             auto defined = script_defines(in->second.recipe_dir / "build.lua", p->library + "/build.lua", "build_tools");
             if (!defined) return failure{std::vector<error>{defined.error()}};
             if (*defined) {
                 if (!tool_target) return failed(p->library + ": no target of this project can run build_tools");
-                tools = slice_id(p->id, false, *tool_slice_, build_entry::build_tools);
-                add({p, false, *tool_slice_, build_entry::build_tools, tools, {}}, tool_after);
+                tools = slice_id(p->id, tool, *tool_slice_, build_entry::build_tools);
+                add({p, tool, *tool_slice_, build_entry::build_tools, tools, {}}, tool_after);
             }
         }
         for (slice_spec const& spec : specs) {
@@ -1458,7 +1458,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
     out.key = hex;
     out.option_keys = option_keys;
     out.entry = cache_.root() / "builds" / p.library / (rec.version->str() + "-r" + std::to_string(rec.revision)) / "slices" / hex.substr(0, 32);
-    std::string const work_name = p.library + "-" + slice_name(spec) + (spec.configuration == "debug" ? "-debug" : "") + (tool ? "-tool" : building_tools ? "-tools" : "");
+    std::string const work_name = p.library + "-" + slice_name(spec) + (spec.configuration == "debug" ? "-debug" : "") + (building_tools ? "-tools" : tool ? "-tool" : "");
     // a dev slice: built every time in its work directory, kept in dev/, which is its entry (otok-dev-toml.md 4)
     if (dev) {
         std::string const project_key = cache_store::project_key(project_dir_);

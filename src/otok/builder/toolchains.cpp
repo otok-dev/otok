@@ -248,11 +248,10 @@ std::expected<toolchain_choice, std::vector<std::string>> check_toolchains(resol
     for (resolved_package const& p : r.packages) {
         if (!p.configurations[configuration].platforms.empty()) use(use, p, false);
     }
-    if (tool_roots) {
-        for (dependency const& d : m.tool_deps) {
-            resolved_package const* dp = r.find_tool(d.library);
-            if (dp && used.insert(dp->id).second) use(use, *dp, true);
-        }
+    for (dependency const& d : m.tool_deps) {
+        if (!tool_roots && !d.deliver) continue;
+        resolved_package const* dp = r.find_tool(d.library);
+        if (dp && used.insert(dp->id).second) use(use, *dp, true);
     }
     for (resolved_package const& p : r.tool_packages) {
         if (p.configurations[configuration].platforms.empty() || p.chosen.recipe->toolchains.empty() || !tool_target) continue;
