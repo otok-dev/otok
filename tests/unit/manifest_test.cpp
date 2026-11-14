@@ -410,8 +410,31 @@ TEST(manifest, delivered_tools)
     EXPECT_TRUE(delivered.m->find_tool_dep("a")->deliver);
     EXPECT_FALSE(delivered.m->find_tool_dep("b")->deliver);
     EXPECT_EQ(delivered.m->tools_output, "Otok/tools");
-    EXPECT_TRUE(parse("[otok]\nformat = 1\n" + apple_table + "[deps.a]\nrecipe = { path = \"a\" }\ndeliver = true\n")
-            .reports("'deliver' in deps.a is allowed in [tool-deps] only: the outputs hold the libraries of [deps]"));
+    // in [deps]: the tool of the library's recipe and version, all its programs or those named
+    auto from_deps = parse("[otok]\nformat = 1\n" + apple_table + "[deps.a]\nrecipe = { path = \"a\" }\ndeliver = [\"x\", \"y\"]\n"
+        "[deps.c]\nrecipe = { path = \"c\" }\ndeliver = true\n[deps.d]\nrecipe = { path = \"d\" }\ndeliver = false\n"
+        "[tool-deps.a]\nrecipe = { path = \"a\" }\noptions = { o = true }\n");
+    ASSERT_TRUE(from_deps.m.has_value()) << messages(from_deps.diags);
+    EXPECT_EQ(from_deps.m->find_dep("a")->deliver, (std::vector<std::string>{"x", "y"}));
+    EXPECT_EQ(from_deps.m->find_dep("c")->deliver, std::vector<std::string>{});
+    EXPECT_FALSE(from_deps.m->find_dep("d")->deliver);
+    EXPECT_FALSE(from_deps.m->find_tool_dep("a")->deliver);
+    std::vector<std::string> names;
+    for (dependency const* d : from_deps.m->delivered()) names.push_back(d->library);
+    EXPECT_EQ(names, (std::vector<std::string>{"a", "c"}));
+    std::string const head = "[otok]\nformat = 1\n" + apple_table + "[deps.a]\nrecipe = { path = \"a\" }\n";
+    EXPECT_TRUE(parse(head + "deliver = []\n").reports("'deliver' in deps.a lists no programs: name those to deliver, or write true for all"));
+    EXPECT_TRUE(parse(head + "deliver = [\"x\", \"x\"]\n").reports("'deliver' in deps.a lists the program 'x' twice"));
+    EXPECT_TRUE(parse(head + "deliver = [\"\"]\n").reports("'deliver' in deps.a lists an empty program name"));
+    EXPECT_TRUE(parse(head + "deliver = \"x\"\n").reports("'deliver' in deps.a must be true, false or a list of programs, not a string"));
+    EXPECT_TRUE(parse(head + "deliver = true\n[tool-deps.a]\nrecipe = { path = \"a\" }\ndeliver = true\n")
+            .reports("deps.a and tool-deps.a both have 'deliver'; keep the one of deps.a, which delivers the tool of its recipe and version"));
+    EXPECT_TRUE(parse(head + "deliver = true\n[tool-deps.a]\nrecipe = { path = \"b\" }\n")
+            .reports("'recipe' in tool-deps.a is not the one of deps.a, whose 'deliver' takes the tool from its recipe; give both the same"));
+    // a list in [tool-deps] too
+    auto listed = parse("[otok]\nformat = 1\n" + apple_table + "[tool-deps.a]\nrecipe = { path = \"a\" }\ndeliver = [\"x\"]\n");
+    ASSERT_TRUE(listed.m.has_value()) << messages(listed.diags);
+    EXPECT_EQ(listed.m->find_tool_dep("a")->deliver, std::vector<std::string>{"x"});
 
     auto moved = parse("[otok]\nformat = 1\ntools-output = \"tools\"\n" + apple_table);
     ASSERT_TRUE(moved.m.has_value()) << messages(moved.diags);

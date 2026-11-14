@@ -68,7 +68,9 @@ struct dependency
     std::optional<std::string> linkage;                 // "static", "dynamic"; never for tool dependencies
     language_standards standards;                       // tool dependencies only (otok-toml.md 5.1)
     bool bundle_data = false;                           // its data files as resources (otok-toml.md 6); never for tool dependencies
-    bool deliver = false;                               // tool dependencies only: built for the machine and copied into the tools output (otok-toml.md 7.1)
+    // built for the machine and copied into the tools output (otok-toml.md 7.1): none, every program of the recipe's
+    // [tool] programs (`deliver = true`, an empty list here) or the programs named
+    std::optional<std::vector<std::string>> deliver;
     source_position where;                              // the table; `where.file` names the defining file
 };
 
@@ -161,6 +163,8 @@ struct manifest
     // `windows/msvc`); without architecture.
     build_environment tool_environment(target_info const& host) const;
     dependency const* find_tool_dep(std::string_view library) const noexcept;
+    // The entries with `deliver` (otok-toml.md 7.1): those of [deps], then those of [tool-deps].
+    std::vector<dependency const*> delivered() const;
     profile const* find_profile(std::string_view name) const noexcept;
 };
 

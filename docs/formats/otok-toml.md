@@ -74,7 +74,7 @@ Any other top-level key is an error.
 | `format` | integer | — (required) | Manifest format version; `1` for this document (common 1.4). |
 | `include` | array of paths | `[]` | Fragments with more dependencies (section 10). |
 | `tool-build-on` | array of environments (common 4.2), at most one per host system | `["macos/xcode", "linux/gcc", "windows/msvc"]` | The environment tool slices are built in on each system (7): an environment of the target of that system's own platform (`macos/xcode` of `apple`, `linux/gcc` or `linux/clang`, `windows/msvc` or `windows/clang-cl`). The systems it leaves out take the default. |
-| `tools-output` | path | `"Otok/tools"` | Where the tools of `[tool-deps]` with `deliver` go (7.1), relative to the manifest; must stay inside the project. It may be inside the `output` of a target, never that directory or one around it. |
+| `tools-output` | path | `"Otok/tools"` | Where the tools with `deliver` go (7.1), relative to the manifest; must stay inside the project. It may be inside the `output` of a target, never that directory or one around it. |
 
 ## 4. `[apple]`
 
@@ -732,6 +732,7 @@ chosen with `recipe`. Transitive dependencies of the same library resolve to thi
 | `cflags`, `cxxflags`, `ldflags` | array of strings | `[]` | Compiler and linker flags for this library on every target (4.3). |
 | `linkage` | `"static"` or `"dynamic"` | the target table's | How this library is built on every target (5). |
 | `bundle-data` | boolean | `false` | The library's data files (`build-lua-api.md` 8) also as resources of its products, where the target has bundles: on Apple a target of their own (4). Without it the consumer takes them from `data/` of the output. Not in `[tool-deps]`. |
+| `deliver` | boolean or array of program names | `false` | Also build the library's recipe as a tool for this machine, at the version the library got, and copy the programs named (`true`: all of them) into the tools output (7.1). |
 
 Example of the sub-table form, equivalent to an inline table:
 
@@ -821,8 +822,8 @@ and its mirror (`config.md` 2), not other indexes.
 ## 7. `[tool-deps.<library>]`
 
 Chooses the recipe, versions and options of a library when recipes use it as a tool dependency.
-It never causes a tool build on its own: an entry that no recipe uses is reported as
-unused (a warning). Tool dependencies are resolved separately from `[deps.*]`; the same library may
+It causes a tool build on its own only with `deliver` (7.1): an entry that no recipe uses and
+nothing delivers is reported as unused (a warning). Tool dependencies are resolved separately from `[deps.*]`; the same library may
 appear in both with different recipes, versions and options. A toolchain that names a tool recipe is a tool dependency
 on the library of its name (`recipe-toml.md` 13.1), so `[tool-deps.cmake]` chooses the CMake recipes use.
 
@@ -845,7 +846,17 @@ them built each.
 ### 7.1 Tools the project runs
 
 A program the consumer's own build runs (a compiler of the project's scripts, a code generator) comes from a tool recipe
-(`recipe-toml.md` 3.1) through `deliver`:
+(`recipe-toml.md` 3.1) through `deliver`. A tool that belongs to a library of the project, such as `protoc` of Protocol
+Buffers, is delivered from that library's entry, so that the tool and the library come from one recipe and one version:
+
+```toml
+[deps.protobuf]
+recipe = "apotocki/protobuf"
+version = "~> 36.2"
+deliver = ["protoc"]
+```
+
+A tool without a library of the project is delivered from `[tool-deps]`:
 
 ```toml
 [tool-deps.annium-compile]
@@ -855,7 +866,18 @@ deliver = true
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `deliver` | boolean | `false` | Build the tool for this machine though no recipe uses it, and copy it into the tools output. Only in `[tool-deps]`. |
+| `deliver` | boolean or array of program names | `false` | Build the tool for this machine though no recipe uses it, and copy it into the tools output: `true` with every program of the recipe's `[tool] programs`, a list with those named. |
+
+The programs named must be among the recipe's `[tool] programs`, and a recipe without them is not delivered; both fail
+resolution. The tools output gets the whole prefix of the tool slice either way (the programs may need files beside
+them); only the programs named are in the files that give their paths.
+
+In `[deps.<library>]` the tool is the library's recipe (`recipe`, its variant for the machine's system) at exactly the
+version the library got in the target graphs (one version in all of them, 6), as if a recipe took it with
+`[deps.<library>] toolchains` (`recipe-toml.md` 13.2). `[tool-deps.<library>]` beside it is not needed; it may choose
+the tool's `options`, flags and standards, must name the same `recipe`, and its `version` must allow the library's. The
+tool is built from the recipe's source, not from a `source` of `[deps]`. `deliver` is in one of the two tables, never in
+both.
 
 Such a library is resolved as a tool dependency of the project in the tool graph of every system of the lock (7), so
 `otok.lock` has its `[[tool-package]]`, and `install` and `update` build it in the tool slice of the machine. After the
@@ -1009,7 +1031,9 @@ Reported before resolution, all at once rather than one per run:
   without `from` or `to` or with bad patterns (`config.md` 2.2), `mirrors-only` naming a library twice (a library no dependency has is a warning
   after resolution);
 - `output` outside the project, or overlapping the `output` of another target;
-- `tools-output` outside the project, or the `output` of a target or around one (7.1); `deliver` outside `[tool-deps]`;
+- `tools-output` outside the project, or the `output` of a target or around one (7.1); `deliver` neither a boolean nor a
+  non-empty list of distinct program names, in both `[deps.<library>]` and `[tool-deps.<library>]`, or with a `[tool-deps]`
+  entry of another recipe beside it in `[deps]` (7.1);
 - flags that choose the slice (4.3);
 - `configurations` empty, with a value twice, or with more than one value for `[apple]`; `linkage`
   other than `"static"` for `[apple]`;
@@ -1023,4 +1047,5 @@ them (4.9). After building: a delivered tool whose program is a script, and a `t
 
 Reported during resolution: options against recipe schemas, version and platform availability,
 deployment versions, option conflicts between dependents, license policy, a `linkage` the recipe cannot
-build, a recipe id found in two indexes that `[index-of]` does not choose between (6.4).
+build, a recipe id found in two indexes that `[index-of]` does not choose between (6.4), a delivered tool whose recipe
+builds no programs or not one the project names (7.1).

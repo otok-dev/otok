@@ -100,6 +100,8 @@ struct resolution
     // 116), by id: one for the tool packages linked together, the highest one of them is given, else the lowest every
     // recipe of them allows; none: neither, each recipe chooses.
     std::map<std::string, language_standards, std::less<>> tool_standards;
+    // The tools the project delivers (otok-toml.md 7.1): library → the id of its tool package, the same in each tool graph.
+    std::map<std::string, std::string, std::less<>> delivered_tools;
     bool several_targets = false;             // packages are named `<library>@<target>`
     // the systems resolved, sorted (otok-lock.md 2): the graphs of an environment of another system are not here
     std::vector<std::string> systems;

@@ -1506,18 +1506,35 @@ std::optional<resolution> resolve(manifest const& m, std::span<target_info const
             target_tool_edges[{name, g}] = std::move(*ids);
         }
     }
-    // the [tool-deps] of a tool recipe otok publish builds, or those the project wants delivered (otok-toml.md 7.1)
-    for (dependency const& d : m.tool_deps) {
-        if (settings.tool_roots || d.deliver) {
-            tool_request req;
-            req.library = d.library;
-            // in the first graph of each system: the library goes into its own from there
-            for (std::size_t h = 0; h < tool.graphs.size(); ++h) {
-                bool const first = h == 0 || tool.graphs[h - 1].environment.system != tool.graphs[h].environment.system;
-                req.platforms.emplace_back(config_count, first ? std::set<std::string>{tool.graphs[h].tool_platform} : std::set<std::string>{});
-            }
-            if (!tools.resolve(req)) tools_ok = false;
+    // the [tool-deps] of a tool recipe otok publish builds, and the tools the project delivers (otok-toml.md 7.1): roots of the
+    // project, in the first graph of each system (the library goes into its own from there)
+    auto const root_request = [&](std::string const& library) {
+        tool_request req;
+        req.library = library;
+        for (std::size_t h = 0; h < tool.graphs.size(); ++h) {
+            bool const first = h == 0 || tool.graphs[h - 1].environment.system != tool.graphs[h].environment.system;
+            req.platforms.emplace_back(config_count, first ? std::set<std::string>{tool.graphs[h].tool_platform} : std::set<std::string>{});
         }
+        return req;
+    };
+    for (dependency const& d : m.tool_deps) {
+        if (!settings.tool_roots && !d.deliver) continue;
+        auto const id = tools.resolve(root_request(d.library));
+        if (!id) tools_ok = false;
+        else if (d.deliver) out.delivered_tools.emplace(d.library, *id);
+    }
+    // a tool delivered from [deps]: the recipe and the version of that library in the target graphs (one version for all)
+    for (dependency const& d : m.deps) {
+        if (!d.deliver || tool.graphs.empty()) continue;
+        auto const n = target_state->nodes.find(d.library);
+        if (n == target_state->nodes.end() || n->second.chosen < 0) continue;
+        tool_request req = root_request(d.library);
+        req.requester = "otok.toml [deps." + d.library + "]";
+        req.ref = n->second.ref;
+        req.exact = exact_version(n->second);
+        auto const id = tools.resolve(req);
+        if (!id) tools_ok = false;
+        else out.delivered_tools.emplace(d.library, *id);
     }
     if (!tools_ok) return std::nullopt;
     for (dependency const& d : m.tool_deps) {
@@ -1545,6 +1562,33 @@ std::optional<resolution> resolve(manifest const& m, std::span<target_info const
         }
     }
     out.tool_packages = tools.packages();
+    // what the project delivers is among the programs of the recipe, of each variant (otok-toml.md 7.1)
+    bool delivered_ok = true;
+    for (dependency const* d : m.delivered()) {
+        auto const id = out.delivered_tools.find(d->library);
+        if (id == out.delivered_tools.end()) continue;
+        std::string const what = "'deliver' in " + std::string{m.find_dep(d->library) == d ? "deps." : "tool-deps."} + d->library;
+        std::set<std::string> reported;
+        for (resolved_package const& p : out.tool_packages) {
+            if (p.id != id->second) continue;
+            recipe const& r = *p.chosen.recipe;
+            std::string const recipe_text = "the recipe of " + in_quotes(p.library) + " " + r.version->str() + " (" + r.variant + ")";
+            if (r.programs.empty()) {
+                if (reported.insert("").second) {
+                    diags.error(d->where, what + ": " + recipe_text + " builds no programs; only a tool recipe is delivered ([tool] programs, recipe-toml.md 13)");
+                }
+                delivered_ok = false;
+                continue;
+            }
+            for (std::string const& program : *d->deliver) {
+                if (std::ranges::find(r.programs, program) != r.programs.end() || !reported.insert(program).second) continue;
+                diags.error(d->where, what + " names " + in_quotes(program) + ", which " + recipe_text + " does not build; its programs: "
+                    + joined(r.programs));
+                delivered_ok = false;
+            }
+        }
+    }
+    if (!delivered_ok) return std::nullopt;
 
     // One standard of each language for every library of a target (otok-toml.md 5.1): the project's, which the solver checked
     // against the recipes, or else the lowest every recipe of the target allows, in all its graphs

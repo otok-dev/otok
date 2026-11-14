@@ -248,9 +248,13 @@ std::expected<toolchain_choice, std::vector<std::string>> check_toolchains(resol
     for (resolved_package const& p : r.packages) {
         if (!p.configurations[configuration].platforms.empty()) use(use, p, false);
     }
+    std::vector<std::string> roots;  // publish's [tool-deps], and the tools the project delivers
     for (dependency const& d : m.tool_deps) {
-        if (!tool_roots && !d.deliver) continue;
-        resolved_package const* dp = r.find_tool(d.library);
+        if (tool_roots) roots.push_back(d.library);
+    }
+    for (auto const& [library, id] : r.delivered_tools) roots.push_back(id);
+    for (std::string const& root : roots) {
+        resolved_package const* dp = r.find_tool(root);
         if (dp && used.insert(dp->id).second) use(use, *dp, true);
     }
     for (resolved_package const& p : r.tool_packages) {

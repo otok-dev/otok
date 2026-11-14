@@ -804,6 +804,52 @@ TEST(resolver, chooses_the_cxx_standard_of_tools_linked_together)
         std::string::npos) << none_text;
 }
 
+// `deliver` in [deps.<library>] (otok-toml.md 7.1, docs/PLAN.md decision 121): the tool of the library's recipe and version
+TEST(resolver, delivers_the_tool_of_a_library)
+{
+    target_info const* const native[] = {&test::native_info()};
+    memory_provider p;
+    for (char const* v : {"1.0", "2.0"}) {
+        p.add({.library = "pb", .version = v, .extra = "[tool]\nprograms = [\"protoc\", \"plugin\"]\n", .platforms = "\"native\""});
+    }
+    p.add({.library = "plain", .version = "1.0", .platforms = "\"native\""});
+    auto const resolve_with = [&](std::string const& deps) {
+        diagnostics d;
+        auto m = parse_manifest("[otok]\nformat = 1\n[native]\n" + deps, "otok.toml", native, {}, d);
+        EXPECT_TRUE(m) << messages(d);
+        std::optional<resolution> r;
+        if (m) r = resolve(*m, native, p, {}, d);
+        return std::pair{std::move(r), messages(d)};
+    };
+    std::string const pb = "[deps.pb]\nrecipe = \"p/pb\"\nversion = \"< 2\"\n";
+    // the library's version, though a newer one would do for the tool alone
+    auto const [chosen, text] = resolve_with(pb + "deliver = [\"protoc\"]\n");
+    ASSERT_TRUE(chosen) << text;
+    EXPECT_EQ(chosen->delivered_tools, (std::map<std::string, std::string, std::less<>>{{"pb", "pb@1.0"}}));
+    ASSERT_NE(chosen->find_tool("pb@1.0"), nullptr);
+    EXPECT_EQ(chosen->find_tool("pb@2.0"), nullptr);
+    // [tool-deps] beside it chooses the options, and its version must allow the library's
+    auto const [beside, beside_text] = resolve_with(pb + "deliver = true\n[tool-deps.pb]\nrecipe = \"p/pb\"\nversion = \">= 1\"\n");
+    ASSERT_TRUE(beside) << beside_text;
+    EXPECT_EQ(beside->delivered_tools.at("pb"), "pb@1.0");
+    auto const [newer, newer_text] = resolve_with(pb + "deliver = true\n[tool-deps.pb]\nrecipe = \"p/pb\"\nversion = \">= 2\"\n");
+    EXPECT_FALSE(newer);
+    EXPECT_NE(newer_text.find("otok.toml [deps.pb]: = 1.0"), std::string::npos) << newer_text;
+    // only the recipe's programs, of a tool recipe
+    auto const [unknown, unknown_text] = resolve_with(pb + "deliver = [\"protoc\", \"protocx\"]\n");
+    EXPECT_FALSE(unknown);
+    EXPECT_NE(unknown_text.find("'deliver' in deps.pb names 'protocx', which the recipe of 'pb' 1.0 (native) does not build; its programs: "
+                                "'protoc', 'plugin'"), std::string::npos) << unknown_text;
+    auto const [plain, plain_text] = resolve_with("[deps.plain]\nrecipe = \"p/plain\"\nversion = \"1.0\"\ndeliver = true\n");
+    EXPECT_FALSE(plain);
+    EXPECT_NE(plain_text.find("'deliver' in deps.plain: the recipe of 'plain' 1.0 (native) builds no programs; only a tool recipe is delivered"),
+        std::string::npos) << plain_text;
+    // in [tool-deps] too
+    auto const [tool, tool_text] = resolve_with("[tool-deps.pb]\nrecipe = \"p/pb\"\nversion = \">= 1\"\ndeliver = [\"plugin\"]\n");
+    ASSERT_TRUE(tool) << tool_text;
+    EXPECT_EQ(tool->delivered_tools.at("pb"), "pb@2.0");
+}
+
 TEST(resolver, architectures_stay_within_the_recipe)
 {
     memory_provider p;

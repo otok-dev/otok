@@ -247,9 +247,10 @@ constrains another's.
 - The tool package of a library and version is the same in every graph it appears in: one entry, one build. Two edges
   reaching one with different options fail resolution, naming both.
 - A tool dependency on a library whose own tool dependencies lead back to it is a cycle and fails resolution.
-- A tool the project delivers (`deliver` in `[tool-deps]`, `otok-toml.md` 7.1) is an edge of the project itself, rooted
-  in the first tool graph of each system, so the lock has its `tool-package` though no package references it; adding
-  or removing `deliver` makes the lock stale (6).
+- A tool the project delivers (`deliver`, `otok-toml.md` 7.1) is an edge of the project itself, rooted in the first tool
+  graph of each system, so the lock has its `tool-package` though no package references it; adding or removing
+  `deliver` makes the lock stale (6), changing the programs it names does not. Delivered from `[deps.<library>]`, it has
+  that library's recipe and exactly its version, as a tool taken from a dependency.
 
 ### 5.6 Checks
 

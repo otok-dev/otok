@@ -754,8 +754,11 @@ std::expected<std::vector<built_package>, std::vector<error>> builder::build_all
     }
     for (resolved_package const& p : r_.packages) visit(visit, p, false);
     for (dependency const& d : m_.tool_deps) {
-        if (!settings_.tool_roots && !d.deliver) continue;
+        if (!settings_.tool_roots) break;
         if (resolved_package const* dp = r_.find_tool(d.library)) visit(visit, *dp, true);
+    }
+    for (auto const& [library, id] : r_.delivered_tools) {
+        if (resolved_package const* dp = r_.find_tool(id)) visit(visit, *dp, true);
     }
 
     // the tasks, each after the ones it needs (docs/PLAN.md decision 20)

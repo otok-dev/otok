@@ -133,7 +133,7 @@ programs = ["ninja"]
 | `programs` | array of program names, `[a-z0-9][a-z0-9_+-]{0,63}`, non-empty, without repeats | — (required). The programs `build` returns (`build-lua-api.md` 8). Every program a toolchain takes from the recipe (13.1, 13.2) is listed. A program may be a script run by a toolchain of the recipe (Meson by `python`).  |
 
 A tool recipe needs no `[[product]]`. Without products it can be a tool dependency only: a recipe or a project that
-has it as a dependency fails to resolve. A project may deliver it to its own build (`deliver` in `[tool-deps]`, `otok-toml.md` 7.1). It may have products too, for a library that is also a tool. `otok publish`
+has it as a dependency fails to resolve. A project may deliver it to its own build (`deliver` in `[tool-deps]`, or in `[deps]` for a library that is also a tool, `otok-toml.md` 7.1). It may have products too, for a library that is also a tool. `otok publish`
 builds one without products in the tool slice of the machine, where it checks that `programs` are built.
 
 Tool slices are built by the target of the build machine (`otok-toml.md` 7): `macosx` of `apple` on macOS, `linux`,

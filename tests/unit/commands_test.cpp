@@ -1167,7 +1167,8 @@ TEST_F(commands, info_shows_the_variants)
     upstream.write("recipes/b/PrivacyInfo.xcprivacy", privacy_manifest);
     upstream.write("recipes/c/apple/recipe.toml", variant(recipe_of("c", "1.0", privacy + options_of_b + "[deps.b]\nversion = \">= 1\"\ndefault-recipe = \"p/b\"\n"), "apple"));
     upstream.write("recipes/c/apple/PrivacyInfo.xcprivacy", privacy_manifest);
-    std::string native = variant(recipe_of("c", "1.0", "[options.level]\ntype = \"int\"\ndefault = 1\ndoc = \"d\"\n"), "native");
+    std::string native = variant(recipe_of("c", "1.0", "[options.level]\ntype = \"int\"\ndefault = 1\ndoc = \"d\"\n"
+        "[tool]\nprograms = [\"cgen\", \"cdump\"]\n"), "native");
     std::string const apple_platforms = "supported = [\"ios\", \"iossim\", \"macosx\"]\nbuild-on = [\"macos/xcode\"]\n";
     native.replace(native.find(apple_platforms), apple_platforms.size(), "supported = [\"native\"]\nbuild-on = [\"*/cc\"]\n");
     upstream.write("recipes/c/native/recipe.toml", native);
@@ -1189,6 +1190,7 @@ TEST_F(commands, info_shows_the_variants)
         "variants of 1.0:\n"
         "  apple   (r1)  ios, iossim, macosx  macos/xcode  c/apple\n"
         "  native  (r1)  native               */cc         c/native\n"
+        "programs of 1.0 (native):\n  cgen, cdump\n"
         "options of 1.0 (apple):\n  level   int   default 1\n  shared  bool  default false\n"
         "options of 1.0 (native):\n  level  int  default 1\n"
         "dependencies of 1.0 (apple):\n  b  >= 1  p/b\n"

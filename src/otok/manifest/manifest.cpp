@@ -196,6 +196,40 @@ bool refuse_standards(toml_table& t, std::string_view where)
     return refused;
 }
 
+// `deliver` of a dependency (otok-toml.md 7.1): `true` (an empty list: every program of the recipe's [tool] programs),
+// `false` (none) or a list of programs. Whether it was valid.
+bool read_deliver(toml_table& t, std::optional<std::vector<std::string>>& deliver)
+{
+    toml::node const* node = t.node("deliver");
+    if (!node) return true;
+    if (node->is_boolean()) {
+        if (t.boolean("deliver").value_or(false)) deliver.emplace();
+        return true;
+    }
+    if (!node->is_array()) {
+        t.error(t.position("deliver"), t.describe("deliver") + " must be true, false or a list of programs, not " + std::string{describe_type(node->type())});
+        return false;
+    }
+    auto programs = t.strings("deliver");
+    if (!programs) return false;
+    if (programs->empty()) {
+        t.error(t.position("deliver"), t.describe("deliver") + " lists no programs: name those to deliver, or write true for all");
+        return false;
+    }
+    for (auto it = programs->begin(); it != programs->end(); ++it) {
+        if (it->empty()) {
+            t.error(t.position("deliver"), t.describe("deliver") + " lists an empty program name");
+            return false;
+        }
+        if (std::find(programs->begin(), it, *it) != it) {
+            t.error(t.position("deliver"), t.describe("deliver") + " lists the program " + in_quotes(*it) + " twice");
+            return false;
+        }
+    }
+    deliver = std::move(*programs);
+    return true;
+}
+
 // A flag that chooses the slice, which only otok gives (otok-toml.md 4.3).
 bool chooses_slice(std::string_view flag)
 {
@@ -504,13 +538,7 @@ std::optional<dependency> manifest_reader::dependency_entry(toml_table& deps, st
             t->ignore("bundle-data");
             ok = false;
         }
-        dep.deliver = t->boolean("deliver").value_or(false);
     } else {
-        if (t->contains("deliver")) {
-            t->error(t->position("deliver"), t->describe("deliver") + " is allowed in [tool-deps] only: the outputs hold the libraries of [deps]");
-            t->ignore("deliver");
-            ok = false;
-        }
         if (t->contains("platforms")) {
             dep.platforms = platforms(*t, "platforms", nullptr, need::optional);
             if (!dep.platforms) ok = false;
@@ -521,6 +549,8 @@ std::optional<dependency> manifest_reader::dependency_entry(toml_table& deps, st
         }
         dep.bundle_data = t->boolean("bundle-data").value_or(false);
     }
+
+    if (!read_deliver(*t, dep.deliver)) ok = false;
 
     if (auto source = t->table("source")) {
         auto path = source->string("path", need::required);
@@ -770,6 +800,21 @@ void manifest_reader::cross_check(manifest& m)
         if (dep.platforms) check_subset(*dep.platforms, dep.where, "deps." + dep.library);
         if (dep.linkage) check_linkage(dep, *dep.linkage, dep.platforms, dep.where, "deps." + dep.library);
     }
+    // a tool delivered from [deps] comes from that library's recipe (otok-toml.md 7.1); [tool-deps] may choose its options
+    for (dependency const& dep : m.deps) {
+        dependency const* tool = dep.deliver ? m.find_tool_dep(dep.library) : nullptr;
+        if (!tool) continue;
+        if (tool->deliver) {
+            diags_.error(tool->where, "deps." + dep.library + " and tool-deps." + dep.library + " both have 'deliver'; keep the one of deps."
+                + dep.library + ", which delivers the tool of its recipe and version");
+        }
+        recipe_ref const& a = dep.recipe;
+        recipe_ref const& b = tool->recipe;
+        if (a.source != b.source || !(a.id == b.id) || a.git != b.git || a.rev != b.rev || a.path != b.path) {
+            diags_.error(b.where, "'recipe' in tool-deps." + dep.library + " is not the one of deps." + dep.library
+                + ", whose 'deliver' takes the tool from its recipe; give both the same");
+        }
+    }
 
     for (profile const& p : m.profiles) {
         for (auto const& [library, overrides] : p.deps) {
@@ -1013,6 +1058,18 @@ dependency const* manifest::find_tool_dep(std::string_view library) const noexce
 {
     auto it = std::ranges::find(tool_deps, library, &dependency::library);
     return it == tool_deps.end() ? nullptr : &*it;
+}
+
+std::vector<dependency const*> manifest::delivered() const
+{
+    std::vector<dependency const*> out;
+    for (dependency const& d : deps) {
+        if (d.deliver) out.push_back(&d);
+    }
+    for (dependency const& d : tool_deps) {
+        if (d.deliver) out.push_back(&d);
+    }
+    return out;
 }
 
 profile const* manifest::find_profile(std::string_view name) const noexcept
