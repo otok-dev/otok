@@ -206,6 +206,15 @@ struct graph_spec
         }
         return nullptr;
     }
+
+    // The lock's tool package of a library and version in a graph, whoever it was resolved for: one tool package of a
+    // library and version in a graph (otok-lock.md 5.7), so a request the lock does not know yet (a new tool dependency)
+    // takes its revision, which the packages locked before keep (docs/PLAN.md decision 120).
+    locked_package const* locked_tool(std::string const& library, std::string const& version, std::size_t g) const
+    {
+        if (!tool || !preferred || unlocked.contains(library)) return nullptr;
+        return preferred->find_tool(tool_reference(library, version), graphs[g].environment.text());
+    }
 };
 
 // The linkage of `n` in graph `g` and configuration `c` for platform `p` (otok-toml.md 5) and who asked for it ("" for
@@ -467,8 +476,9 @@ private:
         for (std::size_t const k : covering) {
             candidate const& c = (*n.candidates)[k];
             auto const rank = [&](candidate const& x) {
-                bool const lock = is_locked(x, locked) && locked->revision == x.recipe->revision
-                    && (x.kind != locked_package::recipe_kind::index || locked->variant == x.recipe->variant);
+                locked_package const* const l = spec_.tool ? spec_.locked_tool(n.library, x.recipe->version->str(), g) : locked;
+                bool const lock = is_locked(x, l) && l->revision == x.recipe->revision
+                    && (x.kind != locked_package::recipe_kind::index || l->variant == x.recipe->variant);
                 return std::tuple{lock, x.advisories.empty(), x.recipe->revision};
             };
             auto [it, inserted] = best.try_emplace(c.recipe->variant, k);

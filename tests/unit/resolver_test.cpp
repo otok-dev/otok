@@ -1196,6 +1196,38 @@ TEST(resolver, tools_of_each_package_in_their_own_versions)
     EXPECT_EQ(first(*o.r, "a")->tool_dependencies, std::vector<std::string>{"ninja@2.0"});
 }
 
+// docs/PLAN.md decision 120: a new tool dependency takes the lock's revision of a tool package of the same version, which
+// the packages locked before keep (one tool package of a library and version in a graph)
+TEST(resolver, new_tools_take_the_locked_revision)
+{
+    memory_provider p;
+    std::string const tool = "[tool]\nprograms = [\"ninja\"]\n";
+    p.add({.library = "ninja", .version = "1.0", .extra = tool, .revision = 1});
+    std::string const uses = "[toolchains]\nninja = { default-recipe = \"p/ninja\" }\n";
+    p.add({.library = "a", .version = "1.0", .extra = uses});
+    p.add({.library = "b", .version = "1.0", .extra = uses});
+    auto o = run(p, dep("a", "1.0"));
+    ASSERT_TRUE(o.r) << o.text();
+    test::temp_dir project;
+    auto lock = make_lock(*o.r, *o.m, project.path());
+    ASSERT_TRUE(lock.has_value()) << lock.error().message;
+
+    p.add({.library = "ninja", .version = "1.0", .extra = tool, .revision = 2});
+    resolve_settings settings;
+    settings.preferred = &*lock;
+    o = run(p, dep("a", "1.0") + dep("b", "1.0"), settings);
+    ASSERT_TRUE(o.r) << o.text();
+    EXPECT_EQ(first(*o.r, "b")->tool_dependencies, std::vector<std::string>{"ninja@1.0"});
+    ASSERT_EQ(o.r->tool_packages.size(), 1u);
+    EXPECT_EQ(o.r->find_tool("ninja@1.0")->chosen.recipe->revision, 1);
+
+    // unlocked, the newest for both
+    settings.unlocked = {"ninja"};
+    o = run(p, dep("a", "1.0") + dep("b", "1.0"), settings);
+    ASSERT_TRUE(o.r) << o.text();
+    EXPECT_EQ(o.r->find_tool("ninja@1.0")->chosen.recipe->revision, 2);
+}
+
 // recipe-toml.md 13.1: a toolchain names a program; the library is that of the recipe
 TEST(resolver, toolchains_are_programs_of_the_recipes_they_name)
 {
