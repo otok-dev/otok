@@ -69,6 +69,13 @@ std::string cmake_path(std::string_view relative)
     return "\"${_otok_dir}/" + cmake_escaped(relative) + "\"";
 }
 
+// The C++ runtime of `link.runtime`, for a consumer linking with another driver than the C++ one, which links its own
+// (docs/PLAN.md decision 125).
+std::string cmake_cxx_runtime(std::string_view runtime)
+{
+    return "\"$<$<NOT:$<LINK_LANGUAGE:CXX,OBJCXX>>:" + cmake_escaped(runtime) + ">\"";
+}
+
 std::string upper(std::string s)
 {
     for (char& c : s) {
@@ -350,7 +357,7 @@ std::string consumer_cmake_config(consumer_package const& p, consumer_cmake_part
         std::vector<std::string> link;
         for (std::string const& d : l.depends) link.push_back(cmake_quoted("otok::" + d));
         for (std::string const& s : l.link) link.push_back(cmake_quoted(parts.link_item ? parts.link_item(s) : s));
-        if (l.cxx_runtime && !l.shared && !parts.cxx_runtime.empty()) link.push_back(cmake_quoted(parts.cxx_runtime));
+        if (l.cxx_runtime && !l.shared && !parts.cxx_runtime.empty()) link.push_back(cmake_cxx_runtime(parts.cxx_runtime));
         if (!not_built.empty()) link.emplace_back("${_otok_not_built}");  // unquoted: nothing when it is unset
         if (!link.empty()) {
             text += "set_property(TARGET " + target + " PROPERTY INTERFACE_LINK_LIBRARIES";
@@ -366,8 +373,9 @@ std::string consumer_cmake_config(consumer_package const& p, consumer_cmake_part
         std::vector<std::string> link;
         for (std::string const& l : prod.libraries) link.push_back("otok::" + l);
         for (std::string const& s : prod.link) link.push_back(parts.link_item ? parts.link_item(s) : s);
-        if (prod.cxx_runtime && !parts.cxx_runtime.empty()) link.push_back(parts.cxx_runtime);
-        if (!link.empty()) text += "set_property(TARGET " + target + " PROPERTY INTERFACE_LINK_LIBRARIES" + joined(link, cmake_quoted) + ")\n";
+        std::string items = joined(link, cmake_quoted);
+        if (prod.cxx_runtime && !parts.cxx_runtime.empty()) items += " " + cmake_cxx_runtime(parts.cxx_runtime);
+        if (!items.empty()) text += "set_property(TARGET " + target + " PROPERTY INTERFACE_LINK_LIBRARIES" + items + ")\n";
         if (!prod.include_dirs.empty()) text += "set_property(TARGET " + target + " PROPERTY INTERFACE_INCLUDE_DIRECTORIES" + joined(prod.include_dirs, cmake_path) + ")\n";
         if (!prod.defines.empty()) text += "set_property(TARGET " + target + " PROPERTY INTERFACE_COMPILE_DEFINITIONS" + joined(prod.defines, cmake_quoted) + ")\n";
     }

@@ -896,7 +896,7 @@ TEST(host_target, gives_consumers_static_libraries)
         EXPECT_TRUE(std::filesystem::exists(p.output("otok.targets")));
         generators.emplace_back("Visual Studio 18 2026");
     } else {
-        EXPECT_NE(text.find("\"-lm\" \"-lstdc++\""), std::string::npos) << text;  // a C consumer of a C++ library (link.runtime)
+        EXPECT_NE(text.find("\"-lm\" \"$<$<NOT:$<LINK_LANGUAGE:CXX,OBJCXX>>:-lstdc++>\""), std::string::npos) << text;  // a C consumer of a C++ library (link.runtime)
     }
     for (std::string const& generator : generators) {
         for (char const* configuration : {"Release", "Debug"}) {

@@ -311,8 +311,8 @@ TEST(apple_target, writes_the_cmake_config)
     cmake_package p;
     p.slices = {"ios", "ios-simulator", "macos"};
     p.libraries = {{"openssl_crypto", "Packages/openssl/openssl_crypto.xcframework"}, {"openssl_ssl", "Packages/openssl/openssl_ssl.xcframework"}};
-    p.products = {{"OpenSSL", {"openssl_ssl", "openssl_crypto"}, {}, {"-lz", "-framework Security"}, {"OPENSSL_X=\"a;b\"", "OPENSSL_Y"}},
-        {"H", {}, {"Packages/h/shims/H/include"}, {}, {}}};
+    p.products = {{"OpenSSL", {"openssl_ssl", "openssl_crypto"}, {}, {"-lz", "-framework Security"}, {"OPENSSL_X=\"a;b\"", "OPENSSL_Y"}, true},
+        {"H", {}, {"Packages/h/shims/H/include"}, {}, {}, true}};
     p.privacy_manifests = {"Packages/openssl/shims/OpenSSL/PrivacyInfo.xcprivacy"};
     p.data_dirs = {{"icu4c", "Packages/icu4c/data"}};
     p.warnings = {"the wrappers of the product 'OpenSSL' (W) are SwiftPM targets, which CMake's consumers do not get"};
@@ -352,9 +352,10 @@ TEST(apple_target, writes_the_cmake_config)
         "set_target_properties(otok::openssl_ssl PROPERTIES IMPORTED_LOCATION \"${_otok_dir}/Packages/openssl/openssl_ssl.xcframework\")\n\n"
         "# the products\n"
         "add_library(otok::OpenSSL INTERFACE IMPORTED)\n"
-        "set_property(TARGET otok::OpenSSL PROPERTY INTERFACE_LINK_LIBRARIES \"otok::openssl_ssl\" \"otok::openssl_crypto\" \"-lz\" \"-framework Security\")\n"
+        "set_property(TARGET otok::OpenSSL PROPERTY INTERFACE_LINK_LIBRARIES \"otok::openssl_ssl\" \"otok::openssl_crypto\" \"-lz\" \"-framework Security\" \"$<$<NOT:$<LINK_LANGUAGE:CXX,OBJCXX>>:-lc++>\")\n"
         "set_property(TARGET otok::OpenSSL PROPERTY INTERFACE_COMPILE_DEFINITIONS \"OPENSSL_X=\\\"a\\;b\\\"\" \"OPENSSL_Y\")\n"
         "add_library(otok::H INTERFACE IMPORTED)\n"
+        "set_property(TARGET otok::H PROPERTY INTERFACE_LINK_LIBRARIES \"$<$<NOT:$<LINK_LANGUAGE:CXX,OBJCXX>>:-lc++>\")\n"
         "set_property(TARGET otok::H PROPERTY INTERFACE_INCLUDE_DIRECTORIES \"${_otok_dir}/Packages/h/shims/H/include\")\n\n"
         "# the privacy manifests of the products, which an app puts into its bundle\n"
         "set(Otok_PRIVACY_MANIFESTS \"${_otok_dir}/Packages/openssl/shims/OpenSSL/PrivacyInfo.xcprivacy\")\n\n"

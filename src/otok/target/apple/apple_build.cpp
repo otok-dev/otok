@@ -316,6 +316,8 @@ result<detail::cmake_package> cmake_package_of(fs::path const& dir, std::span<ou
     std::map<library_ref, std::vector<std::string>> defines_of;     // library carrying a module → the defines of its product
     std::map<library_ref, std::vector<std::string>> header_link;    // { package, product of headers only } → its link settings
     std::map<library_ref, std::vector<std::string>> header_defines; // and its defines
+    std::set<library_ref> cxx_of;                                   // the libraries of products needing the C++ runtime
+    std::set<library_ref> header_cxx;                               // the products of headers only needing it
     std::map<std::string, fs::path> package_dirs;
     std::set<std::string> library_targets;
     std::set<std::string> with_headers;            // the dynamic libraries with an XCFramework of their headers
@@ -365,9 +367,13 @@ result<detail::cmake_package> cmake_package_of(fs::path const& dir, std::span<ou
             product const& prod = *o.source;
             product_settings const* s = settings_of(prod);
             std::vector<std::string> link;
-            for (std::string const& l : system_libraries(o)) link.push_back("-l" + l);
+            // libc++ of `link.runtime` apart: only a consumer not linking with a C++ driver needs it (docs/PLAN.md decision 125)
+            for (std::string const& l : o.link) link.push_back("-l" + l);
             for (std::string const& f : s ? s->frameworks : std::vector<std::string>{}) link.push_back("-framework " + f);
             for (std::string const& l : prod.libraries) add_unique(link_of[{p.library, l}], link);
+            bool const cxx = prod.runtime == "c++";
+            if (cxx) for (std::string const& l : prod.libraries) cxx_of.insert({p.library, l});
+            if (cxx && prod.headers_only()) header_cxx.insert({p.library, prod.name});
             if (prod.headers_only()) {
                 header_link[{p.library, prod.name}] = link;
                 header_defines[{p.library, prod.name}] = o.defines;
@@ -401,6 +407,7 @@ result<detail::cmake_package> cmake_package_of(fs::path const& dir, std::span<ou
                 cp.libraries.push_back(name);
                 if (with_headers.contains(name)) cp.libraries.push_back(name + "_headers");
                 if (auto it = link_of.find(l); it != link_of.end()) add_unique(cp.link, it->second);
+                if (cxx_of.contains(l)) cp.cxx_runtime = true;
                 if (auto it = defines_of.find(l); it != defines_of.end()) add_unique(cp.defines, it->second);
             }
             for (library_ref const& h : o.header_products) {
@@ -408,6 +415,7 @@ result<detail::cmake_package> cmake_package_of(fs::path const& dir, std::span<ou
                 if (d == package_dirs.end()) continue;
                 cp.include_dirs.push_back(slashed(d->second / "shims" / path_from_utf8(h.name) / "include"));
                 if (auto it = header_link.find(h); it != header_link.end()) add_unique(cp.link, it->second);
+                if (header_cxx.contains(h)) cp.cxx_runtime = true;
                 if (auto it = header_defines.find(h); it != header_defines.end()) add_unique(cp.defines, it->second);
             }
             c.products.push_back(std::move(cp));
@@ -1798,7 +1806,10 @@ std::string detail::cmake_config(cmake_package const& p)
         std::vector<std::string> link;
         for (std::string const& l : prod.libraries) link.push_back("otok::" + l);
         link.insert(link.end(), prod.link.begin(), prod.link.end());
-        if (!link.empty()) text += "set_property(TARGET " + target + " PROPERTY INTERFACE_LINK_LIBRARIES" + cmake_list(link, cmake_string) + ")\n";
+        std::string items = cmake_list(link, cmake_string);
+        // libc++ for a consumer linking with another driver than the C++ one, which links it itself (docs/PLAN.md decision 125)
+        if (prod.cxx_runtime) items += " \"$<$<NOT:$<LINK_LANGUAGE:CXX,OBJCXX>>:-lc++>\"";
+        if (!items.empty()) text += "set_property(TARGET " + target + " PROPERTY INTERFACE_LINK_LIBRARIES" + items + ")\n";
         if (!prod.include_dirs.empty()) text += "set_property(TARGET " + target + " PROPERTY INTERFACE_INCLUDE_DIRECTORIES" + cmake_list(prod.include_dirs, cmake_path) + ")\n";
         if (!prod.defines.empty()) text += "set_property(TARGET " + target + " PROPERTY INTERFACE_COMPILE_DEFINITIONS" + cmake_list(prod.defines, cmake_string) + ")\n";
     }

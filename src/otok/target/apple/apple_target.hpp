@@ -137,6 +137,7 @@ struct cmake_product
     std::vector<std::string> include_dirs;   // relative to the output
     std::vector<std::string> link;           // "-lz", "-framework CoreFoundation"
     std::vector<std::string> defines;        // `NAME` or `NAME=value`
+    bool cxx_runtime = false;                // libc++ (`link.runtime`), for a consumer not linking with a C++ driver
 };
 
 // otok-config.cmake of the output (otok-toml.md 4, docs/PLAN.md decision 92).

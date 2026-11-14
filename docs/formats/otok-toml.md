@@ -199,7 +199,8 @@ target_link_libraries(app PRIVATE otok::OpenSSL)
   made by the other generators gets the frameworks by the project's means.
 - Each product whose `when` holds is an interface target `otok::<product>` holding what its SwiftPM product
   holds: the targets of its libraries; the link settings of the products whose libraries it holds and of the
-  products of headers only it holds (`-l<name>` for `link.libraries`, `-lc++` for `link.runtime`, `-framework <name>` for `apple.frameworks`);
+  products of headers only it holds (`-l<name>` for `link.libraries`, `-framework <name>` for `apple.frameworks`, and for `link.runtime`
+  `-lc++` behind `$<$<NOT:$<LINK_LANGUAGE:CXX,OBJCXX>>:…>`, since a C++ driver links libc++ itself);
   the `include/` of those products of headers only; and, as `INTERFACE_COMPILE_DEFINITIONS`, the `defines` of
   itself, of the products whose modules its libraries carry and of the products of headers only it holds: what
   `otok_defines.h` gives SwiftPM's consumers, and a plain `#include` would not see. A product named as a
@@ -595,7 +596,8 @@ otok_copy_runtime_dlls(app)
   their `include/` and system libraries; and, as `INTERFACE_COMPILE_DEFINITIONS`, the `defines` of itself, of the products
   whose headers its libraries carry and of the products of headers only it holds. A system library of `link` is
   `<name>.lib` on Windows, `-l<name>` elsewhere. `link.runtime = "c++"` adds `-lstdc++` on Linux to a static library, for
-  a consumer linking with the C driver (a shared object names its runtime itself); nothing with MSVC, whose objects name
+  a consumer linking with the C driver (a shared object names its runtime itself), behind
+  `$<$<NOT:$<LINK_LANGUAGE:CXX,OBJCXX>>:…>`, since a C++ driver links its runtime itself; nothing with MSVC, whose objects name
   their STL; nothing on Android, whose app chooses the runtime (`ANDROID_STL`). A product named as a library's target
   is an error.
 - The architecture the consumer builds for: on Windows the generator platform (`CMAKE_VS_PLATFORM_NAME`, `x64` is
