@@ -166,7 +166,7 @@ and what the resolution adds:
 | Key | Type | Meaning |
 |---|---|---|
 | `library` | string | The library name. |
-| `tool` | boolean | A tool package: built for the tool slice (`otok-toml.md` 7); it has no outputs. |
+| `tool` | boolean | A tool package: built for the tool slice (`otok-toml.md` 7); it has no outputs (a tool the project delivers is in `[otok] tools-output`, not an output of a target, `otok-toml.md` 7.1). |
 | `target` | string | The target of its graph; for a tool package the target that builds the tools of the machine (`otok-toml.md` 7). |
 | `environment` | string | The environment of its graph, as the project writes it (`*/ndk`), or of `[otok] tool-build-on` for a tool package. |
 | `variant` | string or null | The variant of its recipe (`recipe-toml.md` 3); `null` for a git or path recipe. |

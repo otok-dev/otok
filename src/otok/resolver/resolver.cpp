@@ -1576,6 +1576,72 @@ std::optional<resolution> resolve(manifest const& m, std::span<target_info const
             if (standards != language_standards{}) out.standards[c].emplace(ts.target, standards);
         }
     }
+    // The tool packages (docs/PLAN.md decision 116): those linked together, a tool and what it links, take one standard, as the
+    // libraries of a target do; a tool package's own in [tool-deps] stays its own
+    {
+        std::map<std::string, std::string> parent;  // id → a representative of its group
+        auto const root = [&](auto& self, std::string const& id) -> std::string {
+            auto const it = parent.find(id);
+            if (it == parent.end() || it->second == id) return id;
+            return it->second = self(self, it->second);
+        };
+        for (resolved_package const& p : out.tool_packages) parent.emplace(p.id, p.id);
+        for (resolved_package const& p : out.tool_packages) {
+            for (std::string const& d : p.dependencies) {
+                resolved_package const* dp = out.find_tool(d);
+                if (dp) parent[root(root, dp->id)] = root(root, p.id);
+            }
+        }
+        std::map<std::string, std::vector<resolved_package const*>> groups;
+        for (resolved_package const& p : out.tool_packages) groups[root(root, p.id)].push_back(&p);
+        auto const given = [&](resolved_package const& p, language l) {
+            return targets.empty() ? std::nullopt : standard_of(m, nullptr, p.library, true, *targets.front(), l);
+        };
+        for (auto const& [representative, members] : groups) {
+            for (language const l : languages) {
+                std::optional<int> standard;
+                for (resolved_package const* p : members) {
+                    if (auto const s = given(*p, l); s && (!standard || *s > *standard)) standard = s;
+                }
+                std::vector<resolved_package const*> constrained;
+                for (resolved_package const* p : members) {
+                    if (p->chosen.recipe->standards[l]) constrained.push_back(p);
+                }
+                auto const allowed = [&](int s) {
+                    return std::ranges::all_of(constrained, [&](resolved_package const* p) {
+                        return given(*p, l) || p->chosen.recipe->standards[l]->allows(s);
+                    });
+                };
+                if (!standard) {
+                    if (constrained.empty()) continue;
+                    for (int const s : known_standards(l)) {
+                        if (allowed(s)) {
+                            standard = s;
+                            break;
+                        }
+                    }
+                }
+                if (!standard || !allowed(*standard)) {
+                    std::string list;
+                    std::set<std::string> listed;
+                    for (resolved_package const* p : members) {
+                        std::string item = p->library;
+                        if (auto const s = given(*p, l)) item += " " + std::string{language_name(l)} + std::to_string(*s) + " ([tool-deps." + p->library + "])";
+                        else if (p->chosen.recipe->standards[l]) item += " '" + p->chosen.recipe->standards[l]->str() + "'";
+                        else continue;
+                        if (listed.insert(item).second) list += (list.empty() ? "" : ", ") + item;
+                    }
+                    diags.error({}, "no " + std::string{language_name(l)} + " standard suits every tool linked together: " + list
+                        + "; set it in [tool-deps] of each");
+                    ok = false;
+                    continue;
+                }
+                for (resolved_package const* p : members) {
+                    if (!given(*p, l)) out.tool_standards[p->id][l] = *standard;
+                }
+            }
+        }
+    }
     std::set<std::string> cycles;
     for (std::size_t g = 0; g < out.graphs.size(); ++g) {
         if (auto cycle = find_cycle(out.packages, {g}, false); cycle && cycles.insert(*cycle).second) {

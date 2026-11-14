@@ -760,6 +760,50 @@ TEST(resolver, chooses_the_c_standard_of_a_target)
     EXPECT_NE(none_text.find("no C standard suits every library of [native]: a '>= 11', b '<= 99'"), std::string::npos) << none_text;
 }
 
+// A tool and what it links take one standard, the lowest their recipes allow, without one of theirs in [tool-deps]
+// (docs/PLAN.md decision 116); the target's does not reach them.
+TEST(resolver, chooses_the_cxx_standard_of_tools_linked_together)
+{
+    target_info const* const native[] = {&test::native_info()};
+    auto const resolve_with = [&](std::string const& gen, std::string const& lib, std::string const& tools) {
+        memory_provider p;
+        p.add({.library = "lib", .version = "1.0", .platforms = "\"native\"", .recipe_keys = lib.empty() ? "" : "cxx-standard = \"" + lib + "\"\n"});
+        p.add({.library = "gen", .version = "1.0", .extra = recipe_dep("lib", ">= 1"), .platforms = "\"native\"",
+            .recipe_keys = gen.empty() ? "" : "cxx-standard = \"" + gen + "\"\n"});
+        p.add({.library = "other", .version = "1.0", .platforms = "\"native\"", .recipe_keys = "cxx-standard = \">= 20\"\n"});
+        p.add({.library = "a", .version = "1.0", .extra = recipe_dep("gen", ">= 1", "", "tool-deps") + recipe_dep("other", ">= 1", "", "tool-deps"),
+            .platforms = "\"native\""});
+        diagnostics d;
+        auto m = parse_manifest("[otok]\nformat = 1\n[native]\ncxx-standard = 23\n[deps.a]\nrecipe = \"p/a\"\nversion = \"1.0\"\n" + tools,
+            "otok.toml", native, {}, d);
+        EXPECT_TRUE(m) << messages(d);
+        auto r = resolve(*m, native, p, {}, d);
+        return std::pair{std::move(r), messages(d)};
+    };
+    auto const cxx = [](resolution const& r, std::string const& library) -> std::optional<int> {
+        auto const it = r.tool_standards.find(r.find_tool(library)->id);
+        return it == r.tool_standards.end() ? std::nullopt : it->second.cxx;
+    };
+    auto const [chosen, text] = resolve_with(">= 17", ">= 14", "");
+    ASSERT_TRUE(chosen) << text;
+    EXPECT_EQ(cxx(*chosen, "gen"), 17);
+    EXPECT_EQ(cxx(*chosen, "lib"), 17);    // what gen links: gen's, not its own lowest
+    EXPECT_EQ(cxx(*chosen, "other"), 20);  // not linked with them
+    // no recipe says: none
+    auto const [free, free_text] = resolve_with("", "", "");
+    ASSERT_TRUE(free) << free_text;
+    EXPECT_EQ(cxx(*free, "gen"), std::nullopt);
+    // a tool's own stays its own, and the tools linked with it take it
+    auto const [given, given_text] = resolve_with(">= 17", ">= 14", "[tool-deps.gen]\nrecipe = \"p/gen\"\nversion = \"1.0\"\ncxx-standard = 20\n");
+    ASSERT_TRUE(given) << given_text;
+    EXPECT_EQ(cxx(*given, "gen"), std::nullopt);
+    EXPECT_EQ(cxx(*given, "lib"), 20);
+    auto const [none, none_text] = resolve_with(">= 17", "<= 14", "");
+    EXPECT_FALSE(none);
+    EXPECT_NE(none_text.find("no C++ standard suits every tool linked together: gen '>= 17', lib '<= 14'; set it in [tool-deps] of each"),
+        std::string::npos) << none_text;
+}
+
 TEST(resolver, architectures_stay_within_the_recipe)
 {
     memory_provider p;

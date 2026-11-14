@@ -853,6 +853,24 @@ TEST_F(builder_test, passes_the_standards)
     ASSERT_EQ(run({"install"}), 0) << err.str();
     EXPECT_NE(out.str().find("slices: 2 (2 from the cache)\n"), std::string::npos) << out.str();
 
+    // a tool: not the target's, the lowest its recipe allows (docs/PLAN.md decision 116), or its own in [tool-deps]
+    project.write("recipes/gen/recipe.toml",
+        "[recipe]\napi = 1\nlibrary = \"gen\"\nname = \"gen\"\nversion = \"1.0\"\nrevision = 1\nlicense = \"MIT\"\nlicense-files = [\"LICENSE\"]\n"
+        "description = \"Test.\"\ncxx-standard = \">= 17\"\n[source]\nurl = \"" + urls["ninja"] + "\"\nsha256 = \"" + hashes["ninja"] + "\"\n"
+        "[platforms]\nsupported = [\"native\"]\nbuild-on = [\"*/cc\"]\n[tool]\nprograms = [\"gen\"]\n");
+    auto const gen_expects = [&](int standard) {
+        project.write("recipes/gen/build.lua", "function build(slice)\n    assert(slice.cxx_standard == " + std::to_string(standard)
+            + ", slice.cxx_standard)\n    otok.write(slice.prefix .. '/bin/gen', 'gen')\n    return { programs = { gen = slice.prefix .. '/bin/gen' } }\nend\n");
+    };
+    write_recipe("a", "1.0", build_lua("a", checks), "[deps.b]\nversion = \">= 1\"\ndefault-recipe = \"p/b\"\n"
+        "[toolchains]\ngen = { default-recipe = \"p/gen\" }\n");
+    gen_expects(17);
+    with("23");
+    project.write("otok.toml", read_file(project.path() / "otok.toml").value_or("?") + "[tool-deps.gen]\nrecipe = { path = \"recipes/gen\" }\n");
+    ASSERT_EQ(run({"install"}), 0) << err.str();
+    gen_expects(20);
+    project.write("otok.toml", read_file(project.path() / "otok.toml").value_or("?") + "cxx-standard = 20\n");
+    ASSERT_EQ(run({"install"}), 0) << err.str();
 }
 
 TEST_F(builder_test, python_of_builds_has_none_of_the_users_modules)

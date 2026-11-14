@@ -691,7 +691,10 @@ library of the target: the standard changes what headers declare (`__cplusplus`,
 `__STDC_VERSION__`), and libraries built with different ones may not link together, or link with
 definitions that differ. `[deps.<library>]` has no such keys. `[tool-deps.<library>] cxx-standard` and
 `c-standard` apply to that tool only, a program of its own: the target table's do not reach tool
-dependencies and `build_tools`, which run on the build machine and do not reach the product.
+dependencies and `build_tools`, which run on the build machine and do not reach the product. A tool package without
+its own takes the standard of the tool packages it is linked with (a tool, what it links, what links it): the highest
+one of them has in `[tool-deps]`, else the lowest every recipe of them allows (`protoc` with protobuf and Abseil, both
+`">= 17"`: 17), else none; when no standard suits them all, resolution fails and asks for it in `[tool-deps]`.
 
 Standards are named by their two-digit numbers and ordered by year: C89 is older than C99, and C99 than
 C11. Without a key, the target still gets a standard of that language: the lowest of the list above that

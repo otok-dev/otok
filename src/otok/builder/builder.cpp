@@ -1374,7 +1374,12 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
     // none, as they get no project flags
     language_standards standards;
     if (tool && !building_tools) {
-        for (language const l : languages) standards[l] = standard_of(m_, nullptr, p.library, true, target->info(), l);
+        // its own in [tool-deps], else the one of the tools it is linked with (docs/PLAN.md decision 116)
+        auto const chosen = r_.tool_standards.find(p.id);
+        for (language const l : languages) {
+            standards[l] = standard_of(m_, nullptr, p.library, true, target->info(), l);
+            if (!standards[l] && chosen != r_.tool_standards.end()) standards[l] = chosen->second[l];
+        }
     } else if (!building_tools && settings_.configuration < r_.standards.size()) {
         auto const& chosen = r_.standards[settings_.configuration];
         if (auto it = chosen.find(os); it != chosen.end()) standards = it->second;

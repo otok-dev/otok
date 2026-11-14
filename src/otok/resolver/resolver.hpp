@@ -96,6 +96,10 @@ struct resolution
     // The C and C++ standards of each target (otok-toml.md 5.1), parallel to `configurations`: target name → for each language
     // the project's, or else the lowest every recipe of the target allows in all its graphs; none: neither, each recipe chooses.
     std::vector<std::map<std::string, language_standards, std::less<>>> standards;
+    // The standards of the tool packages without one of their own in [tool-deps] (otok-toml.md 5.1, docs/PLAN.md decision
+    // 116), by id: one for the tool packages linked together, the highest one of them is given, else the lowest every
+    // recipe of them allows; none: neither, each recipe chooses.
+    std::map<std::string, language_standards, std::less<>> tool_standards;
     bool several_targets = false;             // packages are named `<library>@<target>`
     // the systems resolved, sorted (otok-lock.md 2): the graphs of an environment of another system are not here
     std::vector<std::string> systems;
