@@ -154,14 +154,43 @@ job_broker::lease::~lease()
 
 std::int64_t job_broker::lease::hold(std::int64_t most)
 {
-    std::lock_guard lock{broker_.m_};
+    // at least half the jobs with the task's own, or all it may run when fewer (docs/PLAN.md decision 123): a tool
+    // that started with what was free at the moment kept it to its end, one job while the others ended
+    std::int64_t const least = std::clamp<std::int64_t>((broker_.jobs_ + 1) / 2 - 1, 0, std::max<std::int64_t>(most, 0));
+    std::function<void(bool, std::string const&)> told;
+    std::unique_lock lock{broker_.m_};
+    auto const can_start = [&](std::int64_t lent) {
+        return broker_.free_ >= least + lent && !broker_.wanted_before_locked(priority_);
+    };
+    if (least > 0 && !can_start(0)) {
+        // the task's job goes to others meanwhile; nothing is kept for it, so the jobs that end go on to other tasks
+        running_task* const t = current_task && current_task->broker == &broker_ && current_task->holding ? current_task : nullptr;
+        std::int64_t lent = 0;
+        if (t) {
+            ++broker_.free_;
+            t->holding = false;
+            lent = 1;
+        }
+        lock.unlock();
+        broker_.changed_.notify_all();
+        if (t && t->notice) t->notice(true, {});
+        lock.lock();
+        broker_.changed_.wait(lock, [&] { return can_start(lent); });
+        if (t) {
+            --broker_.free_;
+            t->holding = true;
+            told = t->notice;
+        }
+    }
     std::int64_t n = 0;
-    while (n < most && broker_.free_ > 0 && !broker_.wanted_before_locked(priority_)) {
+    while (n < most && broker_.free_ > 0 && (n < least || !broker_.wanted_before_locked(priority_))) {
         --broker_.free_;
         ++n;
     }
     given += n;
     held += n;
+    lock.unlock();
+    if (told) told(false, {});   // outside the lock: the display asks for in_use()
     return n;
 }
 

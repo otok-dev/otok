@@ -289,7 +289,9 @@ a make before 4.4 takes it from its parent: the jobserver's fifo as descriptors 
 `-j<n> --jobserver-auth=3,4` (make 4.2 and 4.3) or `-j --jobserver-fds=3,4` (before 4.2, such as the make 3.81 of
 macOS); one that `cmake --build` runs does not, since CMake need not pass descriptors on. The jobserver is the slice's own, which otok fills while all its tokens are in use. Any
 other tool runs without `MAKEFLAGS`, and `make` gets `-j <n>`, `cmake --build` `--parallel <n>`: the jobs the slice
-may have when the command starts, at most `slice.jobs`, which it holds until the command ends. `otok.cmake` checks the tool of its generator (`Ninja`:
+may have when the command starts, at most `slice.jobs`, but at least half of `jobs` (5.8 of `DESIGN.md`) with
+the slice's own, or `slice.jobs` when that is fewer: the command waits until as many are free (docs/PLAN.md decision 123),
+and holds them until it ends. `otok.cmake` checks the tool of its generator (`Ninja`:
 ninja, `Unix Makefiles`: make); other generators always get `--parallel`. `jobs` of `otok.make`
 forces `-j <jobs>` without `MAKEFLAGS`. `otok.run` passes the environment as it is.
 `cmake --build` and `cmake --install` get `--config` with the build type, for multi-configuration
@@ -361,8 +363,8 @@ has no jobserver, so its compiler command in `user-config.jam` is otok's launche
 `otok jobserver-exec --slot <slice.build>/otok-job.lock --auth <jobserver> -- <compiler>`: it runs the
 compiler once it holds the slot of the slice (the slice's own token: each slice always runs one) or a
 token of the slice's jobserver, so every slice may start `jobs` compilers and still no more than `jobs` run on
-the machine (not for `msvc`, whose `msvc.jam` looks for `link.exe` beside the compiler's command: there `-j` is the
-jobs the slice may hold when b2 starts); `~/user-config.jam` and `site-config.jam` are not read; the target properties are
+the machine (for `msvc` the command stays `cl.exe`, by which `msvc.jam` finds `vcvarsall.bat`, and the launcher
+and the compiler are its `<compiler>`, each word quoted, docs/PLAN.md decision 124); `~/user-config.jam` and `site-config.jam` are not read; the target properties are
 what the target knows of the slice (`target-os=iphone`, `architecture=arm`, `address-model=64`,
 `abi=aapcs`, `binary-format=mach-o` for an iOS slice; `target-os=android`, `architecture=arm`, `address-model=64`,
 `abi=aapcs`, `binary-format=elf` for `android-arm64-v8a`; for `linux` and `windows/msvc` slices, which `b2` detects

@@ -58,7 +58,9 @@ public:
         jobserver& server() noexcept { return server_; }
 
         // Jobs for a tool without the jobserver, which runs a fixed number: up to `most` besides its own, as many as
-        // nothing before it wants; give them back with put_back().
+        // nothing before it wants, but at least half the jobs with its own (or `most`): until as many are free, and
+        // nothing before it wants one, the task's job goes to others and it waits, keeping none for itself
+        // (docs/PLAN.md decision 123). Give them back with put_back().
         std::int64_t hold(std::int64_t most);
         void put_back(std::int64_t held);
 

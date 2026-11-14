@@ -368,6 +368,49 @@ TEST(job_broker, gives_the_tokens_of_slices_after_to_the_one_before)
     EXPECT_EQ(broker.free_jobs(), 2);
 }
 
+// A tool without the jobserver starts with at least half the jobs with the task's own (docs/PLAN.md decision 123):
+// until then the task's job goes to others, and the jobs that end are not kept for it.
+TEST(job_broker, a_tool_without_the_jobserver_waits_for_half_the_jobs)
+{
+    test::temp_dir dir;
+    job_broker broker{4, dir.path(), false};
+    std::vector<executor_task> tasks{{{}, [&](std::size_t) -> result<void> {
+        auto made = broker.attach(current_priority());
+        if (!made) return std::unexpected{made.error()};
+        auto& slice = **made;
+        // the other three jobs run tasks after it
+        for (int i = 0; i < 3; ++i) EXPECT_TRUE(broker.take({0, 100}, 0ms));
+        std::vector<bool> waits;
+        on_job_wait([&](bool w, std::string const&) { waits.push_back(w); });
+        std::thread others{[&] {
+            std::this_thread::sleep_for(100ms);
+            EXPECT_EQ(broker.free_jobs(), 1);    // the task's job, lent
+            EXPECT_TRUE(broker.take({0, 101}, 0ms));  // and taken by a task after it: nothing is kept for it
+            broker.give();
+            std::this_thread::sleep_for(100ms);
+            EXPECT_EQ(broker.free_jobs(), 1);    // one job is not enough
+            broker.give();
+        }};
+        auto const started = std::chrono::steady_clock::now();
+        std::int64_t const held = slice.hold(3);
+        EXPECT_GE(std::chrono::steady_clock::now() - started, 190ms);
+        others.join();
+        EXPECT_EQ(held, 1);  // with its own: two of four
+        EXPECT_EQ(broker.free_jobs(), 0);
+        EXPECT_EQ(waits, (std::vector<bool>{true, false}));
+        broker.give();
+        broker.give();
+        slice.put_back(held);
+        // jobs free enough: no wait, and as many as nothing before it wants
+        EXPECT_EQ(slice.hold(3), 3);
+        slice.put_back(3);
+        return {};
+    }}};
+    auto const errors = run_tasks(tasks, broker);
+    EXPECT_TRUE(errors.empty()) << (errors.empty() ? "" : errors.front().message);
+    EXPECT_EQ(broker.free_jobs(), 4);
+}
+
 TEST(job_broker, a_command_without_the_jobserver_wants_nothing)
 {
     test::temp_dir dir;

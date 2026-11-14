@@ -10,11 +10,13 @@
 // Names chosen by users and publishers (docs/formats/README.md 2) and hash spellings.
 namespace otok {
 
+using namespace std::string_view_literals;
+
 // `openssl`, `libssh2`, `zxing-cpp`: [a-z0-9][a-z0-9_-]{0,63}.
 bool is_library_name(std::string_view s) noexcept;
 
 // The library name reserved for `deps.tools` in build.lua.
-inline constexpr std::string_view reserved_library_name = "tools";
+inline constexpr std::string_view reserved_library_name = "tools"sv;
 
 // A GitHub login, lowercase: [a-z0-9]([a-z0-9-]{0,38}), no "--", no trailing "-".
 bool is_publisher_name(std::string_view s) noexcept;

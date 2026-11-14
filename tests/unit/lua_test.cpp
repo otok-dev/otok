@@ -365,6 +365,31 @@ end
         std::string::npos)
         << read_file(base / "build" / "otok-user-config.jam").value_or("?");
     EXPECT_EQ(specs[0].argv[3], "-j4");
+
+    // msvc: the command stays cl.exe, which msvc.jam finds vcvarsall.bat by; the launcher goes before <compiler>
+    specs.clear();
+    slice.b2_toolset = "msvc";
+    slice.b2_version = "14.5";
+    slice.toolchain.cxx = "C:/VS/bin/cl.exe";
+    slice.toolchain.env["MAKEFLAGS"] = "--jobserver-auth=otok-jobserver-1";
+    out = run("function build(slice)\n    otok.b2{ b2 = 'b2' }\n    return finish(slice)\nend\n");
+    ASSERT_TRUE(out.has_value()) << out.error().message;
+    auto const jam_escaped = [](std::string const& s) {
+        std::string out;
+        for (char const c : s) out += c == '\\' || c == '"' ? std::string{'\\', c} : std::string(1, c);
+        return out;
+    };
+    std::string const msvc_config = read_file(base / "build" / "otok-user-config.jam").value_or("?");
+    EXPECT_NE(msvc_config.find("using msvc : 14.5 : \"C:/VS/bin/cl.exe\"\n"), std::string::npos) << msvc_config;
+    EXPECT_NE(msvc_config.find(" <compiler>\"\\\"/opt/otok/bin/otok\\\"\" <compiler>\"\\\"jobserver-exec\\\"\" <compiler>\"\\\"--slot\\\"\" <compiler>\"\\\""
+                  + jam_escaped(path("build/otok-job.lock")) + "\\\"\" <compiler>\"\\\"--auth\\\"\" <compiler>\"\\\"otok-jobserver-1\\\"\" <compiler>\"\\\"--\\\"\""
+                  " <compiler>\"\\\"C:/VS/bin/cl.exe\\\"\""),
+        std::string::npos)
+        << msvc_config;
+    EXPECT_EQ(specs[0].argv[3], "-j4");
+    slice.b2_toolset = "darwin";
+    slice.toolchain.cxx = "/usr/bin/clang++";
+    slice.toolchain.env["MAKEFLAGS"] = "--jobserver-auth=fifo:/tmp/x";
     slice.launcher.clear();
 
     // gcc gets the archiver; debug and dynamic; a target without b2
