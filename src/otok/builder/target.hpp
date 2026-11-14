@@ -35,18 +35,21 @@ struct slice_spec
     // The environment it is built in (common 4.2): the machine's system and the compiler, "linux/clang-cl"; empty: none
     // (a target without environments)
     build_environment environment{};
+    // The one slice of a package of products of headers only (recipe-toml.md 11.3): no platform, architecture or compiler;
+    // the builder gives its result as every slice of the package
+    bool headers = false;
 };
 
-// The slice name of common 4: `<platform>-<arch>`.
+// The slice name of common 4: `<platform>-<arch>`; `headers` for the headers slice.
 inline std::string slice_name(slice_spec const& s)
 {
-    return s.platform + "-" + s.arch;
+    return s.headers ? std::string{"headers"} : s.platform + "-" + s.arch;
 }
 
-// The slice for messages: `native-x86_64`, `native-x86_64 (debug)` (docs/PLAN.md decision 31).
+// The slice for messages: `native-x86_64`, `native-x86_64 (debug)` (docs/PLAN.md decision 31), `headers`.
 inline std::string slice_label(slice_spec const& s)
 {
-    return slice_name(s) + (s.configuration == "debug" ? " (debug)" : "");
+    return slice_name(s) + (s.configuration == "debug" && !s.headers ? " (debug)" : "");
 }
 
 // A slice's toolchain as the target prepares it (build-lua-api.md 3, 3.1, 5).

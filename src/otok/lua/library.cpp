@@ -43,6 +43,12 @@ script_env& env_of(lua_State* L)
     return *static_cast<script_env*>(lua_touserdata(L, lua_upvalueindex(1)));
 }
 
+// The helpers that compile refuse the headers slice, which has no compiler (build-lua-api.md 3.5).
+void refuse_headers_slice(lua_State* L, char const* fn)
+{
+    if (env_of(L).slice.headers) raise(L, std::string{fn} + ": the headers slice has no compiler (build-lua-api.md 3.5)");
+}
+
 // A library function: C++ exceptions (std::filesystem, std::bad_alloc) become Lua errors, which Lua
 // itself would turn into an anonymous failure.
 template <int (*F)(lua_State*)>
@@ -417,6 +423,7 @@ void put_driver_flags(script_env const& e, process_options& o, bool once)
 
 int otok_make(lua_State* L)
 {
+    refuse_headers_slice(L, "otok.make");
     luaL_checktype(L, 1, LUA_TTABLE);
     check_keys(L, 1, "otok.make", {"args", "jobs", "cwd", "env"}, true);
     script_env const& e = env_of(L);
@@ -437,6 +444,7 @@ int otok_make(lua_State* L)
 
 int otok_cmake(lua_State* L)
 {
+    refuse_headers_slice(L, "otok.cmake");
     luaL_checktype(L, 1, LUA_TTABLE);
     std::string const fn = "otok.cmake";
     check_keys(L, 1, fn, {"source", "build", "defines", "args", "generator", "targets", "install", "cwd", "env"}, false);
@@ -511,6 +519,7 @@ int otok_cmake(lua_State* L)
 
 int otok_autotools(lua_State* L)
 {
+    refuse_headers_slice(L, "otok.autotools");
     luaL_checktype(L, 1, LUA_TTABLE);
     std::string const fn = "otok.autotools";
     check_keys(L, 1, fn, {"configure", "args", "autoreconf", "targets", "cwd", "env"}, false);
@@ -601,6 +610,7 @@ std::string jam_string(std::string_view s)
 
 int otok_b2(lua_State* L)
 {
+    refuse_headers_slice(L, "otok.b2");
     luaL_checktype(L, 1, LUA_TTABLE);
     std::string const fn = "otok.b2";
     check_keys(L, 1, fn, {"b2", "args", "targets", "cwd", "env"}, false);
@@ -679,6 +689,7 @@ int otok_b2(lua_State* L)
 
 int otok_meson(lua_State* L)
 {
+    refuse_headers_slice(L, "otok.meson");
     luaL_checktype(L, 1, LUA_TTABLE);
     std::string const fn = "otok.meson";
     check_keys(L, 1, fn, {"source", "build", "options", "args", "cwd", "env"}, false);
@@ -790,6 +801,7 @@ int otok_meson_cross_file(lua_State* L)
 
 int otok_cmake_toolchain(lua_State* L)
 {
+    refuse_headers_slice(L, "otok.cmake_toolchain");
     script_env const& e = env_of(L);
     if (e.slice.cmake_toolchain.empty()) raise(L, "otok.cmake_toolchain: the target of this slice generates no CMake toolchain file");
     lua_pushstring(L, script_path(e.slice.cmake_toolchain).c_str());

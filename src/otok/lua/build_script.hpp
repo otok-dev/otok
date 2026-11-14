@@ -65,6 +65,9 @@ struct slice_context
     // meson's c_std and cpp_std for them (toolchain_profile::meson_standard): "c11", "c++latest"; empty: not set
     std::string meson_c_std, meson_cpp_std;
     bool is_tool = false;        // build_tools
+    // the headers slice (build-lua-api.md 3.5): no platform, architecture, configuration, linkage, standards or compiler,
+    // which are nil in `slice`; the helpers that compile refuse it
+    bool headers = false;
 
     std::filesystem::path source, build, prefix;   // writable
     std::filesystem::path recipe;                   // read-only

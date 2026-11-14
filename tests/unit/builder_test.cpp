@@ -824,6 +824,88 @@ end
     EXPECT_NE(err.str().find("the header 'b.h' differs between the configurations"), std::string::npos) << err.str();
 }
 
+// A package of products of headers only is built from one slice, given as every slice of the package (recipe-toml.md
+// 11.3): no platform, architecture, configuration, compiler or build_tools there, and a key without them.
+TEST_F(builder_test, builds_one_slice_for_headers)
+{
+    auto const write_h = [&](std::string const& recipe_extra, std::string const& script) {
+        project.write("recipes/h/recipe.toml",
+            "[recipe]\napi = 1\nlibrary = \"h\"\nname = \"h\"\nversion = \"1.0\"\nrevision = 1\nlicense = \"MIT\"\n"
+            "license-files = [\"LICENSE\"]\ndescription = \"Test.\"\nlinkage = [\"static\", \"dynamic\"]\n" + recipe_extra
+            + "[source]\nurl = \"" + urls["gen"] + "\"\nsha256 = \"" + hashes["gen"] + "\"\n"
+            + "[platforms]\nsupported = [\"native\"]\nbuild-on = [\"*/cc\"]\n"
+            + "[options.compiled]\ntype = \"bool\"\ndefault = false\ndoc = \"d\"\n"
+            + "[[product]]\nname = \"H\"\nlibraries = []\n"
+            + "[[product]]\nname = \"HLib\"\nlibraries = [\"h\"]\nheaders = false\ndepends = [\"H\"]\nwhen = { option = \"compiled\" }\n");
+        project.write("recipes/h/build.lua", script);
+    };
+    std::string const headers_script = R"(function build_tools(slice)
+    error('build_tools runs before a headers slice')
+end
+function build(slice, options, deps)
+    assert(slice.headers and slice.name == 'headers' and slice.os == 'native')
+    assert(slice.platform == nil and slice.arch == nil and slice.configuration == nil and slice.linkage == nil)
+    assert(slice.triple == nil and slice.compiler == nil and slice.tools == nil and slice.toolchain.cc == nil)
+    assert(slice.toolchain.env.PATH ~= nil and slice.toolchain.env.CFLAGS == nil)
+    local ok, message = pcall(otok.cmake, {})
+    assert(not ok and message:find('otok.cmake: the headers slice has no compiler', 1, true), message)
+    otok.write(slice.prefix .. '/include/h/h.h', 'int h;\n')
+    return { libraries = {}, headers = slice.prefix .. '/include' }
+end
+)";
+    write_h("", headers_script);
+    // a compiled dependent reads its headers in each of its slices
+    write_recipe("a", "1.0", build_lua("a", "    assert(otok.read(deps.h.include .. '/h/h.h') == 'int h;\\n')\n"),
+        "[deps.h]\nversion = \">= 1\"\ndefault-recipe = \"p/h\"\n");
+    project.write("otok.toml", "[otok]\nformat = 1\n[native]\nplatforms = [\"native\"]\nconfigurations = [\"debug\", \"release\"]\n"
+                               "[deps.a]\nrecipe = { path = \"recipes/a\" }\n[deps.h]\nrecipe = { path = \"recipes/h\" }\n");
+    ASSERT_EQ(run({"install"}), 0) << err.str();
+    std::string const e = err.str();
+    EXPECT_NE(e.find("building h 1.0 for headers\n"), std::string::npos) << e;
+    EXPECT_EQ(e.find("building h 1.0 for native"), std::string::npos) << e;
+    // one slice of one: not counted
+    std::size_t const built_h = e.find("built h 1.0 for headers (");
+    ASSERT_NE(built_h, std::string::npos) << e;
+    EXPECT_EQ(e.substr(built_h, e.find('\n', built_h) - built_h).find(" of "), std::string::npos) << e;
+    EXPECT_NE(out.str().find("slices: 3 (0 from the cache)\n"), std::string::npos) << out.str();  // a's two and h's one
+    ASSERT_EQ(entries(slices_of("h", "1.0")), 1u);
+    std::string key;
+    for (auto const& entry : std::filesystem::directory_iterator{slices_of("h", "1.0")}) {
+        if (entry.is_directory()) key = read_file(entry.path() / "key.txt").value_or("");
+    }
+    EXPECT_NE(key.find("slice = headers\n"), std::string::npos) << key;
+    EXPECT_NE(key.find("os = native\n"), std::string::npos) << key;
+    for (std::string const absent : {"configuration", "linkage", "environment", "toolchain.fake", "deployment", "build-tools"}) {
+        EXPECT_EQ(key.find("\n" + absent + " = "), std::string::npos) << absent << "\n" << key;
+    }
+    EXPECT_EQ(read_file(project.path() / "Otok" / "h" / "include" / "h" / "h.h").value_or("?"), "int h;\n");
+
+    // shared by other configurations and linkages
+    project.write("otok.toml", "[otok]\nformat = 1\n[native]\nplatforms = [\"native\"]\nlinkage = \"dynamic\"\n"
+                               "[deps.h]\nrecipe = { path = \"recipes/h\" }\n");
+    ASSERT_EQ(run({"update"}), 0) << err.str();
+    EXPECT_NE(err.str().find("h 1.0 headers: cached"), std::string::npos) << err.str();
+    EXPECT_EQ(entries(slices_of("h", "1.0")), 1u);
+
+    // `headers-slice = false`: every slice
+    write_h("headers-slice = false\n", R"(function build(slice)
+    assert(not slice.headers and slice.arch ~= nil)
+    otok.write(slice.prefix .. '/include/h/h.h', 'int h;\n')
+    return { libraries = {}, headers = slice.prefix .. '/include' }
+end
+)");
+    ASSERT_EQ(run({"update"}), 0) << err.str();
+    EXPECT_NE(err.str().find("building h 1.0 for native-" + machine_arch() + "\n"), std::string::npos) << err.str();
+
+    // a product holding libraries: every slice; with `headers-slice = true`, an error
+    project.write("otok.toml", "[otok]\nformat = 1\n[native]\nplatforms = [\"native\"]\n"
+                               "[deps.h]\nrecipe = { path = \"recipes/h\" }\noptions = { compiled = true }\n");
+    write_h("headers-slice = true\n", headers_script);
+    EXPECT_EQ(run({"update"}), 1);
+    EXPECT_NE(err.str().find("h: 'headers-slice' in its recipe is true, but its product 'HLib' holds libraries on 'native' (recipe-toml.md 11.3)"),
+        std::string::npos) << err.str();
+}
+
 // The project's C and C++ standards (otok-toml.md 5.1): in the slice, after otok's flags, and in the slice key.
 TEST_F(builder_test, passes_the_standards)
 {

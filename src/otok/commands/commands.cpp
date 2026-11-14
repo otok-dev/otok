@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <memory>
@@ -975,7 +976,9 @@ bool build_project(parsed_command const& cmd, project& p, lock_file const& lock,
     }
     std::size_t slices = 0, cached = 0;
     for (built_package const& bp : *built) {
+        std::set<std::filesystem::path> entries;  // the headers slice is every slice of its package (recipe-toml.md 11.3)
         for (built_slice const& s : bp.slices) {
+            if (!entries.insert(s.entry).second) continue;
             ++slices;
             if (s.cached) ++cached;
         }

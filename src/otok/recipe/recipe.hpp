@@ -210,6 +210,8 @@ struct recipe
     std::vector<std::string> keywords;
     std::vector<std::string> linkage{"static"};  // what the build can produce (recipe-toml.md 3)
     standard_constraints standards;  // the C and C++ standards it builds with (recipe-toml.md 3)
+    // `headers-slice` (recipe-toml.md 11.3): one slice for a package of products of headers only; none: as the products say
+    std::optional<bool> headers_slice;
 
     recipe_source source;
     std::vector<recipe_resource> resources;

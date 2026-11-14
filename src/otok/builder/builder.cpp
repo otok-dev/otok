@@ -679,6 +679,8 @@ struct slice_task
     build_entry entry = build_entry::build;
     std::string id;
     std::string tools;                      // the id of the recipe's build_tools entry; empty: none
+    // the headers slice (recipe-toml.md 11.3): the ids and specs of the slices of the package it is given as
+    std::vector<std::pair<std::string, slice_spec>> aliases{};
 };
 
 // The environment of a slice for `when = { environment }` (recipe-toml.md 9.1); null for a target without environments.
@@ -687,11 +689,47 @@ build_environment const* environment_of(slice_spec const& spec) noexcept
     return spec.environment.compiler.empty() ? nullptr : &spec.environment;
 }
 
-// "a/native-x86_64", "a/native-x86_64/debug", "tool:gen/native-x86_64", "a/native-x86_64/build_tools".
+// "a/native-x86_64", "a/native-x86_64/debug", "tool:gen/native-x86_64", "a/native-x86_64/build_tools", "a/headers".
 std::string slice_id(std::string const& library, bool tool, slice_spec const& spec, build_entry entry = build_entry::build)
 {
-    return package_key(library, tool) + "/" + slice_name(spec) + (spec.configuration == "debug" ? "/debug" : "")
+    return package_key(library, tool) + "/" + slice_name(spec) + (spec.configuration == "debug" && !spec.headers ? "/debug" : "")
         + (entry == build_entry::build_tools ? "/build_tools" : "");
+}
+
+// The id of the headers slice of a package (recipe-toml.md 11.3).
+std::string headers_slice_id(std::string const& library)
+{
+    return package_key(library, false) + "/headers";
+}
+
+// Whether a target package is built from one headers slice (recipe-toml.md 11.3): the products whose `when` holds are all
+// of headers only, unless the recipe says `headers-slice = false`; with `headers-slice = true`, a product holding libraries
+// is an error.
+result<bool> builds_headers_slice(resolved_package const& p, std::size_t configuration)
+{
+    recipe const& rec = *p.chosen.recipe;
+    if (rec.headers_slice == false) return false;
+    bool any = false;
+    for (product const& prod : rec.products) {
+        if (prod.when && !condition_holds(*prod.when, p.configurations[configuration].options, p.target, "")) continue;
+        any = true;
+        if (prod.headers_only()) continue;
+        if (rec.headers_slice == true) {
+            return fail("'headers-slice' in its recipe is true, but its product '" + prod.name + "' holds libraries on '" + p.target
+                + "' (recipe-toml.md 11.3)");
+        }
+        return false;
+    }
+    return any;
+}
+
+// The environment of processes in the headers slice (build-lua-api.md 3.5): the target's, without its compilers and flags.
+env_vars headers_slice_env(env_vars env)
+{
+    for (char const* name : {"CC", "CXX", "AR", "RANLIB", "STRIP", "NM", "LD", "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS"}) {
+        remove_variable(env, name);
+    }
+    return env;
 }
 
 }
@@ -853,6 +891,33 @@ std::expected<std::vector<built_package>, std::vector<error>> builder::build_all
         for (std::string const& d : p->tool_dependencies) {
             for (std::string const& id : slices_of[package_key(d, true)]) tool_after.push_back(index.at(id));
         }
+        // a package of products of headers only: one slice, given as every slice of the package; no build_tools
+        // (recipe-toml.md 11.3)
+        auto const headers = tool || specs.empty() ? result<bool>{false} : builds_headers_slice(*p, c);
+        if (!headers) return failed(p->library + ": " + headers.error().message);
+        if (*headers) {
+            slice_spec one = specs.front();  // its target and environment, for the environment of processes
+            one.headers = true;
+            one.configuration = "release";
+            std::vector<std::size_t> after = tool_after;
+            for (std::string const& d : p->dependencies) {
+                resolved_package const* dp = r_.find(d, p->target);
+                if (!dp) continue;
+                if (auto it = index.find(headers_slice_id(dp->id)); it != index.end()) after.push_back(it->second);
+            }
+            std::string const id = headers_slice_id(p->id);
+            headers_packages_.insert(package_key(p->id, false));
+            slice_task task{p, false, one, build_entry::build, id, {}};
+            std::size_t const at = tasks.size();
+            add(std::move(task), std::move(after));
+            for (slice_spec const& spec : specs) {
+                std::string const alias = slice_id(p->id, false, spec);
+                index.emplace(alias, at);
+                slices_of[package_key(p->id, false)].push_back(alias);
+                tasks[at].aliases.emplace_back(alias, spec);
+            }
+            continue;
+        }
         // build_tools first, once, on the tool slice (build-lua-api.md 2); also for a tool package, whose build runs in the
         // tool slice too (boost for MSVC builds b2 there)
         std::string tools;
@@ -907,7 +972,9 @@ std::expected<std::vector<built_package>, std::vector<error>> builder::build_all
         own_broker_ = std::make_unique<job_broker>(settings_.jobs, cache_.tmp());
         broker_ = own_broker_.get();
     }
-    for (auto const& [package, ids] : slices_of) slices_done_.emplace(package, std::pair<std::size_t, std::size_t>{0, ids.size()});
+    for (auto const& [package, ids] : slices_of) {
+        slices_done_.emplace(package, std::pair<std::size_t, std::size_t>{0, headers_packages_.contains(package) ? 1 : ids.size()});
+    }
     for (std::size_t i = 0; i < tasks.size(); ++i) {
         graph[i].run = [this, &t = tasks[i]](std::size_t) -> result<void> {
             built_slice const* tools = nullptr;
@@ -918,6 +985,12 @@ std::expected<std::vector<built_package>, std::vector<error>> builder::build_all
             auto s = build_slice(*t.p, t.tool, t.spec, t.entry, tools);
             if (!s) return std::unexpected{s.error()};
             std::lock_guard lock{mutex_};
+            // the headers slice is every slice of its package, under their specs (recipe-toml.md 11.3)
+            for (auto const& [alias, spec] : t.aliases) {
+                built_slice as = *s;
+                as.spec = spec;
+                built_.insert_or_assign(alias, std::move(as));
+            }
             built_.insert_or_assign(t.id, std::move(*s));
             return {};
         };
@@ -1297,20 +1370,28 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         return it == built_.end() ? nullptr : &it->second;
     };
 
-    // The key (cache-key.md 2, 3).
+    // The key (cache-key.md 2, 3); of the headers slice, without what tells the slices of a target apart (cache-key.md 3.2).
+    bool const headers = spec.headers;
+    // what conditions see of the slice (recipe-toml.md 9.1): in the headers slice no platform, whose tests fail, and no
+    // architecture or environment, whose tests hold
+    std::string const platform = headers ? std::string{} : spec.platform;
+    std::string const arch = headers ? std::string{} : spec.arch;
+    build_environment const* const environment = headers ? nullptr : environment_of(spec);
     std::map<std::string, std::string> key;
     key["key-format"] = key_format;
     key["toolchain-profile"] = toolchain_profile_version;
     key["os"] = os;
     key["slice"] = slice_name(spec);
-    if (!spec.environment.compiler.empty()) key["environment"] = spec.environment.text();
-    if (host_libc() == "musl") key["host-libc"] = "musl";  // absent elsewhere: the keys of other machines unchanged (decision 105)
-    key["linkage"] = spec.linkage;
+    if (!headers) {
+        if (!spec.environment.compiler.empty()) key["environment"] = spec.environment.text();
+        if (host_libc() == "musl") key["host-libc"] = "musl";  // absent elsewhere: the keys of other machines unchanged (decision 105)
+        key["linkage"] = spec.linkage;
+        key["configuration"] = spec.configuration;
+        if (!spec.deployment.empty()) key["deployment"] = spec.deployment;
+    }
     key["library"] = p.library;
     key["version"] = rec.version->str();
     key["revision"] = std::to_string(rec.revision);
-    key["configuration"] = spec.configuration;
-    if (!spec.deployment.empty()) key["deployment"] = spec.deployment;
     auto recipe_sha256 = recipe_hash(p, tool);
     if (!recipe_sha256) return fail(label + ": " + recipe_sha256.error().message);
     key["recipe-sha256"] = *recipe_sha256;
@@ -1326,7 +1407,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
     }
     for (locked_resource const& res : locked->resources) {
         auto const declared = std::ranges::find(rec.resources, res.name, &recipe_resource::name);
-        if (declared != rec.resources.end() && declared->when && !condition_holds(*declared->when, options, "", "", spec.arch, environment_of(spec))) continue;
+        if (declared != rec.resources.end() && declared->when && !condition_holds(*declared->when, options, "", "", arch, environment)) continue;
         key["resource." + res.name] = dev && inputs.dev->resources.contains(res.name) ? "dev" : source_pin(res.location);
     }
     // file options (recipe-toml.md 8.3): their contents in the key, not their paths; a copy for the build
@@ -1350,13 +1431,15 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         option_files.emplace(name, file);
     }
     for (auto const& [name, value] : option_keys) key["option." + name] = value;
-    for (auto const& [name, value] : profile->identity) key["toolchain." + name] = value;
+    if (!headers) {
+        for (auto const& [name, value] : profile->identity) key["toolchain." + name] = value;
+    }
     // whether this slice needs a toolchain: one the check found for the package may be for some architectures or
     // environments only (recipe-toml.md 9.1)
     auto const slice_needs = [&](std::string const& name) {
         auto const req = std::ranges::find(rec.toolchains, name, &toolchain_requirement::name);
         return req == rec.toolchains.end() || !req->when
-            || condition_holds(*req->when, options, os, "", spec.arch, environment_of(spec));
+            || condition_holds(*req->when, options, os, "", arch, environment);
     };
     // the recipe's toolchains as check_toolchains found them (recipe-toml.md 13)
     chosen_toolchains const* toolchains = nullptr;
@@ -1368,7 +1451,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
             if (slice_needs(name)) key["toolchains." + name] = found.version;
         }
     }
-    compile_flags const project = building_tools ? compile_flags{} : project_flags(p.library, tool, os);
+    compile_flags const project = building_tools || headers ? compile_flags{} : project_flags(p.library, tool, os);
     for (auto const& [name, flags] : {std::pair{"cflags", &project.cflags}, std::pair{"cxxflags", &project.cxxflags},
              std::pair{"ldflags", &project.ldflags}}) {
         if (!flags->empty()) key[std::string{"flags."} + name] = flags_text(*flags);
@@ -1383,7 +1466,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
             standards[l] = standard_of(m_, nullptr, p.library, true, target->info(), l);
             if (!standards[l] && chosen != r_.tool_standards.end()) standards[l] = chosen->second[l];
         }
-    } else if (!building_tools && settings_.configuration < r_.standards.size()) {
+    } else if (!building_tools && !headers && settings_.configuration < r_.standards.size()) {
         auto const& chosen = r_.standards[settings_.configuration];
         if (auto it = chosen.find(os); it != chosen.end()) standards = it->second;
     }
@@ -1394,9 +1477,11 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
     slice_context slice;
     for (recipe_dependency const& d : rec.dependencies) {
         if (building_tools) break;  // the tool slice has only the tool dependencies
-        if (d.when && !condition_holds(*d.when, options, os, spec.platform)) continue;
+        if (d.when && !condition_holds(*d.when, options, os, platform)) continue;
         // a tool package names its dependencies by id (otok-lock.md 5.7)
         resolved_package const* dp = tool ? tool_dependency_of(p, d.library) : r_.find(d.library, p.target);
+        // the headers slice has those built from a headers slice too (build-lua-api.md 3.5)
+        if (headers && (!dp || !headers_packages_.contains(package_key(dp->id, false)))) continue;
         built_slice const* dep = find_built(dp, tool);
         if (!dep || !dp) return fail(label + ": its dependency '" + d.library + "' was not built for " + slice_label(spec));
         key["dep." + d.library] = dep->key;
@@ -1407,7 +1492,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
     std::map<fs::path, fs::path> interpreted;
     for (std::size_t i = 0; i < rec.tool_dependencies.size(); ++i) {
         recipe_dependency const& d = rec.tool_dependencies[i];
-        if (d.when && !condition_holds(*d.when, options, os, spec.platform, spec.arch, environment_of(spec))) continue;
+        if (d.when && !condition_holds(*d.when, options, os, platform, arch, environment)) continue;
         if (i >= p.tool_edges.size() || p.tool_edges[i].empty()) continue;  // inactive in every configuration resolved
         resolved_package const* dp = r_.find_tool(p.tool_edges[i]);
         built_slice const* dep = find_built(dp, true);
@@ -1621,7 +1706,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         } else if (auto ok = copy_tree(inputs.source, base / "source"); !ok) return failed("cannot copy the source: " + ok.error().message);
         std::map<std::string, fs::path> resources;
         for (recipe_resource const& res : rec.resources) {
-            if (res.when && !condition_holds(*res.when, options, "", "", spec.arch, environment_of(spec))) continue;
+            if (res.when && !condition_holds(*res.when, options, "", "", arch, environment)) continue;
             auto const r = inputs.resources.find(res.name);
             if (r == inputs.resources.end()) return failed("the resource '" + res.name + "' was not fetched");
             if (!res.dest) {
@@ -1696,9 +1781,10 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
 
         slice.name = slice_name(spec);
         slice.os = os;
+        slice.headers = headers;
         slice.platform = spec.platform;
         slice.arch = spec.arch;
-        if (!spec.environment.compiler.empty()) {
+        if (!spec.environment.compiler.empty() && !headers) {
             slice.environment = spec.environment.text();
             slice.host = std::string{host_machine()};
             slice.host_libc = std::string{host_libc()};
@@ -1728,7 +1814,8 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         if (!builds_drive_.empty() && slice.recipe == inputs.recipe_dir) slice.recipe = virtual_drives::to_virtual(inputs.recipe_dir);
         slice.resources = resources;
         for (recipe_variable const& v : rec.vars) {
-            for (std::string const& selector : {slice_name(spec), spec.platform, os, std::string{"default"}}) {
+            for (std::string const& selector : {slice_name(spec), platform, os, std::string{"default"}}) {
+                if (selector.empty()) continue;
                 if (auto it = v.values.find(selector); it != v.values.end()) {
                     slice.vars.emplace(v.name, it->second);
                     break;
@@ -1738,8 +1825,10 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         // the most a tool without the jobserver may run; the helpers give it what the slice may hold when it starts
         // (docs/PLAN.md decision 61)
         slice.jobs = std::max<std::int64_t>(1, settings_.jobs);
-        slice.toolchain = profile->toolchain;
-        if (!profile->prefix_map_flag.empty()) {
+        // the headers slice: the environment of processes only, without the compilers (build-lua-api.md 3.5)
+        if (headers) slice.toolchain.env = headers_slice_env(profile->toolchain.env);
+        else slice.toolchain = profile->toolchain;
+        if (!profile->prefix_map_flag.empty() && !headers) {
             std::string const map = profile->prefix_map_flag + path_to_utf8(base) + "=/otok";
             slice.toolchain.cflags.push_back(map);
             slice.toolchain.cxxflags.push_back(map);
@@ -1781,10 +1870,14 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
                 if (standards[l]) chosen += (chosen.empty() ? "" : ", ") + std::string{language_name(l)} + std::to_string(*standards[l]);
             }
             if (!chosen.empty()) say(id + "standards: " + chosen);
-            say(id + "compilers: " + slice.toolchain.cc + ", " + slice.toolchain.cxx);
-            say(id + "cflags: " + joined(slice.toolchain.cflags));
-            say(id + "cxxflags: " + joined(slice.toolchain.cxxflags));
-            say(id + "ldflags: " + joined(slice.toolchain.ldflags));
+            if (headers) {
+                say(id + "a headers slice: no compilers (recipe-toml.md 11.3)");
+            } else {
+                say(id + "compilers: " + slice.toolchain.cc + ", " + slice.toolchain.cxx);
+                say(id + "cflags: " + joined(slice.toolchain.cflags));
+                say(id + "cxxflags: " + joined(slice.toolchain.cxxflags));
+                say(id + "ldflags: " + joined(slice.toolchain.ldflags));
+            }
             say(id + "work directory: " + slashed(base));
             say(id + "slice key: " + hex);
             if (settings_.verbosity == 1) {
@@ -1845,26 +1938,29 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
             slice.toolchains.insert_or_assign(name, program);
             append_to_path(slice.toolchain.env, program.parent_path());
         }
-        slice.target_fields = profile->target_fields;
-        slice.target_tables = profile->target_tables;
-        if (!profile->cmake_toolchain.empty()) {
-            slice.cmake_toolchain = base / "toolchain.cmake";
-            write_if_changed(slice.cmake_toolchain, profile->cmake_toolchain + cmake_flags(slice.toolchain));
+        // nothing of the compilers in the headers slice (build-lua-api.md 3.5)
+        if (!headers) {
+            slice.target_fields = profile->target_fields;
+            slice.target_tables = profile->target_tables;
+            if (!profile->cmake_toolchain.empty()) {
+                slice.cmake_toolchain = base / "toolchain.cmake";
+                write_if_changed(slice.cmake_toolchain, profile->cmake_toolchain + cmake_flags(slice.toolchain));
+            }
+            slice.meson_file = base / "meson.ini";
+            auto const pkg_config = slice.toolchains.find("pkg-config");
+            write_if_changed(slice.meson_file,
+                meson_machine_file(slice.toolchain, profile->meson_host, pkg_config == slice.toolchains.end() ? "" : path_to_utf8(pkg_config->second),
+                    profile->meson_binaries));
+            slice.meson_cross = !profile->meson_host.empty();
+            if (auto const system = profile->meson_host.find("system"); system != profile->meson_host.end()) slice.meson_system = system->second;
+            slice.meson_options = profile->meson_options;
+            slice.autotools_host = profile->autotools_host;
+            slice.autotools_build = profile->autotools_build;
+            slice.b2_toolset = profile->b2_toolset;
+            slice.b2_version = profile->b2_version;
+            slice.b2_properties = profile->b2_properties;
+            slice.launcher = settings_.launcher;
         }
-        slice.meson_file = base / "meson.ini";
-        auto const pkg_config = slice.toolchains.find("pkg-config");
-        write_if_changed(slice.meson_file,
-            meson_machine_file(slice.toolchain, profile->meson_host, pkg_config == slice.toolchains.end() ? "" : path_to_utf8(pkg_config->second),
-                profile->meson_binaries));
-        slice.meson_cross = !profile->meson_host.empty();
-        if (auto const system = profile->meson_host.find("system"); system != profile->meson_host.end()) slice.meson_system = system->second;
-        slice.meson_options = profile->meson_options;
-        slice.autotools_host = profile->autotools_host;
-        slice.autotools_build = profile->autotools_build;
-        slice.b2_toolset = profile->b2_toolset;
-        slice.b2_version = profile->b2_version;
-        slice.b2_properties = profile->b2_properties;
-        slice.launcher = settings_.launcher;
         for (auto const& [name, value] : options) {
             option_schema const* o = rec.find_option(name);
             if (!o || o->type != option_type::file) {
@@ -1939,8 +2035,10 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         if (!built) return failed(built.error().message);
         show_stage("checks");
         for (std::string const& w : built->warnings) say("warning: " + label + " " + slice_label(spec) + ": " + w);
+        // the headers slice serves products of headers only (recipe-toml.md 11.3)
+        if (headers && !built->libraries.empty()) return failed("the headers slice returned libraries (build-lua-api.md 3.5)");
         // what the target makes of them before anything links against them: Apple's frameworks (otok-toml.md 4.10)
-        if (!building_tools) {
+        if (!building_tools && !headers) {
             if (auto ok = target->prepare_libraries(p.library, built->libraries, spec); !ok) return failed(ok.error().message);
         }
 
@@ -2009,7 +2107,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         // every library of the products that hold (recipe-toml.md 16): one missing would be missing in the consumer's link
         if (!building_tools) {
             for (product const& prod : rec.products) {
-                if (prod.when && !condition_holds(*prod.when, options, os, spec.platform)) continue;
+                if (prod.when && !condition_holds(*prod.when, options, os, platform)) continue;
                 for (std::string const& name : prod.libraries) {
                     if (!built->libraries.contains(name)) {
                         return failed("build returned no library '" + name + "', which the product '" + prod.name + "' holds");

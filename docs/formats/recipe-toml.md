@@ -116,6 +116,7 @@ The recipe directory is described in section 15.
 | `documentation` | URL | — | Upstream documentation, linked from the catalog. |
 | `keywords` | array of strings, ≤ 10, each `[a-z0-9-]{1,32}` | `[]` | For search. |
 | `linkage` | array of `"static"`, `"dynamic"` | `["static"]` | What the build can produce (`otok-toml.md` 5): `build.lua` reads the chosen one as `slice.linkage` (`build-lua-api.md` 3). A project asking for another fails to resolve. |
+| `headers-slice` | boolean | — (from the products) | Whether a package whose products are all of headers only is built from one slice of the target (11.3): `false` never, `true` always, a product holding libraries then an error. |
 | `c-standard`, `cxx-standard` | string | — (any) | The C and C++ standards the library builds with, as constraints of two-digit standard numbers (`">= 99"`, `">= 14, <= 20"`; common 3.2 in the `dotted` scheme), compared by year, so that `">= 99"` allows C11. A project asking for another (`otok-toml.md` 5.1) fails to resolve; without the project's, the lowest standard every recipe of the target allows is chosen. Without them, any standard is tried. Not for a recipe that delivers its source. |
 
 ### 3.1 `[tool]`
@@ -492,6 +493,21 @@ alternatives = "stacktrace"
 - Nothing prevents a consumer from linking two of them; the linker then reports the symbols defined twice, or takes
   one definition for every caller.
 
+### 11.3 One slice for headers
+
+The headers of a product of headers only are the same in every slice of a target (11.1, `otok-toml.md` 4.1). A package
+whose products, those whose `when` holds with its options, are all of headers only is therefore built from one slice of
+the target, `headers`, and not from one per platform, architecture and configuration: toml++ without its option
+`compiled`, Boost without compiled libraries. Its result serves every slice of the package.
+
+- `build.lua` gets a slice without a platform, an architecture or a compiler (`build-lua-api.md` 3.5); `build_tools` is
+  not run. The slice key leaves out what told the slices apart (`cache-key.md` 3), so projects building the library in
+  other environments, configurations or linkages share the entry.
+- `headers-slice` in `[recipe]` decides it otherwise: `false`, every slice is built even then (a build whose headers come
+  from a compiler: a configure test); `true`, the recipe means this mode, and a package with a product holding libraries
+  is an error. Without it, the products decide.
+- A tool package builds its tool slice as always: there is one already.
+
 ## 12. `[apple]`
 
 | Key | Type | Meaning |
@@ -724,7 +740,7 @@ every supported slice with one type per variable; `build-on` non-empty, without 
 `supported` and each such target with one, `*` only for `ndk`; `variant` given when `supported` spans several targets;
 products: unique names, `depends` and `headers`
 refer to existing products and libraries, no dependency cycles, a product of headers only without
-`headers` or `defines`, `headers = false` only with libraries, an `alternatives` group named by two products or more and
+`headers` or `defines`, `headers = false` only with libraries, `headers-slice = true` only with a product of headers only, an `alternatives` group named by two products or more and
 held twice by no product (11.2); at least one product unless `[tool]` is there; `[tool] programs`
 names without repeats; `default-recipe` of a toolchain without `targets` and not beside a tool dependency on the same library; referenced files (patches,
 wrappers, privacy manifest, license files of the recipe directory) exist; `license-files` paths are

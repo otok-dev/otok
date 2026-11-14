@@ -77,6 +77,15 @@ entry, `<cache-dir>/builds/<library>/<version>-r<revision>/sources/<sources key>
 `key-format`, `entry = sources`, `library`, `version`, `revision`, `recipe-sha256` (the patches) and
 `source`.
 
+### 3.2 Headers slice key
+
+The one slice of a package of products of headers only (`recipe-toml.md` 11.3) has `slice = headers` and leaves out what
+tells the slices of a target apart: no `environment`, `host-libc`, `configuration`, `linkage`, `deployment`,
+`flags.*`, `c-standard`, `cxx-standard`, `toolchain.*` or `build-tools`. Its `dep.<library>` are the keys of the
+dependencies built from a headers slice too (`build-lua-api.md` 3.5). It keeps `key-format`, `toolchain-profile`, `os`,
+the library, the recipe, the source, the resources, the options, `toolchains.*`, `tool.<library>` and `entry`. Every
+slice of the package is that entry, so in the package key (4) each `slice.<slice>.<configuration>` has its key.
+
 ## 4. Package key
 
 The SHA-256 of a canonical description of: the key format version, the packager version (bumped when

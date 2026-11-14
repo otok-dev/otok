@@ -958,6 +958,8 @@ public:
                         return done(fail("the product '" + prod.name + "' has headers only, but build returned no single headers directory for "
                             + slice_name(sl.spec)));
                     }
+                    // the headers slice is every slice (recipe-toml.md 11.3)
+                    if (*sl.output.headers == *first.output.headers) continue;
                     if (std::string const differ = first_difference(*first.output.headers, *sl.output.headers); !differ.empty()) {
                         return done(fail("the header '" + differ + "' of the product '" + prod.name + "' differs between " + slice_name(first.spec) + " and "
                             + slice_name(sl.spec) + "; a product of headers only has the same headers on every platform"));

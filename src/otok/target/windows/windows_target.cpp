@@ -607,12 +607,14 @@ public:
         fs::create_directories(long_path(staging / "include"), ec);
         if (ec) return fail("cannot create '" + path_to_utf8(staging) + "': " + ec.message());
         package_files recorded;  // which file is which library (otok-toml.md 4.11)
+        std::set<fs::path> merged;  // header directories merged already: the headers slice is every slice (recipe-toml.md 11.3)
         for (built_slice const& s : package.slices) {
             build_output const& out = s.output;
             std::set<fs::path> headers;
             if (out.headers) headers.insert(*out.headers);
             for (auto const& [name, dir] : out.library_headers) headers.insert(dir);
             for (fs::path const& dir : headers) {
+                if (!merged.insert(dir).second) continue;
                 if (auto ok = merge_headers(dir, staging / "include", slice_label(s.spec)); !ok) return ok;
             }
             // the newest toolset of the slices' CRTs, which a consumer needs at least

@@ -177,6 +177,7 @@ private:
     diagnostics& diags_;
     bool open_names_;
     bool entry_;
+    std::optional<source_position> headers_slice_at_;  // `headers-slice = true` of [recipe], checked with the products
 };
 
 platform_info const* recipe_reader::find_platform(std::string_view name) const
@@ -322,6 +323,11 @@ void recipe_reader::recipe_fields(toml_table& fields, recipe& r)
             }
         }
         r.linkage = std::move(*linkage);
+    }
+    // one slice for a package of products of headers only (recipe-toml.md 11.3); not in index entries
+    if (auto headers = entry_ ? std::nullopt : t->boolean("headers-slice")) {
+        r.headers_slice = *headers;
+        if (*headers) headers_slice_at_ = t->position("headers-slice");
     }
     // the standards the library builds with, as constraints of numbers (recipe-toml.md 3): ">= 99", ">= 14, <= 20"
     for (language const l : languages) {
@@ -1496,6 +1502,9 @@ recipe recipe_reader::read(toml_table& root)
     target_tables(root, r);
     tool_table(root, r);
     products(root, r);
+    if (headers_slice_at_ && std::ranges::none_of(r.products, &product::headers_only)) {
+        root.error(*headers_slice_at_, "'headers-slice' in recipe is true, but no product has headers only (libraries = []) (recipe-toml.md 11.3)");
+    }
     toolchains(root, r);
     canonical_tool_dependencies(r);
     publish(root, r);

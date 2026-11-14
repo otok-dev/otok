@@ -142,13 +142,42 @@ void push_dependency(lua_State* L, slice_dependency const& d, bool tool)
 void push_slice(lua_State* L, slice_context const& s)
 {
     lua_newtable(L);
-    for (auto const& [key, value] : s.target_fields) set_string(L, key.c_str(), value);
+    for (auto const& [key, value] : s.target_fields) {
+        if (!s.headers) set_string(L, key.c_str(), value);
+    }
     for (auto const& [key, table] : s.target_tables) {
+        if (s.headers) break;
         push_map(L, table, [L](std::string const& v) { lua_pushlstring(L, v.data(), v.size()); });
         lua_setfield(L, -2, key.c_str());
     }
     set_string(L, "name", s.name);
     set_string(L, "os", s.os);
+    lua_pushboolean(L, s.headers);
+    lua_setfield(L, -2, "headers");
+    if (s.headers) {
+        // build-lua-api.md 3.5: the paths, the programs of [toolchains] and the environment of processes only
+        lua_pushboolean(L, s.is_tool);
+        lua_setfield(L, -2, "is_tool");
+        set_path(L, "source", s.source);
+        set_path(L, "build", s.build);
+        set_path(L, "prefix", s.prefix);
+        set_path(L, "recipe", s.recipe);
+        push_paths(L, s.resources);
+        lua_setfield(L, -2, "resources");
+        push_values(L, s.vars);
+        lua_setfield(L, -2, "vars");
+        lua_pushinteger(L, s.jobs);
+        lua_setfield(L, -2, "jobs");
+        lua_newtable(L);
+        push_map(L, s.toolchain.env, [L](std::string const& v) { lua_pushlstring(L, v.data(), v.size()); });
+        lua_setfield(L, -2, "env");
+        freeze(L);
+        lua_setfield(L, -2, "toolchain");
+        push_paths(L, s.toolchains);
+        lua_setfield(L, -2, "toolchains");
+        freeze(L);
+        return;
+    }
     set_string(L, "platform", s.platform);
     set_string(L, "arch", s.arch);
     if (!s.environment.empty()) {

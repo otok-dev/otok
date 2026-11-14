@@ -243,6 +243,7 @@ public:
         if (ec) return fail("cannot create '" + path_to_utf8(staging) + "': " + ec.message());
         package_files recorded;  // which file is which library (otok-toml.md 4.11)
         std::set<std::string> configurations;
+        std::set<fs::path> merged;
         for (built_slice const& s : package.slices) {
             if (!configurations.insert(s.spec.configuration).second) return fail("a linux package has one slice per configuration");
             build_output const& out = s.output;
@@ -252,11 +253,15 @@ public:
             std::set<fs::path> headers;
             if (out.headers) headers.insert(*out.headers);
             for (auto const& [name, dir] : out.library_headers) headers.insert(dir);
-            fs::create_directories(include, ec);
+            // the directories merged already: the headers slice is every slice (recipe-toml.md 11.3)
+            bool const seen = !headers.empty() && std::ranges::all_of(headers, [&](fs::path const& dir) { return merged.contains(dir); });
+            merged.insert(headers.begin(), headers.end());
+            if (!seen) fs::create_directories(include, ec);
             for (fs::path const& dir : headers) {
+                if (seen) break;
                 if (auto ok = merge_headers(dir, include); !ok) return ok;
             }
-            if (include != staging / "include") {
+            if (!seen && include != staging / "include") {
                 if (std::string const differ = first_difference(staging / "include", include); !differ.empty()) {
                     return fail("the header '" + differ + "' differs between the configurations");
                 }

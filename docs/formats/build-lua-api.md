@@ -54,9 +54,10 @@ end
   top level should only define functions), and calls `build(slice, options, deps)`. Slices of one
   library may build concurrently; they share nothing through Lua.
 - **Entry points.**
-  - `build(slice, options, deps)` — required; called once per target slice.
+  - `build(slice, options, deps)` — required; called once per target slice, or once for a package of products of
+    headers only, in its `headers` slice (3.5).
   - `build_tools(slice, options, deps)` — optional; called once for the tool slice before any target
-    slice, for libraries that build their own tools first (ICU's `--with-cross-build`). Its `slice.prefix` is kept
+    slice, for libraries that build their own tools first (ICU's `--with-cross-build`); not before a `headers` slice. Its `slice.prefix` is kept
     and offered to target slices as `slice.tools.prefix`. Its return value is ignored. A tool package (`recipe-toml.md` 13) runs
     it too, before its own `build` in the tool slice, which gets `slice.tools` the same way (Boost's b2 for a tool that
     links Boost).
@@ -92,6 +93,7 @@ A read-only table. Paths are absolute, with `/` as separator on every host.
 | `linkage` | string | `"static"` or `"dynamic"`: what the project asks for (`otok-toml.md` 5), one of the recipe's `[recipe] linkage`; `"static"` in tool slices. |
 | `c_standard` | integer or nil | The C standard of the target (`otok-toml.md` 5.1), `11`: the project's, or the lowest the recipes allow; nil when there is none and the recipe chooses. Its flag is in `toolchain.cflags` (none for C89 and C99 with MSVC), and the helpers pass it on (6.2). |
 | `cxx_standard` | integer or nil | The C++ standard of the target (`otok-toml.md` 5.1), `23`: the project's, or the lowest the recipes allow; nil when there is none and the recipe chooses. Its flag is in `toolchain.cxxflags`, and the helpers pass it on (6.2). |
+| `headers` | boolean | `true` in the one slice of a package of products of headers only (3.5), which has no platform, architecture or compiler: the fields above but `name` and `os` are nil there. |
 | `is_tool` | boolean | `true` in the slices of a tool package (built for the build machine, `recipe-toml.md` 13) and in `build_tools`: a recipe that is a library and a tool at once builds its programs there only. |
 | `source` | path | The fresh source copy; the default working directory. Writable. |
 | `build` | path | An empty directory for out-of-source builds. Writable. |
@@ -170,6 +172,31 @@ lld-link, llvm-lib, llvm-rc and llvm-mt, and `CMAKE_ASM_COMPILER_TARGET` (assemb
 MASM: llvm-ml gave Boost.Context's `lea rcx, label` an absolute `ADDR32` relocation, which MSVC's linker refuses in a
 program. meson's cross file names the compilers with their `--target`, `c_ld` lld-link
 and `windres` llvm-rc.
+
+### 3.5 The `headers` slice
+
+A package whose products are all of headers only is built from one slice of its target (`recipe-toml.md` 11.3), whose
+result serves every platform, architecture, configuration and linkage of the package:
+
+- `name` is `"headers"`, `headers` is `true`, `os` the target. `platform`, `arch`, `environment`, `host`, `host_libc`,
+  `compiler`, `triple`, `configuration`, `linkage`, `c_standard`, `cxx_standard`, `tools` and the target's tables
+  (`apple`, `android`, `windows`) are nil.
+- `slice.toolchain` has only `env`, the environment of processes (5), without compilers or flags.
+- `slice.toolchains` and `deps.tools` are as in any slice. `deps` holds the dependencies built from a `headers` slice too,
+  not the others, which have no single slice.
+- `otok.make`, `otok.cmake`, `otok.autotools`, `otok.meson`, `otok.b2` and `otok.cmake_toolchain` fail; `otok.run` and
+  the file functions (6.3) work.
+- `build` returns `libraries = {}` and one `headers` directory (8).
+
+```lua
+function build(slice, options, deps)
+    if slice.headers then
+        otok.copy(slice.source .. "/include/toml++", slice.prefix .. "/include/toml++")
+        return { libraries = {}, headers = slice.prefix .. "/include" }
+    end
+    -- the compiled library
+end
+```
 
 ## 4. `options` and `deps`
 

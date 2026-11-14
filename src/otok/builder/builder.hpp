@@ -230,6 +230,7 @@ private:
     bool isolation_told_ = false;                       // the warning on unisolated builds was printed
     std::map<std::filesystem::path, bool> sandbox_reads_;  // check_sandbox_reads: a path → whether the container reads it
     std::map<std::string, std::string> recipe_hashes_;  // package key → recipe_hash; filled before building
+    std::set<std::string> headers_packages_;            // package keys built from a headers slice; filled before building
     std::map<std::string, std::pair<std::size_t, std::size_t>> slices_done_;  // package key → slices done, of all
     // Windows: check_sandbox_exits, by the first sandboxed slice while the others wait
     bool exits_check_started_ = false;

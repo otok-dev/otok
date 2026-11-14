@@ -218,6 +218,35 @@ end
     ASSERT_TRUE(out.has_value()) << out.error().message;
 }
 
+// build-lua-api.md 3.5: the headers slice has no platform, architecture, configuration or compiler, and the helpers that
+// compile refuse it
+TEST_F(build_script, sees_the_headers_slice)
+{
+    slice.headers = true;
+    slice.name = "headers";
+    auto out = run(R"lua(
+function build(slice, options, deps)
+    assert(slice.headers == true and slice.name == "headers" and slice.os == "apple" and slice.is_tool == false)
+    assert(slice.platform == nil and slice.arch == nil and slice.environment == nil and slice.host == nil and slice.compiler == nil)
+    assert(slice.triple == nil and slice.configuration == nil and slice.linkage == nil and slice.cxx_standard == nil)
+    assert(slice.rust_target == nil and slice.apple == nil and slice.tools == nil)
+    assert(slice.toolchain.cc == nil and slice.toolchain.cflags == nil and slice.toolchain.env.PATH == "/usr/bin")
+    assert(slice.toolchains.cmake == "cmake" and slice.source:find("/source$") and slice.vars.openssl_target == "iossimulator-xcrun")
+    for _, helper in ipairs({ "make", "cmake", "autotools", "meson", "b2" }) do
+        local ok, message = pcall(otok[helper], {})
+        assert(not ok and message:find("otok." .. helper .. ": the headers slice has no compiler (build-lua-api.md 3.5)", 1, true), message)
+    end
+    local ok, message = pcall(otok.cmake_toolchain)
+    assert(not ok and message:find("otok.cmake_toolchain: the headers slice has no compiler", 1, true), message)
+    otok.write(slice.prefix .. "/include/h.h", "int h;\n")
+    return { libraries = {}, headers = slice.prefix .. "/include" }
+end
+)lua");
+    ASSERT_TRUE(out.has_value()) << out.error().message;
+    EXPECT_TRUE(out->libraries.empty());
+    EXPECT_TRUE(specs.empty());
+}
+
 TEST_F(build_script, tables_are_read_only)
 {
     for (std::string const statement : {"slice.name = 'x'", "slice.toolchain.cflags[1] = 'x'", "options.level = 1", "deps.zlib = nil",

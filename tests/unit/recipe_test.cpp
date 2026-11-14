@@ -564,6 +564,25 @@ TEST(recipe, checks_products_of_headers_only)
     EXPECT_TRUE(with_product("libraries = [\"a\"]\nheaders = 1\n").reports("must name one of the product's libraries, or be false"));
 }
 
+// recipe-toml.md 3, 11.3: one slice for a package of products of headers only, as the products decide or as the recipe says
+TEST(recipe, reads_headers_slice)
+{
+    std::string const headers = "[[product]]\nname = \"H\"\nlibraries = []\n";
+    auto const with = [&](std::string const& key, std::string const& products) { return parse(head_text + key + source_text + platforms_text + products); };
+    auto derived = with("", headers);
+    ASSERT_TRUE(derived.r.has_value()) << messages(derived.diags);
+    EXPECT_FALSE(derived.r->headers_slice.has_value());
+    auto never = with("headers-slice = false\n", product_text);
+    ASSERT_TRUE(never.r.has_value()) << messages(never.diags);
+    EXPECT_EQ(never.r->headers_slice, false);
+    auto always = with("headers-slice = true\n", headers + product_text);
+    ASSERT_TRUE(always.r.has_value()) << messages(always.diags);
+    EXPECT_EQ(always.r->headers_slice, true);
+    EXPECT_TRUE(with("headers-slice = true\n", product_text)
+                    .reports("'headers-slice' in recipe is true, but no product has headers only (libraries = []) (recipe-toml.md 11.3)"));
+    EXPECT_TRUE(with("headers-slice = 1\n", headers).reports("'headers-slice' in recipe"));
+}
+
 TEST(recipe, reads_products_that_exclude_each_other)
 {
     auto p = parse(head_text + source_text + platforms_text
