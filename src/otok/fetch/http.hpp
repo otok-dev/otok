@@ -69,6 +69,9 @@ struct http_reply
 
 result<http_reply> http_call(http_exchange const& request, http_settings const& settings);
 
+// "HTTP status 404" for a message; for a server's error (5xx) also that it is the server's, for now: "try again later".
+std::string http_status_text(long status);
+
 // What makes requests: http_call, or a fake in tests (command_context::http).
 using http_transport = std::function<result<http_reply>(http_exchange const&)>;
 

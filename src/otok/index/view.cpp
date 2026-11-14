@@ -278,7 +278,7 @@ struct http_view
             std::filesystem::remove(file, ec);
             return read.emplace(path, std::nullopt).first->second;
         }
-        if (reply->status != 200) return fail("GET " + url + ": HTTP status " + std::to_string(reply->status));
+        if (reply->status != 200) return fail("GET " + url + ": " + http_status_text(reply->status));
 
         std::filesystem::remove(etag_file, ec);
         if (auto ok = store(file, reply->body); !ok) return std::unexpected{ok.error()};

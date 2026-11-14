@@ -866,6 +866,19 @@ bool deliver_tools(project const& p, manifest const& built_m, std::span<built_pa
         }
         delivered.push_back(std::move(t));
     }
+    // one name of the consumer files for each program (docs/PLAN.md decision 118)
+    std::map<std::string, std::pair<std::string, std::string>> variables;  // variable → library, program
+    for (delivered_tool const& t : delivered) {
+        for (auto const& [program, path] : t.programs) {
+            auto const [it, added] = variables.try_emplace(tool_variable_name(program), t.library, program);
+            if (!added) {
+                diags.error({}, "the program '" + it->second.second + "' of [tool-deps." + it->second.first + "] and '" + program
+                    + "' of [tool-deps." + t.library + "] are both OtokTool_" + it->first + " and Otok_TOOL_" + it->first
+                    + " of the tools output; deliver one of them");
+                return false;
+            }
+        }
+    }
     auto changes = write_tools_output(dir, delivered);
     if (!changes) {
         diags.error({}, changes.error().message);
@@ -873,7 +886,7 @@ bool deliver_tools(project const& p, manifest const& built_m, std::span<built_pa
     }
     if (delivered.empty()) {
         fs::remove(long_path(dir / output_state_file), ec);
-        fs::remove(long_path(dir / tools_file), ec);
+        for (char const* file : {tools_file, tools_msbuild_file, tools_cmake_file}) fs::remove(long_path(dir / file), ec);
         fs::remove(long_path(dir), ec);  // when empty
     } else {
         ctx.out << "tools '" << p.m.tools_output << "': " << changes->copied << " copied, " << changes->unchanged << " unchanged, "

@@ -46,6 +46,9 @@ cmake -S "$root" -B "$build" -G Ninja \
     -DOTOK_REVISION="${OTOK_REVISION:-}"
 cmake --build "$build" --target otok
 exe=$build/otok
+# OpenSSL with threads (the triplet, docs/PLAN.md decision 118): without them HTTPS from two threads corrupts the heap
+grep -q '^# *define OPENSSL_THREADS' "$build/vcpkg_installed/$triplet/include/openssl/configuration.h" ||
+    { echo "error: the OpenSSL of $triplet is built without threads" >&2; exit 1; }
 strip "$exe"
 
 # static: no interpreter, no library to load

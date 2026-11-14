@@ -10,6 +10,7 @@
 #include <ostream>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "otok/builder/target.hpp"
@@ -84,8 +85,21 @@ inline constexpr char const* tools_file = "otok-tools.toml";
 // Its text: the programs of `tools`, relative to the file.
 std::string tools_file_text(std::span<delivered_tool const> tools);
 
+// The files of the tools output giving the programs to the consumer's build (otok-toml.md 7.1, docs/PLAN.md decision
+// 118): `OtokTool_<name>` of MSBuild, `Otok_TOOL_<name>` of CMake.
+inline constexpr char const* tools_msbuild_file = "otok-tools.props";
+inline constexpr char const* tools_cmake_file = "otok-tools.cmake";
+
+// A program's name in those: every character but a letter, a digit and `_` as `_`.
+std::string tool_variable_name(std::string_view program);
+
+// Their texts: the programs of `tools`, from the directory of the file.
+std::string tools_msbuild_text(std::span<delivered_tool const> tools);
+std::string tools_cmake_text(std::span<delivered_tool const> tools);
+
 // Makes the tools output `dir` hold exactly `tools`, `<dir>/<library>/` each, as write_output does with libraries (the
-// state file records the keys of their slices), and writes otok-tools.toml. Refuses a directory otok did not create.
+// state file records the keys of their slices), and writes otok-tools.toml, otok-tools.props and otok-tools.cmake.
+// Refuses a directory otok did not create.
 result<output_changes> write_tools_output(std::filesystem::path const& dir, std::span<delivered_tool const> tools);
 
 // The option values of a package as wrappers see them (recipe-toml.md 8.2).

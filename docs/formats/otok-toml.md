@@ -874,6 +874,22 @@ outputs of the targets they make `[otok] tools-output` (3, default `Otok/tools`)
   "annium-compile" = "annium-compile/bin/annium-compile.exe"
   ```
 
+- `<tools-output>/otok-tools.props` and `<tools-output>/otok-tools.cmake`: the same paths for the consumer's build, as
+  the MSBuild property `OtokTool_<program>` and the CMake variable `Otok_TOOL_<program>`, absolute from where the file
+  is. A character of the program's name other than a letter, a digit or `_` is `_` there (`annium-compile`:
+  `OtokTool_annium_compile`); two programs of the delivered tools with one such name are an error. A project of Visual
+  Studio imports the first (from `Directory.Build.props`, beside `otok.props`), a CMake project `include`s the second:
+
+  ```xml
+  <Import Project="$(MSBuildThisFileDirectory)Otok\tools\otok-tools.props" Condition="Exists('$(MSBuildThisFileDirectory)Otok\tools\otok-tools.props')" />
+  ```
+  ```cmake
+  include("${CMAKE_SOURCE_DIR}/Otok/tools/otok-tools.cmake")
+  add_custom_command(OUTPUT parser.cpp COMMAND "${Otok_TOOL_bison}" -o parser.cpp "${CMAKE_SOURCE_DIR}/parser.y" ...)
+  ```
+
+  They are files of the tools output, not of a target's (`otok.props`, `otok-config.cmake` of 4.11): the tools are the
+  machine's and need no target, and the tools output may be anywhere in the project.
 - `.otok-output.toml`, the state file of 4.2, with the key of each tool's slice: a tool is copied again only when its
   slice changed, and a tool no longer delivered is removed. Without any delivered tool the directory is removed.
 

@@ -121,7 +121,7 @@ result<downloaded> finish(transfer& t, CURLcode code)
     if (code == CURLE_HTTP_RETURNED_ERROR) {
         long status = 0;
         curl_easy_getinfo(t.easy.get(), CURLINFO_RESPONSE_CODE, &status);
-        return failed("cannot download " + url + ": HTTP " + std::to_string(status));
+        return failed("cannot download " + url + ": " + http_status_text(status));
     }
     if (code != CURLE_OK) {
         std::string detail = t.error[0] ? std::string{t.error.data()} : std::string{curl_easy_strerror(code)};
@@ -251,6 +251,13 @@ std::string const* http_reply::header(std::string_view name) const noexcept
         }
     }
     return nullptr;
+}
+
+std::string http_status_text(long status)
+{
+    std::string text = "HTTP status " + std::to_string(status);
+    if (status >= 500 && status < 600) text += ", an error of the server, not of this request: try again later";
+    return text;
 }
 
 result<http_reply> http_call(http_exchange const& request, http_settings const& settings)

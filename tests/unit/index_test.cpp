@@ -923,11 +923,17 @@ TEST(index_view, revalidates_files_over_http)
     EXPECT_FALSE(std::filesystem::exists(cached));
     EXPECT_FALSE(std::filesystem::exists(etag));
 
-    server.status = 500;
+    // the server's error: try again later; another status as it is
+    server.status = 503;
     auto failing = view_over_http("https://view.example.com", *cache, server.transport());
     auto error = failing("recipes.json");
     ASSERT_FALSE(error.has_value());
-    EXPECT_EQ(error.error().message, "GET https://view.example.com/index/recipes.json: HTTP status 500");
+    EXPECT_EQ(error.error().message,
+        "GET https://view.example.com/index/recipes.json: HTTP status 503, an error of the server, not of this request: try again later");
+    server.status = 403;
+    error = view_over_http("https://view.example.com", *cache, server.transport())("recipes.json");
+    ASSERT_FALSE(error.has_value());
+    EXPECT_EQ(error.error().message, "GET https://view.example.com/index/recipes.json: HTTP status 403");
 
     // offline: the cached files only
     server.status = 0;
