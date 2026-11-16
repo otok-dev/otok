@@ -120,6 +120,8 @@ TEST(virtual_drives, reach_the_children)
         EXPECT_EQ(run({"cmd.exe", "/d", "/c", "cmd.exe /d /c type " + file}, launch), "long\n");
         // the volume of the letter's root, which the container may not open (perlglob asks it)
         EXPECT_EQ(run({path_to_utf8(child), "volume", path_to_utf8(*drive)}, launch), "preserves case\n");
+        // the brokering of file functions turned off in the container alone (hook 19)
+        EXPECT_EQ(run({path_to_utf8(child), "brokering"}, launch), container.empty() ? "brokered brokered\n" : "skipped skipped\n");
     }
     virtual_drives::release(*drive);
     remove_long(dir);

@@ -32,6 +32,8 @@ struct file_stamp
 struct dev_record
 {
     std::string key;                                // the dev key's description; another one empties build/
+    std::string directory;                          // the work directory as the build saw it, `/`-separated; another
+                                                    // one (a virtual drive's letter, or none) empties build/
     std::string patches;                            // the SHA-256 of the patches as last applied; empty: none
     std::map<std::string, file_stamp> files;        // path in source/ → the stamp of the file it was copied from
 };

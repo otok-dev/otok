@@ -26,6 +26,7 @@ std::optional<dev_record> read_dev_record(fs::path const& file)
     }
     dev_record r;
     r.key = t["key"].value_or(std::string{});
+    r.directory = t["directory"].value_or(std::string{});
     r.patches = t["patches"].value_or(std::string{});
     if (toml::table const* files = t["files"].as_table()) {
         for (auto const& [path, value] : *files) {
@@ -44,6 +45,7 @@ result<void> write_dev_record(fs::path const& file, dev_record const& record)
 {
     toml::table t;
     t.insert("key", record.key);
+    if (!record.directory.empty()) t.insert("directory", record.directory);
     if (!record.patches.empty()) t.insert("patches", record.patches);
     toml::table files;
     for (auto const& [path, stamp] : record.files) {

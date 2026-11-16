@@ -74,6 +74,10 @@ in the cache's `builds/`, whatever else its key holds.
   `recipe`, `recipe-sha256` written as `dev`: what decides a build besides the working trees (options, flags,
   toolchains, the keys of the dependencies). When it differs from the one `dev.toml` records, `build/` and `source/`
   are emptied first: the next build configures from scratch, as a toolchain or an option that changed requires.
+- **Directory.** `build/` is emptied too when the work directory is seen under another path than the one `dev.toml`
+  records (or it records none): build tools keep absolute paths there (CMake's `CMakeCache.txt` refuses another source
+  or build directory). On Windows the build sees the work directory through a virtual drive (`config.md`,
+  `virtual-paths`), whose letter is the first free one and which `--no-virtual-paths` turns off.
 - **Source.** `source/` is synchronized, not copied afresh: the source tree and the named resources at their `dest`, a
   file copied only when its size or modification time differs from those `dev.toml` records for it, with the
   modification time of the working tree, so that the build tool sees only the files that changed as newer; a file
@@ -107,6 +111,7 @@ Written by otok into the work directory once `source/` is synchronized and patch
 
 ```toml
 key = "…"                         # the dev key's description (cache-key.md 3), whose change empties build/
+directory = "O:/dev/…/zlib-macos" # the work directory as the build saw it, `/`-separated, whose change empties build/
 patches = "…"                     # the SHA-256 of the patches applied; absent: none, or applied again next time
 [files]                           # every file synchronized into source/: size and modification time, in the units
 "src/a.cpp" = [1234, 134064264451234567]  # of the host's file system clock; a link: [0, 0]

@@ -1661,6 +1661,12 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         // resolved (macOS: /var is a link), as the paths build.lua returns are; through its drive on Windows, where the
         // build sees short paths (core/virtual_drives)
         fs::path const base = builds_drive_.empty() ? fs::canonical(work, ec) : virtual_drives::to_virtual(work);
+        // build/ of a dev slice holds the paths it was configured with: seen under others (another virtual drive, or none),
+        // configured afresh (otok-dev-toml.md 4)
+        if (dev && record->directory != slashed(base)) {
+            fs::remove_all(long_path(work / "build"), ec);
+            fs::create_directories(work / "build");
+        }
         fs::path const log = base / "build.log";
         {
             std::ofstream made{log, std::ios::binary};  // exists even when nothing is logged
@@ -1741,6 +1747,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
             }
             dev_record now;
             now.key = text;
+            now.directory = slashed(base);
             now.patches = patches.empty() ? std::string{} : sha256_hex(patches);
             std::map<std::string, fs::path> origins;
             bool const new_patches = now.patches != record->patches;

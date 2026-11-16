@@ -34,6 +34,10 @@
 //      outside the cache handed as those of the work directory are (hook 8), for their attributes;
 //  18. a listing of a directory on those ways, refused, showing the next names on them alone (b2 tells whether a file
 //      exists by listing each of its ancestors).
+//  19. the brokering of file functions turned off in every thread (SkipFileAPIBrokering of the TEB): kernelbase hands a
+//      CreateFileW refused with ERROR_ACCESS_DENIED in a container (a directory opened as a file too, as clang tries
+//      each include directory for <utility>) to windows.storage.onecore's broker of packaged apps, which throws a C++
+//      exception inside; LLVM's handler of exceptions takes it for a crash. A process without a package has no broker.
 // The DLL passes itself and the payload (otok/core/sandbox_windows.hpp) to every child through CreateProcessW/A. Without a
 // container in the payload (sandbox = false) it does 14 and 15 alone.
 
@@ -1265,6 +1269,16 @@ void install()
     ::DetourTransactionCommit();
 }
 
+// Hook 19: SkipFileAPIBrokering, bit 15 of the TEB's SameTebFlags (x64 offset 0x17EE, the bit kernelbase's CreateFileW and
+// the other file functions test before brokering); per thread, so set in each as it starts.
+void skip_file_brokering()
+{
+    auto* const flags = reinterpret_cast<USHORT*>(reinterpret_cast<unsigned char*>(::NtCurrentTeb()) + 0x17EE);
+    *flags |= 0x8000;
+}
+
+bool in_container = false;
+
 // Outside a container: the device map of the children and the paths through it (hooks 14 and 15), nothing else.
 void install_drives_only()
 {
@@ -1284,6 +1298,7 @@ void install_drives_only()
 BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID)
 {
     if (::DetourIsHelperProcess()) return TRUE;
+    if (reason == DLL_THREAD_ATTACH && in_container) skip_file_brokering();
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
     ::DetourRestoreAfterWith();
     ::GetModuleFileNameA(self, dll_path, sizeof dll_path);
@@ -1303,5 +1318,7 @@ BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID)
     }
     find_container();
     install();
+    in_container = true;
+    skip_file_brokering();
     return TRUE;
 }

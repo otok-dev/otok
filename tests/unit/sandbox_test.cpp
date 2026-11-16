@@ -175,6 +175,9 @@ TEST(sandbox, confines_processes)
         EXPECT_EQ(run({"cmd.exe", "/d", "/c", "dir \"" + profile->second + "\" >nul 2>nul || echo denied"}), "denied\r\n");
     }
     EXPECT_EQ(run({path_to_utf8(child), "cwd"}), path_to_utf8(root / "work") + "\n");
+    // no brokering of refused file functions in any thread (hook 19): its exception, caught inside the broker, was a crash
+    // to LLVM's handler (clang's #include <utility> beside a directory 'utility' of an include directory)
+    EXPECT_EQ(run({path_to_utf8(child), "brokering"}), "skipped skipped\n");
     // the ancestors of the work directory, to pass through them (mkdir -p) and nothing more: not listed, and nothing
     // beside them reached
     for (std::filesystem::path const& ancestor : {root, root.root_path()}) {

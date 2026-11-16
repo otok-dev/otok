@@ -714,7 +714,7 @@ TEST(host_target, builds_working_trees_incrementally)
     std::filesystem::path const a_object = object_of(p.cache_dir(), "tiny_a.c"), extra_object = object_of(p.cache_dir(), "tiny_extra.c");
     ASSERT_FALSE(a_object.empty());
     ASSERT_FALSE(extra_object.empty());
-    auto const a_time = std::filesystem::last_write_time(a_object), extra_time = std::filesystem::last_write_time(extra_object);
+    auto a_time = std::filesystem::last_write_time(a_object), extra_time = std::filesystem::last_write_time(extra_object);
 
     // nothing changed: built again, compiling nothing, and its dependent from the cache
     ASSERT_EQ(p.run({"install", "--locked"}), 0) << p.err.str() << p.out.str();
@@ -722,6 +722,26 @@ TEST(host_target, builds_working_trees_incrementally)
     EXPECT_NE(p.out.str().find("slices: 2 (1 from the cache)\n"), std::string::npos) << p.out.str();
     EXPECT_EQ(std::filesystem::last_write_time(a_object), a_time);
     EXPECT_EQ(std::filesystem::last_write_time(extra_object), extra_time);
+
+    // the work directory seen under another path than the one recorded (another virtual drive's letter, or none with
+    // --no-virtual-paths): build/ emptied, everything compiled again (otok-dev-toml.md 4)
+    std::filesystem::path record;
+    for (auto const& e : std::filesystem::recursive_directory_iterator{p.cache_dir() / "dev"}) {
+        if (e.path().filename() == "dev.toml") record = e.path();
+    }
+    ASSERT_FALSE(record.empty());
+    std::string recorded = read_file(record).value_or("");
+    std::size_t const at = recorded.find("\ndirectory = ");
+    ASSERT_NE(at, std::string::npos) << recorded;
+    char const quote = recorded[at + 13];
+    recorded.replace(at + 14, recorded.find(quote, at + 14) - at - 14, "Q:/elsewhere");
+    std::ofstream{record, std::ios::binary} << recorded;
+    ASSERT_EQ(p.run({"install", "--locked"}), 0) << p.err.str() << p.out.str();
+    EXPECT_NE(std::filesystem::last_write_time(a_object), a_time);
+    EXPECT_NE(std::filesystem::last_write_time(extra_object), extra_time);
+    EXPECT_EQ(read_file(record).value_or("").find("Q:/elsewhere"), std::string::npos);
+    a_time = std::filesystem::last_write_time(a_object);
+    extra_time = std::filesystem::last_write_time(extra_object);
 
     // one file changed: compiled alone, and the dependent built again with the new output
     p.write("work/tiny-a/tiny_a.c", "#include \"tiny_a.h\"\n\nint tiny_a(void) { return TINY_A_VALUE + TINY_BONUS + 20; }\n");

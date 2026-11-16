@@ -21,6 +21,8 @@
 //   list D        Windows: opens the directory D to list it and prints opened, or the error
 //   find API P    Windows: FindFirstFile (API A, W, ExA or ExW) of P, then FindNextFile, and prints the names found, or
 //                 the error
+//   brokering     Windows: prints whether file functions refused may be brokered (brokered or skipped) in this
+//                 thread and in a new one
 //   connect       Windows: connects to 192.0.2.1:80 (TEST-NET, never answers) and prints the Winsock error, or
 //                 timeout after 2 s (an AppContainer without capabilities is refused at once: 10013)
 //
@@ -33,6 +35,7 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef _WIN32
@@ -134,6 +137,16 @@ int run(std::vector<std::string> args)
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
         std::cout << (h != INVALID_HANDLE_VALUE ? std::string{"opened"} : std::to_string(::GetLastError())) << '\n';
         if (h != INVALID_HANDLE_VALUE) ::CloseHandle(h);
+    } else if (command == "brokering") {
+        // whether kernelbase may hand a refused file function to the broker of packaged apps, in this thread and in a new
+        // one: SkipFileAPIBrokering, bit 15 of the TEB's SameTebFlags (x64), which otok-sandbox.dll sets in a container
+        auto const brokered = [] {
+            auto const flags = *reinterpret_cast<USHORT const*>(reinterpret_cast<unsigned char const*>(::NtCurrentTeb()) + 0x17EE);
+            return (flags & 0x8000) ? "skipped" : "brokered";
+        };
+        std::string other;
+        std::thread{[&] { other = brokered(); }}.join();
+        std::cout << brokered() << ' ' << other << '\n';
     } else if (command == "final" && args.size() == 2) {
         // the path GetFinalPathNameByHandleW gives a file (otok-sandbox.dll gives it through a virtual drive)
         std::filesystem::path const file{std::u8string{args[1].begin(), args[1].end()}};

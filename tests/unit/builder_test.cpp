@@ -2348,6 +2348,7 @@ TEST(dev_tree, keeps_its_record)
     test::temp_dir dir;
     dev_record r;
     r.key = "a = 1\nb = \"x\"\n";
+    r.directory = "O:/dev/0123/zlib-macos";
     r.patches = "abc";
     r.files["src/a b.c"] = {12, 1761731045123456789};
     r.files["\"quoted\".h"] = {0, -5};
@@ -2355,6 +2356,7 @@ TEST(dev_tree, keeps_its_record)
     auto read = read_dev_record(dir.path() / "dev.toml");
     ASSERT_TRUE(read.has_value());
     EXPECT_EQ(read->key, r.key);
+    EXPECT_EQ(read->directory, r.directory);
     EXPECT_EQ(read->patches, r.patches);
     EXPECT_EQ(read->files, r.files);
     EXPECT_FALSE(read_dev_record(dir.path() / "missing.toml").has_value());
