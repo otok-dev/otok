@@ -82,6 +82,7 @@ struct consumer_package
     std::vector<std::string> architectures;     // that every library has, in the target's order
     std::vector<std::string> configurations;    // that every library has: "release", "debug"
     std::map<std::string, std::string> properties;  // of the package files; the first package's where they differ
+    std::map<std::string, std::vector<std::string>> property_values;  // every value of each, in the packages' order
     std::vector<consumer_library> libraries;
     std::vector<consumer_product> products;
     std::vector<std::pair<std::string, std::string>> data_dirs;  // library → its data/, relative to the output

@@ -187,7 +187,10 @@ result<consumer_package> consumer_package_of(fs::path const& dir, std::span<outp
         if (p.libraries.empty()) continue;
         auto files = read_package_files(dir / p.dir);
         if (!files) return fail("the package of '" + p.library + "': " + files.error().message);
-        for (auto const& [key, value] : files->properties) c.properties.emplace(key, value);
+        for (auto const& [key, value] : files->properties) {
+            c.properties.emplace(key, value);
+            c.property_values[key].push_back(value);
+        }
         for (std::string const& name : p.libraries) {
             consumer_library l;
             l.name = p.library + "_" + name;

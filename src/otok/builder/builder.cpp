@@ -1622,20 +1622,22 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         }
         if (auto ok = check_sandbox_reads(needed); !ok) return fail(label + " for " + slice_label(spec) + ": " + ok.error().message);
     }
-    // before the first sandboxed process, the slices that come meanwhile waiting, so the check counts its own processes
+    // before the first sandboxed process, the slices that come meanwhile waiting, so the check counts its own processes;
+    // once for the builders running together (otok publish), whose checks would only repeat and disturb each other
     if (settings_.isolation == build_isolation::sandbox && settings_.sandbox.kind == host_sandbox::mechanism::appcontainer
         && !exit_checks_skipped.load()) {
-        std::unique_lock lock{mutex_};
-        if (!exits_check_started_) {
-            exits_check_started_ = true;
+        sandbox_exits_check& check = settings_.announced ? settings_.announced->exits : exits_;
+        std::unique_lock lock{check.m};
+        if (!check.started) {
+            check.started = true;
             lock.unlock();
             check_sandbox_exits();
             lock.lock();
-            exits_checked_ = true;
-            exits_checked_cv_.notify_all();
-        } else if (!exits_checked_) {
+            check.done = true;
+            check.cv.notify_all();
+        } else if (!check.done) {
             if (shown.display) shown.display->waiting(shown.id, true, "the check of the sandbox");
-            exits_checked_cv_.wait(lock, [this] { return exits_checked_; });
+            check.cv.wait(lock, [&check] { return check.done; });
             if (shown.display) shown.display->waiting(shown.id, false);
         }
     }

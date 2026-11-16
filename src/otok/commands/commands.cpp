@@ -1322,6 +1322,10 @@ int metadata(parsed_command const& cmd, command_context& ctx)
     for (profile const& each : p->m.profiles) project["profiles"].push_back(each.name);
     doc["project"] = std::move(project);
 
+    // what this machine builds them with (metadata.md 3.2 `toolchain`): the targets look for their toolchains only when asked
+    std::vector<std::unique_ptr<build_target>> machine;
+    if (ctx.make_build_targets) machine = ctx.make_build_targets(p->config);
+
     // the targets as the selected profile has them (otok-toml.md 8)
     doc["targets"] = nlohmann::json::array();
     std::map<std::string, std::map<std::string, std::string>> output_states;  // target → its output's state
@@ -1358,6 +1362,12 @@ int metadata(parsed_command const& cmd, command_context& ctx)
         std::vector<std::string> build_on;
         for (build_environment const& e : ts.build_on) build_on.push_back(e.text());
         t["build-on"] = build_on;
+        nlohmann::json toolchain(nullptr);
+        for (auto const& bt : machine) {
+            if (bt->info().name != ts.target) continue;
+            if (auto found = bt->machine_toolchain()) toolchain = *found;
+        }
+        t["toolchain"] = std::move(toolchain);
         doc["targets"].push_back(std::move(t));
         auto state = read_output_state(ctx.project_dir / path_from_utf8(ts.output));
         if (!state) {

@@ -21,6 +21,21 @@ namespace fs = std::filesystem;
 
 namespace {
 
+// "29.0.14206865" as numbers, part by part; what is not a digit is skipped.
+std::vector<long long> revision_parts(std::string_view name)
+{
+    std::vector<long long> out;
+    std::size_t at = 0;
+    while (at <= name.size()) {
+        std::size_t const end = std::min(name.find('.', at), name.size());
+        long long v = 0;
+        for (std::size_t i = at; i < end; ++i) v = std::isdigit(static_cast<unsigned char>(name[i])) ? v * 10 + (name[i] - '0') : v;
+        out.push_back(v);
+        at = end + 1;
+    }
+    return out;
+}
+
 #if defined(_M_ARM64) || defined(__aarch64__)
 constexpr char const* machine_arch = "arm64";
 #elif defined(_M_X64) || defined(__x86_64__)
@@ -214,6 +229,16 @@ public:
         return (*found)->env.at("PATH");
     }
 
+    std::optional<std::map<std::string, std::string>> machine_toolchain() override
+    {
+        auto found = ndk();
+        if (!found) return std::nullopt;
+        std::error_code ec;
+        fs::path root = fs::absolute(path_from_utf8((*found)->root), ec).lexically_normal();
+        if (ec) root = path_from_utf8((*found)->root);
+        return std::map<std::string, std::string>{{"ndk", slashed(root)}, {"revision", (*found)->revision}};
+    }
+
     result<toolchain_profile> profile(slice_spec const& slice) override
     {
         auto names = slice.platform == "android" ? detail::names_of(slice.arch) : std::nullopt;
@@ -336,6 +361,14 @@ public:
             if (s.spec.linkage == "dynamic" && !out.libraries.empty()) {
                 auto const stl = s.spec.choices.find("stl");
                 recorded.properties["stl"] = stl != s.spec.choices.end() ? stl->second : "shared";
+            }
+            // the newest NDK of the slices, which a consumer needs at least: the libraries were compiled against its libc++
+            // headers (otok-toml.md 4.11); the headers slice has none and links nothing
+            if (!out.libraries.empty()) {
+                if (std::string const ndk = detail::ndk_of_key(read_file(s.entry / "key.txt").value_or("")); !ndk.empty()) {
+                    std::string& known = recorded.properties["ndk"];
+                    if (known.empty() || detail::compare_revisions(ndk, known) > 0) known = ndk;
+                }
             }
             std::set<fs::path> headers;
             if (out.headers) headers.insert(*out.headers);
@@ -485,6 +518,41 @@ consumer_cmake_parts detail::cmake_parts(consumer_package const& package)
         }
         parts.checks += "unset(_otok_stl)\n";
     }
+    // the NDK of the app: the libraries were compiled against the libc++ headers of theirs, whose symbols an older libc++
+    // lacks (otok-toml.md 4.11); the newest of the packages
+    std::string ndk;
+    if (auto it = package.property_values.find("ndk"); it != package.property_values.end()) {
+        for (std::string const& each : it->second) {
+            if (ndk.empty() || detail::compare_revisions(each, ndk) > 0) ndk = each;
+        }
+    }
+    if (!ndk.empty()) {
+        parts.checks +=
+            "\n# the NDK of the app (its source.properties), which must be that of the libraries or newer: they were compiled against its libc++\n"
+            "if(CMAKE_ANDROID_NDK)\n"
+            "  set(_otok_ndk \"${CMAKE_ANDROID_NDK}\")\n"
+            "elseif(ANDROID_NDK)\n"
+            "  set(_otok_ndk \"${ANDROID_NDK}\")\n"
+            "else()\n"
+            "  set(_otok_ndk \"\")\n"
+            "endif()\n"
+            "file(TO_CMAKE_PATH \"${_otok_ndk}\" _otok_ndk)\n"
+            "set(_otok_ndk_revision \"\")\n"
+            "if(_otok_ndk AND EXISTS \"${_otok_ndk}/source.properties\")\n"
+            "  file(STRINGS \"${_otok_ndk}/source.properties\" _otok_ndk_revision REGEX \"^Pkg\\\\.Revision *=\")\n"
+            "  string(REGEX REPLACE \"^Pkg\\\\.Revision *= *([0-9.]+).*$\" \"\\\\1\" _otok_ndk_revision \"${_otok_ndk_revision}\")\n"
+            "endif()\n"
+            "if(NOT _otok_ndk_revision MATCHES \"^[0-9.]+$\")\n"
+            "  message(VERBOSE \"otok: the NDK of this build is unknown (no source.properties under CMAKE_ANDROID_NDK or ANDROID_NDK), \"\n"
+            "    \"so it is not checked against NDK " + ndk + " of the libraries of ${_otok_dir}\")\n"
+            "elseif(_otok_ndk_revision VERSION_LESS \"" + ndk + "\")\n"
+            "  message(FATAL_ERROR \"otok: the libraries of ${_otok_dir} were built with NDK " + ndk + " and link with it or a newer one, \"\n"
+            "    \"not with NDK ${_otok_ndk_revision} at '${_otok_ndk}': build with that NDK or a newer one, \"\n"
+            "    \"or install the libraries with this one ('android-ndk' in otok's config.toml or ANDROID_NDK_HOME) and run otok install\")\n"
+            "endif()\n"
+            "unset(_otok_ndk)\n"
+            "unset(_otok_ndk_revision)\n";
+    }
     parts.link_item = [](std::string const& name) { return "-l" + name; };
     return parts;
 }
@@ -524,21 +592,31 @@ std::string detail::ndk_revision(std::string_view text)
     return {};
 }
 
+std::string detail::ndk_of_key(std::string_view key_text)
+{
+    constexpr std::string_view prefix = "toolchain.ndk = ";
+    for (std::size_t at = 0; at < key_text.size();) {
+        std::size_t end = key_text.find('\n', at);
+        if (end == std::string_view::npos) end = key_text.size();
+        std::string_view line = key_text.substr(at, end - at);
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+        if (line.starts_with(prefix)) return std::string{line.substr(prefix.size())};
+        at = end + 1;
+    }
+    return {};
+}
+
+std::strong_ordering detail::compare_revisions(std::string_view a, std::string_view b)
+{
+    std::vector<long long> x = revision_parts(a), y = revision_parts(b);
+    x.resize(std::max(x.size(), y.size()));
+    y.resize(x.size());
+    return x <=> y;
+}
+
 std::optional<fs::path> detail::newest_ndk(fs::path const& dir)
 {
-    // "29.0.14206865" as numbers, part by part
-    auto const parts = [](std::string const& name) {
-        std::vector<long long> out;
-        std::size_t at = 0;
-        while (at <= name.size()) {
-            std::size_t const end = std::min(name.find('.', at), name.size());
-            long long v = 0;
-            for (std::size_t i = at; i < end; ++i) v = std::isdigit(static_cast<unsigned char>(name[i])) ? v * 10 + (name[i] - '0') : v;
-            out.push_back(v);
-            at = end + 1;
-        }
-        return out;
-    };
+    auto const parts = [](std::string const& name) { return revision_parts(name); };
     std::optional<fs::path> best;
     std::vector<long long> best_version;
     std::error_code ec;

@@ -28,7 +28,7 @@ namespace {
 // Bumped when the meaning of a package key changes (cache-key.md 4), and the packager version, bumped
 // when otok changes how it packages.
 constexpr char const* key_format = "1";
-constexpr char const* packager_version = "9";
+constexpr char const* packager_version = "10";
 
 constexpr int output_state_format = 1;
 

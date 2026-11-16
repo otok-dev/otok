@@ -395,6 +395,7 @@ consumer_package windows_output()
     p.architectures = {"x86_64"};
     p.configurations = {"release"};
     p.properties = {{"crt", "14.44"}};
+    p.property_values = {{"crt", {"14.44"}}};
     p.libraries = {{"tiny-a_tiny_a", "tiny-a", "tiny-a/include", false, {{"tiny_a", "x86_64", "release", "tiny-a/lib/x86_64/tiny_a.lib"}}, {}, {"ws2_32"}},
         {"tiny-c_tiny_c", "tiny-c", "tiny-c/include", true,
             {{"tiny_c", "x86_64", "release", "tiny-c/lib/x86_64/tiny_c.lib", "tiny-c/bin/x86_64/tiny_c.dll", "", "", true}}, {}, {}, false}};
@@ -422,7 +423,14 @@ TEST(windows_target, writes_its_parts_of_the_cmake_config)
         << parts.checks;
     consumer_package p = windows_output();
     p.properties.clear();
+    p.property_values.clear();
     EXPECT_EQ(cmake_parts(p).checks, "");
+
+    // the newest toolset of the packages, not the first package's
+    p = windows_output();
+    p.property_values = {{"crt", {"14.44", "14.51", "14.38"}}};
+    EXPECT_NE(cmake_parts(p).checks.find("AND CMAKE_MATCH_1 LESS 51)\n"), std::string::npos) << cmake_parts(p).checks;
+    EXPECT_NE(msbuild_targets(p).find("VersionLessThan('$(VCToolsVersion)', '14.51')"), std::string::npos);
 }
 
 TEST(windows_target, writes_the_property_sheet)

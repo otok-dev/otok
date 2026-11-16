@@ -27,6 +27,18 @@ int toolset_minor(std::string const& toolset)
     return i == 3 ? -1 : n;
 }
 
+// The newest toolset of the packages' CRTs (`crt` of their package files), which the consumer needs at least; empty: none.
+std::string newest_crt(consumer_package const& package)
+{
+    std::string newest;
+    if (auto it = package.property_values.find("crt"); it != package.property_values.end()) {
+        for (std::string const& crt : it->second) {
+            if (toolset_minor(crt) > toolset_minor(newest)) newest = crt;
+        }
+    }
+    return newest;
+}
+
 // A system library as the linker takes it: "ws2_32.lib".
 std::string library_file(std::string const& name)
 {
@@ -142,8 +154,8 @@ consumer_cmake_parts detail::cmake_parts(consumer_package const& package)
         "elseif(_otok_arch MATCHES \"^(arm64|aarch64)$\")\n"
         "  set(_otok_arch \"arm64\")\n"
         "endif()\n";
-    if (auto it = package.properties.find("crt"); it != package.properties.end() && toolset_minor(it->second) >= 0) {
-        std::string const minor = std::to_string(toolset_minor(it->second));
+    if (std::string const crt = newest_crt(package); !crt.empty()) {
+        std::string const minor = std::to_string(toolset_minor(crt));
         parts.checks =
             "\n# cl links libraries of its own toolset or an older one (its version 19.<n> is the toolset 14.<n>)\n"
             "if(CMAKE_CXX_COMPILER_ID STREQUAL \"MSVC\")\n"
@@ -154,7 +166,7 @@ consumer_cmake_parts detail::cmake_parts(consumer_package const& package)
             "  set(_otok_cl \"\")\n"
             "endif()\n"
             "if(_otok_cl MATCHES \"^19\\\\.([0-9]+)\" AND CMAKE_MATCH_1 LESS " + minor + ")\n"
-            "  message(FATAL_ERROR \"otok: the libraries of ${_otok_dir} were built with the toolset " + it->second
+            "  message(FATAL_ERROR \"otok: the libraries of ${_otok_dir} were built with the toolset " + crt
             + " of MSVC and link with it or a newer one, not with 14.${CMAKE_MATCH_1} (cl ${_otok_cl})\")\n"
               "endif()\n"
               "unset(_otok_cl)\n";
@@ -300,9 +312,9 @@ std::string detail::msbuild_targets(consumer_package const& package)
             + configuration + "', which '$(Configuration)' links with (" + (configuration == "debug" ? "the debug CRT" : "the release CRT")
             + "): add &quot;" + configuration + "&quot; to 'configurations' of [windows]" + cure + "\" />\n";
     }
-    if (auto it = package.properties.find("crt"); it != package.properties.end() && toolset_minor(it->second) >= 0) {
-        text += "    <Error Condition=\"'$(VCToolsVersion)' != '' and $([MSBuild]::VersionLessThan('$(VCToolsVersion)', '" + it->second
-            + "'))\" Text=\"otok: the libraries of $(OtokDir) were built with the toolset " + it->second
+    if (std::string const crt = newest_crt(package); !crt.empty()) {
+        text += "    <Error Condition=\"'$(VCToolsVersion)' != '' and $([MSBuild]::VersionLessThan('$(VCToolsVersion)', '" + crt
+            + "'))\" Text=\"otok: the libraries of $(OtokDir) were built with the toolset " + crt
             + " of MSVC and link with it or a newer one, not with $(VCToolsVersion)\" />\n";
     }
     text += "    <ItemGroup>\n"

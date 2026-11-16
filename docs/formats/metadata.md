@@ -45,7 +45,8 @@ The project of `tests/data/projects/tiny` with an Apple target and a profile, be
       "deployment": { "ios": "16.0" },
       "configurations": ["release"],
       "linkage": "static",
-      "build-on": ["macos/xcode"]
+      "build-on": ["macos/xcode"],
+      "toolchain": null
     }
   ],
   "packages": [
@@ -157,6 +158,7 @@ The values in effect for the selected profile (`otok-toml.md` 5, 8):
 | `configurations` | array of strings | `"release"`, `"debug"`. |
 | `linkage` | string | The target's linkage, before `[deps.*] linkage`. |
 | `build-on` | array of strings | The environments of the target table (`otok-toml.md` 4.9), as written. |
+| `toolchain` | object or null | What this machine builds the target with, for scripts that build the consumer with the same: on Android `ndk`, the path of the NDK otok uses (`config.md` `android-ndk`, `ANDROID_NDK_HOME`, …; `otok-toml.md` 4.7), and `revision`, its `Pkg.Revision` (`"30.0.16248370"`). `null` on the other targets, and when the NDK is not found (which is no error here). |
 
 ### 3.3 `packages`
 

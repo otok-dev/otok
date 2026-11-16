@@ -63,11 +63,23 @@ enum class build_isolation
     sandbox
 };
 
-// What builders running together say once: the toolchains of their targets (the builds of otok publish).
+// Windows: the check of the sandbox's exits (builder::check_sandbox_exits), made by the first sandboxed slice while the
+// others wait.
+struct sandbox_exits_check
+{
+    std::mutex m;
+    std::condition_variable cv;
+    bool started = false;
+    bool done = false;
+};
+
+// What builders running together say or do once: the toolchains of their targets, the check of the sandbox's exits (the
+// builds of otok publish, docs/PLAN.md decision 103).
 struct announcements
 {
     std::mutex m;
     std::set<std::string> said;
+    sandbox_exits_check exits;
 
     bool first(std::string const& what)
     {
@@ -232,10 +244,8 @@ private:
     std::map<std::string, std::string> recipe_hashes_;  // package key → recipe_hash; filled before building
     std::set<std::string> headers_packages_;            // package keys built from a headers slice; filled before building
     std::map<std::string, std::pair<std::size_t, std::size_t>> slices_done_;  // package key → slices done, of all
-    // Windows: check_sandbox_exits, by the first sandboxed slice while the others wait
-    bool exits_check_started_ = false;
-    bool exits_checked_ = false;
-    std::condition_variable exits_checked_cv_;
+    // Windows: check_sandbox_exits of this builder alone, without settings_.announced
+    sandbox_exits_check exits_;
 };
 
 }

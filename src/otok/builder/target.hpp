@@ -201,6 +201,10 @@ public:
     // before otok's own PATH (docs/PLAN.md decision 38); empty: none of its own.
     virtual result<std::string> tools_path() { return std::string{}; }
 
+    // What scripts may need of the toolchain this machine builds the target with (metadata.md 3.2 `toolchain`: Android's
+    // NDK, its path and version); none when the target names nothing or finds no toolchain. It reports no error.
+    virtual std::optional<std::map<std::string, std::string>> machine_toolchain() { return std::nullopt; }
+
     // What the target makes of the libraries of a slice of `package` once it is built, before the checks and before
     // anything links against them: the Apple target names its dynamic libraries after their frameworks (otok-toml.md
     // 4.10). `libraries`: output name → file, as build returned them.

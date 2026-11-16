@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <compare>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -45,6 +46,13 @@ std::optional<abi_names> names_of(std::string_view abi);
 
 // `Pkg.Revision` of an NDK's source.properties: "29.0.14206865"; empty when it has none.
 std::string ndk_revision(std::string_view source_properties);
+
+// `toolchain.ndk` of a slice's key.txt (cache-key.md 3): the revision of the NDK it was built with; empty when it has none
+// (the headers slice).
+std::string ndk_of_key(std::string_view key_text);
+
+// Two NDK revisions compared as numbers, part by part: "30.0.16248370" > "29.0.14206865"; a missing part is 0.
+std::strong_ordering compare_revisions(std::string_view a, std::string_view b);
 
 // The NDK with the highest version among the subdirectories of `dir` (an SDK's `ndk/`) that have a
 // source.properties; none when there is none.

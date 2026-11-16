@@ -132,6 +132,7 @@ TEST(consumer, describes_the_output)
     EXPECT_EQ(c->architectures, std::vector<std::string>{"x86_64"});
     EXPECT_EQ(c->configurations, (std::vector<std::string>{"release", "debug"}));
     EXPECT_EQ(c->properties.at("stl"), "shared");
+    EXPECT_EQ(c->property_values, (std::map<std::string, std::vector<std::string>>{{"stl", {"shared"}}}));
     ASSERT_EQ(c->libraries.size(), 3u);
     consumer_library const& ssl = c->libraries[0];
     EXPECT_EQ(ssl.name, "openssl_ssl");

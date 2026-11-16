@@ -111,6 +111,12 @@ TEST(android_target, reads_the_ndk)
 {
     EXPECT_EQ(ndk_revision("Pkg.Desc = Android NDK\r\nPkg.Revision = 29.0.14206865\r\nPkg.BaseRevision = 29.0.14206865\r\n"), "29.0.14206865");
     EXPECT_EQ(ndk_revision("Pkg.Desc = Android NDK\n"), "");
+    EXPECT_EQ(ndk_of_key("library = z\ntoolchain.ndk = 30.0.16248370\r\ntoolchain.stl = shared\n"), "30.0.16248370");
+    EXPECT_EQ(ndk_of_key("library = z\n"), "");
+    EXPECT_EQ(compare_revisions("30.0.16248370", "29.0.14206865"), std::strong_ordering::greater);
+    EXPECT_EQ(compare_revisions("9.1.0", "29.0.14206865"), std::strong_ordering::less);  // as numbers, not as text
+    EXPECT_EQ(compare_revisions("30.0", "30.0.0"), std::strong_ordering::equal);
+    EXPECT_EQ(compare_revisions("30.0.16248370", "30.0.9"), std::strong_ordering::greater);
     EXPECT_EQ(api_levels("{\n  \"min\": 21,\n  \"max\": 35,\n  \"aliases\": {\"20\": 19}\n}"), (std::pair{21, 35}));
     EXPECT_FALSE(api_levels("{\"min\": 21}"));
 
@@ -123,6 +129,18 @@ TEST(android_target, reads_the_ndk)
     ASSERT_TRUE(newest);
     EXPECT_EQ(newest->filename(), "29.0.14206865");
     EXPECT_FALSE(newest_ndk(dir.path() / "missing"));
+}
+
+// What `otok metadata` gives scripts of the NDK (metadata.md 3.2 `toolchain`, docs/PLAN.md decision 126): none without one.
+TEST(android_target, names_its_ndk_for_metadata)
+{
+    test::temp_dir dir;
+    fake_ndk(dir, "sdk/ndk/29.0.14206865", "29.0.14206865");
+    std::string const base = path_to_utf8(dir.path().generic_u8string());
+    auto found = target::android::make_build_target("", {{"ANDROID_HOME", base + "/sdk"}})->machine_toolchain();
+    ASSERT_TRUE(found);
+    EXPECT_EQ(*found, (std::map<std::string, std::string>{{"ndk", base + "/sdk/ndk/29.0.14206865"}, {"revision", "29.0.14206865"}}));
+    EXPECT_FALSE(target::android::make_build_target(base + "/missing", {})->machine_toolchain());
 }
 
 TEST(android_target, finds_the_ndk)
@@ -306,6 +324,22 @@ TEST(android_target, writes_its_parts_of_the_cmake_config)
                                 "otok.toml and run otok install\")\n"),
         std::string::npos)
         << parts.checks;
+    EXPECT_EQ(parts.checks.find("_otok_ndk"), std::string::npos);  // no NDK recorded
+
+    // the newest NDK of the packages, read from the app's source.properties
+    p.property_values = {{"ndk", {"29.0.14206865", "30.0.16248370", "9.1.0"}}};
+    parts = cmake_parts(p);
+    EXPECT_NE(parts.checks.find("if(CMAKE_ANDROID_NDK)\n  set(_otok_ndk \"${CMAKE_ANDROID_NDK}\")\nelseif(ANDROID_NDK)\n  set(_otok_ndk \"${ANDROID_NDK}\")\n"),
+        std::string::npos)
+        << parts.checks;
+    EXPECT_NE(parts.checks.find("  file(STRINGS \"${_otok_ndk}/source.properties\" _otok_ndk_revision REGEX \"^Pkg\\\\.Revision *=\")\n"), std::string::npos)
+        << parts.checks;
+    EXPECT_NE(parts.checks.find("elseif(_otok_ndk_revision VERSION_LESS \"30.0.16248370\")\n"
+                                "  message(FATAL_ERROR \"otok: the libraries of ${_otok_dir} were built with NDK 30.0.16248370 and link with it or a newer one, \"\n"
+                                "    \"not with NDK ${_otok_ndk_revision} at '${_otok_ndk}': "),
+        std::string::npos)
+        << parts.checks;
+    EXPECT_NE(parts.checks.find("  message(VERBOSE \"otok: the NDK of this build is unknown"), std::string::npos) << parts.checks;
 }
 
 TEST(android_target, packages_include_and_lib_per_abi)
@@ -334,6 +368,16 @@ TEST(android_target, packages_include_and_lib_per_abi)
     EXPECT_TRUE(std::filesystem::exists(dir.path() / "out" / "lib" / "arm64-v8a" / "libz.a"));
     EXPECT_TRUE(std::filesystem::exists(dir.path() / "out" / "lib" / "x86_64" / "libz.a"));
     EXPECT_TRUE(std::filesystem::exists(dir.path() / "out" / "debug" / "lib" / "arm64-v8a" / "libz.a"));
+
+    // the newest NDK of the slices, which the consumer needs at least (otok-toml.md 4.11)
+    EXPECT_FALSE(read_package_files(dir.path() / "out").value_or(package_files{}).properties.contains("ndk"));  // slices without a key.txt
+    dir.write("a/key.txt", "toolchain.ndk = 29.0.14206865\n");
+    dir.write("b/key.txt", "toolchain.ndk = 30.0.16248370\n");
+    dir.write("c/key.txt", "toolchain.ndk = 9.1.0\n");
+    for (std::size_t i = 0; i < 3; ++i) package.slices[i].entry = dir.path() / std::string(1, static_cast<char>('a' + i));
+    ASSERT_TRUE(target->make_package(package, rec, {}, dir.path() / "out3"));
+    EXPECT_EQ(read_package_files(dir.path() / "out3").value_or(package_files{}).properties,
+        (std::map<std::string, std::string>{{"ndk", "30.0.16248370"}}));
 
     // one include/ for every slice
     dir.write("b/include/z.h", "other\n");
@@ -460,10 +504,15 @@ public:
 
     std::filesystem::path consumer(std::string const& abi) const { return base_ / ("libconsumer-" + abi + ".so"); }
 
+    // The NDK the libraries are built with: its root and Pkg.Revision.
+    std::string ndk_root() const { return profile_.target_tables.at("android").at("ndk"); }
+    std::string ndk_version() const { return profile_.identity.at("ndk"); }
+
     // A shared object of `source` linking `product` through the output's otok-config.cmake (otok-toml.md 4.11), configured with
-    // the NDK's toolchain file for `abi` and built, as an app's externalNativeBuild does: the shared object, or the log.
+    // the NDK's toolchain file for `abi` (or CMake's own Android support: `cmake_android`) and built, as an app's externalNativeBuild
+    // does: the shared object, or the log.
     result<std::filesystem::path> build_cmake_consumer(std::string const& source, std::string const& product, std::string const& abi,
-        std::vector<std::string> const& defines = {})
+        std::vector<std::string> const& defines = {}, bool cmake_android = false)
     {
         std::filesystem::path const dir = base_ / ("cmake-" + abi + "-" + std::to_string(consumers_++));
         std::filesystem::create_directories(dir);
@@ -476,6 +525,13 @@ public:
         std::vector<std::string> configure{"cmake", "-S", path_to_utf8(dir), "-B", path_to_utf8(dir / "build"), "-G", "Ninja",
             "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_TOOLCHAIN_FILE=" + ndk + "/build/cmake/android.toolchain.cmake", "-DANDROID_ABI=" + abi,
             "-DANDROID_PLATFORM=24"};
+        if (cmake_android) {
+            configure.resize(8);
+            for (std::string const& d : std::vector<std::string>{"CMAKE_SYSTEM_NAME=Android", "CMAKE_SYSTEM_VERSION=24", "CMAKE_ANDROID_NDK=" + ndk,
+                     "CMAKE_ANDROID_ARCH_ABI=" + abi}) {
+                configure.push_back("-D" + d);
+            }
+        }
         for (std::string const& d : defines) configure.push_back("-D" + d);
         env_vars const env = current_environment();
         std::filesystem::path const log = dir / "build.log";
@@ -578,6 +634,26 @@ TEST(android_target, gives_cmake_consumers_static_libraries)
                                                "and run otok install"),
         std::string::npos)
         << other.error().message;
+
+    // the NDK of the libraries, which the app's must be or be older than (docs/PLAN.md decision 126): CMake's own Android support
+    // finds it as the NDK's toolchain file does
+    EXPECT_EQ(read_package_files(p.output("tiny-a")).value_or(package_files{}).properties.at("ndk"), p.ndk_version());
+    auto own = p.build_cmake_consumer(source, "TinyB", "x86_64", {}, true);
+    ASSERT_TRUE(own) << own.error().message;
+    std::string config = read_file(p.output("otok-config.cmake")).value_or("");
+    for (std::size_t at = config.find(p.ndk_version()); at != std::string::npos; at = config.find(p.ndk_version(), at)) {
+        config.replace(at, p.ndk_version().size(), "999.0.0");
+    }
+    p.write("Otok/otok-config.cmake", config);
+    // at the path of the NDK, as CMake writes it
+    std::string const refusal = "were built with NDK 999.0.0 and link with it or a newer one, not with NDK " + p.ndk_version() + " at '";
+    std::string const ndk_name = path_to_utf8(path_from_utf8(p.ndk_root()).filename());
+    for (bool const cmake_android : {false, true}) {
+        auto older = p.build_cmake_consumer(source, "TinyB", "x86_64", {}, cmake_android);
+        ASSERT_FALSE(older) << cmake_android;
+        EXPECT_NE(flat(older.error().message).find(refusal), std::string::npos) << older.error().message;
+        EXPECT_NE(flat(older.error().message).find(ndk_name + "': build with that NDK or a newer one"), std::string::npos) << older.error().message;
+    }
 }
 
 // Dynamic libraries linked with c++_shared (stl = "shared") need an app of the same runtime (otok-toml.md 4.7, 4.11).
