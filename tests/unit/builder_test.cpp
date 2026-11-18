@@ -1703,6 +1703,18 @@ TEST_F(builder_test, gives_slices_the_share_of_jobs)
     ASSERT_EQ(run({"install"}), 0) << err.str();
 }
 
+// docs/PLAN.md decision 129: --jobs over OTOK_JOBS and config.toml
+TEST_F(builder_test, takes_the_jobs_of_the_command_line)
+{
+    env["OTOK_JOBS"] = "4";
+    write_recipe("b", "2.0", build_lua("b", "    assert(slice.jobs == 3, slice.jobs)\n"), options_of_b);
+    EXPECT_EQ(run({"install", "--jobs=0"}), 1);
+    EXPECT_EQ(err.str(), "error: --jobs must be a number of 1 or more, not '0'\n");
+    EXPECT_EQ(run({"install", "-jmany"}), 1);
+    EXPECT_EQ(err.str(), "error: --jobs must be a number of 1 or more, not 'many'\n");
+    ASSERT_EQ(run({"install", "-j3"}), 0) << err.str();
+}
+
 TEST_F(builder_test, passes_the_projects_flags)
 {
     // a reports what it was given in its headers, which the output copies

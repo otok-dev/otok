@@ -19,7 +19,7 @@ output is accepted only in `otok.toml` or a recipe.
 
 | Key | Type | Default | Environment | Meaning |
 |---|---|---|---|---|
-| `jobs` | integer ≥ 1 | number of logical CPUs | `OTOK_JOBS` | Total build parallelism: the size of the jobserver. |
+| `jobs` | integer ≥ 1 | number of logical CPUs | `OTOK_JOBS` | Total build parallelism: the size of the jobserver. `--jobs N` (`-jN`) of `install`, `update` and `publish` sets it for one run, over the file and `OTOK_JOBS`. |
 | `cache-dir` | path | macOS `~/Library/Caches/otok`, Linux `$XDG_CACHE_HOME/otok`, Windows `%LOCALAPPDATA%\otok\cache` | `OTOK_CACHE_DIR` | Downloads, recipe trees, index files and builds. |
 | `index` | URL, or `""` | `view+https://otok-dev.github.io/index`, the public index (`otok-dev/index`) | `OTOK_INDEX` | The recipe index `recipe = "publisher/name"` reads (`index.md`), which projects call `default` beside the indexes they add (`otok-toml.md` 6.4): its HTTPS view as `view+https://<base>` (`index.md` 8), or the URL of its git repository (`https`, or `file` for one on this machine), read as `index.md` 8.1 says. `""` (also `OTOK_INDEX` set but empty) is none: such recipes are then an error. `otok publish` publishes to it when `--index` is not given; for a view, to the `repository` of its `index.toml`. |
 | `index-mirror` | URL or path | — | `OTOK_INDEX_MIRROR` | Read the index of `index` (`default`) from elsewhere: an `https` URL is a copy of the HTTPS view at that base; a directory holding `index/config.json` is a view on disk (`index.md` 8); any other directory is a checkout of the index repository, read as it is (`index.md` 8.1). |

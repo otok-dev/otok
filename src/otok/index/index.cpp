@@ -107,7 +107,7 @@ toml::table recipe_projection(toml::table const& recipe_toml, std::string_view p
     // those of targets this otok does not know too, so that it projects a newer otok's recipe as that otok did
     // (docs/PLAN.md decision 98); a valid recipe has no other
     for (auto const& [key, n] : recipe_toml) {
-        static constexpr std::string_view left_out[] = {"recipe", "source", "resource", "vars", "product", "publish", "metadata"};
+        static constexpr std::string_view left_out[] = {"recipe", "source", "resource", "vars", "product", "cmake", "publish", "metadata"};
         if (n.is_table() && std::ranges::none_of(left_out, [&](std::string_view k) { return k == key.str(); })) copy_node(out, key.str(), n);
     }
     if (toml::table* options = out["options"].as_table()) {

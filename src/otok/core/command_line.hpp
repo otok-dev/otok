@@ -16,7 +16,8 @@
 
 // The command line: `otok [global options] <command> [options] [arguments]` (docs/PLAN.md decision 12).
 // Options are `--name`, `--name value` or `--name=value`, with an optional one-letter alias (`-C dir`);
-// a repeatable flag's alias may be repeated in one argument (`-vv`). `--` ends the options.
+// a repeatable flag's alias may be repeated in one argument (`-vv`), and an option with a value may have it right
+// after its alias (`-j15`, `-Cdir`). `--` ends the options.
 namespace otok {
 
 struct option_spec

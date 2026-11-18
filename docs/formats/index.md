@@ -146,7 +146,7 @@ publisher wrote of it would be taken on trust. Marks of builds, if an index has 
 that builds published recipes, are records of their own, written by that CI.
 | `[tool]`, `[platforms]`, `[options.*]`, `[deps.*]`, `[tool-deps.*]`, `[toolchains]`, `[<target>]` (`[apple]`, …) | the same tables | Copied, except option `doc` strings (the catalog reads them from the recipe). |
 
-Not copied: `[vars]`, `[[product]]`, `[publish]`, `[metadata]`, `name` (it is in `recipe`), `homepage`,
+Not copied: `[vars]`, `[[product]]`, `[cmake.*]`, `[publish]`, `[metadata]`, `name` (it is in `recipe`), `homepage`,
 `documentation`, `license-files` — they matter for building and for the catalog, both of which read the
 recipe tree.
 

@@ -63,6 +63,12 @@ result<parsed_command> parse_command_line(std::span<std::string const> args, std
     parsed_command out;
     command_spec const* command = nullptr;
     bool options_ended = false;
+    // whether the option of this alias, global or the command's, takes a value
+    auto const takes_value = [&](char alias) {
+        option_spec const* spec = find_option(global, {}, alias);
+        if (!spec && command) spec = find_option(command->options, {}, alias);
+        return spec && !spec->value_name.empty();
+    };
 
     for (std::size_t i = 0; i < args.size(); ++i) {
         std::string const& arg = args[i];
@@ -94,6 +100,10 @@ result<parsed_command> parse_command_line(std::span<std::string const> args, std
             if (eq != std::string::npos) inline_value = arg.substr(eq + 1);
         } else if (arg.size() == 2) {
             alias = arg[1];
+        } else if (takes_value(arg[1])) {
+            // `-j15`: the value of an option with a value right after its alias
+            alias = arg[1];
+            inline_value = arg.substr(2);
         } else if (std::ranges::all_of(arg.substr(1), [&](char c) { return c == arg[1]; })) {
             // `-vv`: a repeatable flag, as often as its alias
             alias = arg[1];

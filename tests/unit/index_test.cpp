@@ -57,6 +57,7 @@ std::string recipe_text(std::string_view description = "Test.")
         "[toolchains]\ncmake = { version = \">= 3.20\", default-recipe = \"p/cmake\" }\n"
         "[apple]\nxcode = \">= 16\"\n"
         "[[product]]\nname = \"A\"\nlibraries = [\"a\"]\napple = { privacy-manifest = \"PrivacyInfo.xcprivacy\" }\n"
+        "[cmake.A]\ntargets = { \"A::A\" = \"A\" }\n"
         "[metadata]\nnote = \"kept out\"\n";
 }
 
@@ -166,7 +167,7 @@ TEST(index_entry, projects_a_recipe)
     EXPECT_EQ(p["revision"].value_or(0), 2);
     EXPECT_TRUE(p.contains("linkage"));
     EXPECT_TRUE(p.contains("keywords"));
-    for (std::string_view key : {"name", "homepage", "license-files", "vars", "product", "metadata", "channel"}) {
+    for (std::string_view key : {"name", "homepage", "license-files", "vars", "product", "cmake", "metadata", "channel"}) {
         EXPECT_FALSE(p.contains(key)) << key;
     }
     EXPECT_FALSE(p["source"].as_table()->contains("patches"));

@@ -21,7 +21,7 @@ option_spec const global[] = {
 };
 
 command_spec const commands[] = {
-    {"install", "", "Install", {{"locked", 0, "", "Use the lock"}, {"profile", 0, "NAME", "A profile"}, {"verbose", 'v', "", "Say more", true}}, 0, 0},
+    {"install", "", "Install", {{"locked", 0, "", "Use the lock"}, {"profile", 0, "NAME", "A profile"}, {"jobs", 'j', "N", "Jobs"}, {"verbose", 'v', "", "Say more", true}}, 0, 0},
     {"why", "LIBRARY", "Explain", {}, 1, 1},
     {"update", "[LIBRARY...]", "Update", {}, 0, static_cast<std::size_t>(-1)},
 };
@@ -75,7 +75,7 @@ TEST(command_line, counts_repeatable_flags)
     p = parse({"install", "--locked"});
     ASSERT_TRUE(p.has_value()) << p.error().message;
     EXPECT_EQ(p->count("locked"), 1);
-    EXPECT_EQ(parse({"-CC"}).error().message, "unknown option '-CC'");  // only a flag repeats
+    EXPECT_EQ(parse({"-CC"}).value().value("directory"), "C");  // only a flag repeats: an option with a value takes it
     EXPECT_EQ(parse({"install", "-vx"}).error().message, "unknown option '-vx'");
 }
 
@@ -88,7 +88,6 @@ TEST(command_line, reports_errors)
     EXPECT_EQ(parse({"install", "--locked=yes"}).error().message, "option '--locked' takes no value");
     EXPECT_EQ(parse({"install", "--profile"}).error().message, "option '--profile' needs a value (NAME)");
     EXPECT_EQ(parse({"-x"}).error().message, "unknown option '-x'");
-    EXPECT_EQ(parse({"-Cdir"}).error().message, "unknown option '-Cdir'");
     EXPECT_EQ(parse({"install", "extra"}).error().message, "'otok install' takes no arguments; see 'otok help install'");
     EXPECT_EQ(parse({"why"}).error().message, "'otok why' expects LIBRARY; see 'otok help why'");
     EXPECT_EQ(parse({"why", "a", "b"}).error().message, "'otok why' expects LIBRARY; see 'otok help why'");
@@ -105,4 +104,21 @@ TEST(command_line, usage)
     std::string const one = command_usage("otok", commands[0]);
     EXPECT_NE(one.find("usage: otok install [options]\n"), std::string::npos) << one;
     EXPECT_NE(one.find("    --profile NAME  A profile\n"), std::string::npos) << one;
+}
+
+// `-j15`, `-Cdir`: the value right after the alias of an option with a value.
+TEST(command_line, takes_values_after_aliases)
+{
+    auto p = parse({"-Cdir", "install", "-j15"});
+    ASSERT_TRUE(p.has_value()) << p.error().message;
+    EXPECT_EQ(p->value("directory"), "dir");
+    EXPECT_EQ(p->value("jobs"), "15");
+
+    p = parse({"install", "-j", "3"});
+    ASSERT_TRUE(p.has_value()) << p.error().message;
+    EXPECT_EQ(p->value("jobs"), "3");
+
+    EXPECT_EQ(parse({"install", "-j4", "--jobs=5"}).error().message, "option '--jobs' is given twice");
+    EXPECT_EQ(parse({"why", "a", "-j4"}).error().message, "unknown option '-j4'");
+    EXPECT_EQ(parse({"install", "-vj4"}).error().message, "unknown option '-vj4'");  // flags and values do not combine
 }

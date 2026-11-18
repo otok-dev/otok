@@ -68,6 +68,7 @@ option_spec const no_sandbox_option{"no-sandbox", 0, "", "Build without the sand
 option_spec const no_virtual_paths_option{"no-virtual-paths", 0, "",
     "Windows: build processes see the real, long paths of the cache and the work directories, not short drive letters"};
 option_spec const progress_option{"progress", 0, "auto|plain", "auto: the slices under way below the lines on a terminal; plain: lines only"};
+option_spec const jobs_option{"jobs", 'j', "N", "Run at most N jobs at once (over 'jobs' of config.toml and OTOK_JOBS)"};
 // otok.dev.toml (docs/formats/otok-dev-toml.md 3).
 option_spec const no_dev_option{"no-dev", 0, "", "Build what otok.lock says, ignoring the working trees of otok.dev.toml"};
 option_spec const drop_option{"drop", 0, "SYSTEM,...", "Resolve the project for machines of these systems no longer (windows, linux, macos): remove their graphs from otok.lock"};
@@ -100,6 +101,22 @@ bool progress_valid(parsed_command const& cmd, command_context& ctx)
     if (!progress || *progress == "auto" || *progress == "plain") return true;
     ctx.err << "error: --progress must be 'auto' or 'plain', not " << in_quotes(*progress) << "\n";
     return false;
+}
+
+// --jobs: the number of jobs over config.toml's and OTOK_JOBS (docs/PLAN.md decision 129); false, reported, when it is not
+// a number of 1 or more.
+bool apply_jobs(parsed_command const& cmd, command_context& ctx, machine_config& config)
+{
+    auto const value = cmd.value("jobs");
+    if (!value) return true;
+    std::int64_t parsed = 0;
+    auto const [end, ec] = std::from_chars(value->data(), value->data() + value->size(), parsed);
+    if (ec != std::errc{} || end != value->data() + value->size() || parsed < 1) {
+        ctx.err << "error: --jobs must be a number of 1 or more, not " << in_quotes(*value) << "\n";
+        return false;
+    }
+    config.jobs = parsed;
+    return true;
 }
 
 // The manifest, the current lock and a resolution that prefers it.
@@ -347,6 +364,7 @@ std::unique_ptr<project> load_project(command_context& ctx, parsed_command const
     }
     auto config = load_config(ctx.env, diags);
     if (!config) return nullptr;
+    if (!apply_jobs(cmd, ctx, *config)) return nullptr;
     cache_notices notices{
         .waiting = [&ctx](std::string const& what) { ctx.err << "note: " << what << "\n"; },
         .fetching = [&ctx](std::string const& what) { ctx.err << what << "\n"; },
@@ -2224,7 +2242,7 @@ int publish(parsed_command const& cmd, command_context& ctx)
     diagnostics diags;
     auto config = load_config(ctx.env, diags);
     report(diags, ctx.err);
-    if (!config) return 1;
+    if (!config || !apply_jobs(cmd, ctx, *config)) return 1;
     cache_notices notices{
         .waiting = [&ctx](std::string const& what) { ctx.err << "note: " << what << "\n"; },
         .fetching = [&ctx](std::string const& what) { ctx.err << what << "\n"; },
@@ -2516,6 +2534,7 @@ int publish(parsed_command const& cmd, command_context& ctx)
                         install.counts[name] = cmd.count(name);
                     }
                 }
+                if (auto jobs = cmd.value("jobs")) install.values.emplace("jobs", *jobs);
                 auto const started = std::chrono::steady_clock::now();
                 b.result = install_pipeline(install, sub, true, {}, false);
                 if (b.result == 0) summary << "built " << b.text << " (" << detail::elapsed_text(std::chrono::steady_clock::now() - started) << ")\n";
@@ -2838,9 +2857,9 @@ std::span<command_spec const> command_specs()
 {
     static command_spec const commands[] = {
         {"install", "", "Resolve the dependencies (keeping locked versions), write otok.lock, fetch the inputs and build the libraries into the output",
-            {build_profile_option, locked_option, offline_option, frozen_option, allow_advisory_option, verbose_option, keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option, no_dev_option}, 0, 0},
+            {build_profile_option, locked_option, offline_option, frozen_option, allow_advisory_option, verbose_option, keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option, jobs_option, no_dev_option}, 0, 0},
         {"update", "[LIBRARY...]", "Move every library (or the named ones) to the newest allowed version, then as install",
-            {build_profile_option, offline_option, allow_advisory_option, verbose_option, keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option, no_dev_option, drop_option}, 0, any_number},
+            {build_profile_option, offline_option, allow_advisory_option, verbose_option, keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option, jobs_option, no_dev_option, drop_option}, 0, any_number},
         {"fetch", "", "Resolve and write otok.lock as install does, then fetch the inputs of every package in it (all profiles); build nothing",
             {locked_option, offline_option, frozen_option, allow_advisory_option, no_dev_option}, 0, 0},
         {"tree", "", "Print the resolved graph with versions, recipes, platforms and changed options", {profile_option, offline_option, no_dev_option}, 0, 0},
@@ -2863,7 +2882,7 @@ std::span<command_spec const> command_specs()
                 {"dry-run", 0, "", "Build, and publish nothing"}, {"no-build", 0, "", "Add the entry without building the recipe"},
                 {"no-push", 0, "", "With a checkout of the index: commit the entry, but do not push"},
                 verbose_option,
-                keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option}, 0, any_number},
+                keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option, jobs_option}, 0, any_number},
         {"licenses", "", "Show the licenses of the third-party software built into otok, and where otok's source is", {}, 0, 0},
         {"log", "LIBRARY [SLICE]", "Show the log of the latest build of a library (or of one slice of it) kept in the cache, a failed one too",
             {{"list", 0, "", "List the logs of the library kept in the cache, the newest first"}}, 1, 2},
