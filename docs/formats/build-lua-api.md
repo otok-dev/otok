@@ -66,7 +66,8 @@ end
 - **Short paths on Windows.** With `virtual-paths` (`config.md`) the paths of the slice (`slice.source`, `slice.build`,
   `slice.prefix`, the dependencies' prefixes, toolchains of recipes, resources) are on short drive letters that only otok
   and the build's processes see (`cache.md` 7.1): `build.lua` uses them as they are, and anything resolving them gets
-  the same letters back.
+  the same letters back. Without them (`virtual-paths` off, or no letter free) every path is the real one, and so are
+  the paths otok's functions give back, though other builds of the same otok process have letters.
 - **Failure.** `error(...)`, a Lua runtime error, or a failing `otok.run` aborts the slice. otok
   reports the message with the `build.lua` line, the failed command and the end of the slice's log,
   and keeps the whole log, or the work directory when `keep-build-dirs` is set (`config.md`, `cache.md` 7.1).
@@ -417,7 +418,7 @@ file (`otok.cmake_toolchain()`) and meson machine file (`otok.meson_cross_file()
 | `otok.move(from, to)` | Moves a file or directory. |
 | `otok.remove(path)` | Removes a file or a directory tree; not `slice.source`, `slice.build` or `slice.prefix` themselves. |
 | `otok.mkdir(path)` | Creates a directory and its parents. |
-| `otok.glob(pattern, base)` | Array of the absolute paths of files and directories under `base` (default `slice.source`) whose path relative to `base` matches `pattern`, sorted. `*` and `?` match within one path component, `**` across components (`**/` also matches nothing). |
+| `otok.glob(pattern, base)` | Array of the absolute paths of files and directories under `base` (default `slice.source`; a relative one is relative to `slice.source`) whose path relative to `base` matches `pattern`, sorted. Each begins with `base` as given, made absolute and normalized, followed by `/` and the matched path, so cutting `base` off the front of one leaves that path. `*` and `?` match within one path component, `**` across components (`**/` also matches nothing). |
 | `otok.join(…)` | Joins path components with `/`. |
 
 ### 6.4 Messages

@@ -146,9 +146,9 @@ void skip_sandbox_exit_checks() noexcept;
 namespace detail {
 
 // The text of a slice entry's result.toml: what build returned (`out`), relative to `slice_prefix` as build_script checks
-// those paths (resolved, through the drive on Windows); an error naming the first path it cannot write so (cache.md 6.2:
-// the entry would be damaged, so it is never made).
-result<std::string> write_result(build_output const& out, std::filesystem::path const& slice_prefix);
+// those paths (resolved, through the drives when the slice's paths are on them: `virtual_paths`); an error naming the first
+// path it cannot write so (cache.md 6.2: the entry would be damaged, so it is never made).
+result<std::string> write_result(build_output const& out, std::filesystem::path const& slice_prefix, bool virtual_paths = false);
 
 }  // namespace detail
 
@@ -231,6 +231,7 @@ private:
     std::optional<slice_spec> tool_slice_;
     std::unique_ptr<job_broker> own_broker_;
     job_broker* broker_ = nullptr;                      // own_broker_, or that of the settings
+    std::filesystem::path work_root_;                   // its work directories: <cache builds>/<n> (cache.md 7.1)
     std::filesystem::path builds_drive_;                // the drive of the work directories (core/virtual_drives); empty: none
     std::vector<std::filesystem::path> drives_;         // the letters this builder uses, released when it ends
 

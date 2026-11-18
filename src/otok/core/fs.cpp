@@ -21,6 +21,9 @@
 #   include <cerrno>
 #   include <sys/clonefile.h>
 #endif
+#ifdef _WIN32
+#   include <windows.h>
+#endif
 
 namespace otok {
 
@@ -79,6 +82,29 @@ std::filesystem::path plain_path(std::filesystem::path const& path)
 
 result<std::string> read_file(std::filesystem::path const& path)
 {
+#ifdef _WIN32
+    // shared for deletion too, as POSIX files are: a file read is replaced meanwhile by a rename onto it (write_file_atomic,
+    // the files of an index view that the projects of otok publish read and update at once), which fails while any handle
+    // without FILE_SHARE_DELETE is open, as the C runtime's are
+    HANDLE const h = ::CreateFileW(long_path(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return fail("cannot open '" + path_to_utf8(plain_path(path)) + "'");
+    std::string content;
+    char buffer[65536];
+    bool ok = true;
+    for (;;) {
+        DWORD got = 0;
+        if (!::ReadFile(h, buffer, sizeof buffer, &got, nullptr)) {
+            ok = false;
+            break;
+        }
+        if (got == 0) break;
+        content.append(buffer, got);
+    }
+    ::CloseHandle(h);
+    if (!ok) return fail("cannot read '" + path_to_utf8(plain_path(path)) + "'");
+    return content;
+#else
     std::ifstream in{long_path(path), std::ios::binary};
     if (!in) {
         return fail("cannot open '" + path_to_utf8(plain_path(path)) + "'");
@@ -88,6 +114,7 @@ result<std::string> read_file(std::filesystem::path const& path)
         return fail("cannot read '" + path_to_utf8(plain_path(path)) + "'");
     }
     return content;
+#endif
 }
 
 void rename_path(std::filesystem::path const& given_from, std::filesystem::path const& given_to, std::error_code& ec)

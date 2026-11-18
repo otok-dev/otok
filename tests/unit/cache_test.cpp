@@ -204,6 +204,48 @@ TEST(cache, removes_tmp_directories_of_finished_processes)
     EXPECT_TRUE(std::filesystem::exists(root / "tmp" / "555-starting" / "x"));
 }
 
+// cache.md 7: a session shares the opening and the work directories of builds, and keeps its own tmp directory, settings
+// and notices (the projects otok publish builds at once, whose files in tmp have the same names)
+TEST(cache, sessions_share_the_builds)
+{
+    test::temp_dir dir;
+    std::filesystem::path const root = dir.path() / "cache";
+    std::vector<std::string> said;
+    auto opened = cache_store::open(root, {.waiting = [&](std::string const& what) { said.push_back("opened: " + what); }});
+    ASSERT_TRUE(opened.has_value()) << opened.error().message;
+    EXPECT_EQ(opened->builds(), opened->tmp() / "build");
+
+    std::filesystem::path first_tmp;
+    {
+        auto first = opened->session();
+        auto second = opened->session();
+        ASSERT_TRUE(first.has_value()) << first.error().message;
+        ASSERT_TRUE(second.has_value()) << second.error().message;
+        EXPECT_EQ(first->root(), root);
+        EXPECT_EQ(first->builds(), opened->builds());
+        EXPECT_EQ(second->builds(), opened->builds());
+        first_tmp = first->tmp();
+        EXPECT_EQ(first_tmp.parent_path(), opened->tmp());
+        EXPECT_EQ(second->tmp().parent_path(), opened->tmp());
+        EXPECT_NE(first_tmp, second->tmp());
+        EXPECT_TRUE(std::filesystem::is_directory(first_tmp));
+        // a session of a session is one of the store opened
+        auto third = first->session();
+        ASSERT_TRUE(third.has_value()) << third.error().message;
+        EXPECT_EQ(third->tmp().parent_path(), opened->tmp());
+
+        first->set_offline(true);
+        EXPECT_TRUE(first->offline());
+        EXPECT_FALSE(second->offline());
+        EXPECT_FALSE(opened->offline());
+        std::ofstream{first_tmp / "git.log"} << "x";
+    }
+    // gone with the session; the opener's tmp stays while it lives
+    EXPECT_FALSE(std::filesystem::exists(first_tmp));
+    EXPECT_TRUE(std::filesystem::is_directory(opened->tmp()));
+    EXPECT_TRUE(said.empty());
+}
+
 TEST(cache, fetches_downloads_once)
 {
     test::temp_dir dir;

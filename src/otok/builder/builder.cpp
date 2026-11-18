@@ -343,11 +343,11 @@ std::map<std::string, std::string> read_key(fs::path const& file)
 
 }  // namespace
 
-result<std::string> detail::write_result(build_output const& out, fs::path const& slice_prefix)
+result<std::string> detail::write_result(build_output const& out, fs::path const& slice_prefix, bool virtual_paths)
 {
     // as build_script checks the paths build.lua returns, which are in this form: resolved, through the drive on Windows
     std::error_code ec;
-    fs::path const prefix = virtual_drives::to_virtual(fs::weakly_canonical(slice_prefix, ec));
+    fs::path const prefix = virtual_drives::resolved(slice_prefix, virtual_paths, ec);
     std::optional<std::string> wrong;
     auto const relative = [&](std::string const& what, fs::path const& p) {
         fs::path const r = p.lexically_relative(prefix);
@@ -615,6 +615,10 @@ builder::builder(resolution const& r, manifest const& m, lock_file const& lock, 
     : r_{r}, m_{m}, lock_{lock}, project_dir_{std::move(project_dir)}, inputs_{std::move(inputs)}, targets_{targets}, cache_{cache},
       settings_{std::move(settings)}, progress_{progress}
 {
+    // a directory of its own among the builds of the cache's sessions (otok publish builds projects at once, whose work
+    // directories have the same names): a number, two characters of the paths the build sees
+    static std::atomic<unsigned> builders{0};
+    work_root_ = cache_.builds() / std::to_string(++builders);
 }
 
 namespace {
@@ -630,6 +634,8 @@ void skip_sandbox_exit_checks() noexcept
 
 builder::~builder()
 {
+    std::error_code ec;
+    fs::remove_all(long_path(work_root_), ec);
     for (fs::path const& d : drives_) virtual_drives::release(d);
 }
 
@@ -752,10 +758,10 @@ std::expected<std::vector<built_package>, std::vector<error>> builder::build_all
     // otok-sandbox.dll, which gives the device map to the children of the build's programs
     if (settings_.virtual_paths && settings_.sandbox.kind == host_sandbox::mechanism::appcontainer && !settings_.sandbox.program.empty()) {
         std::error_code ec;
-        fs::create_directories(cache_.tmp() / "build", ec);
+        fs::create_directories(cache_.builds(), ec);
         auto const cache_drive = virtual_drives::enable().and_then([&] { return virtual_drives::drive_for(cache_.root()); });
         if (cache_drive) drives_.push_back(*cache_drive);
-        auto const drive = cache_drive.and_then([&](fs::path const&) { return virtual_drives::drive_for(cache_.tmp() / "build"); });
+        auto const drive = cache_drive.and_then([&](fs::path const&) { return virtual_drives::drive_for(cache_.builds()); });
         if (drive) drives_.push_back(builds_drive_ = *drive);
         else say("warning: the paths of the builds are not shortened: " + drive.error().message);
     }
@@ -1326,7 +1332,7 @@ result<void> builder::prepare_sources(resolved_package const& p, built_package& 
         return {};
     }
     say("patching the source of " + label);
-    fs::path const work = cache_.tmp() / "build" / (p.library + "-sources");
+    fs::path const work = work_root_ / (p.library + "-sources");
     auto made = cache_.ensure(entry, "patching the source of " + label, [&](fs::path const& staging) -> result<void> {
         fs::remove_all(long_path(work), ec);
         fs::create_directories(work, ec);
@@ -1659,7 +1665,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         }
     }
     auto const started = std::chrono::steady_clock::now();
-    fs::path const work = dev ? out.entry : cache_.tmp() / "build" / work_name;
+    fs::path const work = dev ? out.entry : work_root_ / work_name;
     auto const build = [&](fs::path const& staging) -> result<void> {
         // a dev slice keeps source/ and build/ while the rest of its key stays (otok-dev-toml.md 4)
         std::optional<dev_record> record;
@@ -1824,6 +1830,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         slice.build = base / "build";
         slice.prefix = base / "prefix";
         slice.recipe = inputs.recipe_dir;
+        slice.virtual_paths = !builds_drive_.empty();
         // the AppContainer reads only what otok grants it, in its cache: a recipe of a path elsewhere (the user's working
         // tree, never touched) is a copy in the work directory, as a recipe of git is one in the cache (docs/PLAN.md
         // decision 103)
@@ -2240,7 +2247,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         relocate_pkg_config(slice.prefix);
 
         // before the prefix moves: an entry whose result.toml would be damaged is never made (cache.md 6.2)
-        auto const result_text = detail::write_result(*built, slice.prefix);
+        auto const result_text = detail::write_result(*built, slice.prefix, slice.virtual_paths);
         if (!result_text) return failed(result_text.error().message);
         if (dev) {
             // the entry is the work directory, last used now (cache.md 9)

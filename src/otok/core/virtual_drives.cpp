@@ -307,4 +307,10 @@ result<void> give(void*)
 
 #endif
 
+fs::path resolved(fs::path const& p, bool through_drives, std::error_code& ec)
+{
+    fs::path const real = fs::weakly_canonical(p, ec);
+    return through_drives ? to_virtual(real) : real;
+}
+
 }

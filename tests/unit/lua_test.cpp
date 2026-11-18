@@ -15,6 +15,7 @@
 
 #include "otok/core/fs.hpp"
 #include "otok/core/process.hpp"
+#include "otok/core/virtual_drives.hpp"
 #include "otok/lua/build_script.hpp"
 #include "otok/lua/state.hpp"
 #include "test_util.hpp"
@@ -904,6 +905,9 @@ function build(slice, options, deps)
     assert(#top == 1 and top[1]:find("/src/a.c$"))
     assert(#otok.glob("*.c", slice.build .. "/src-copy/sub") == 1)
     assert(#otok.glob("s?c/**") == 3)  -- src/a.c, src/sub, src/sub/b.c
+    -- the paths begin with the base as given, absolute and normalized
+    assert(otok.glob("*.c", "src")[1] == slice.source .. "/src/a.c")
+    assert(otok.glob("*.c", "./src/sub/..")[1] == slice.source .. "/src/a.c")
     assert(otok.join("a", "b/", "/c", "", "d") == "a/b/c/d")
     otok.log("logged", 42)
     otok.warn("check this")
@@ -916,6 +920,47 @@ end
     EXPECT_EQ(out->warnings, std::vector<std::string>{"check this"});
     EXPECT_NE(log().find("logged\t42\nwarning: check this\nprinted\n"), std::string::npos) << log();
 }
+
+#ifdef _WIN32
+// The letters of core/virtual_drives are the process's: a slice whose paths are real (its builder has no letter, as in
+// otok publish once the letters run out) gets real paths back though a letter covers them, and one whose paths are on a
+// letter gets them on it; either way a path otok.glob gives begins with the directory the script named (skia's headers).
+TEST_F(build_script, paths_keep_the_form_of_the_slice)
+{
+    dir.write("source/include/core/a.h", "a\n");
+    dir.write("source/include/b.h", "b\n");
+    ASSERT_TRUE(virtual_drives::enable());
+    auto drive = virtual_drives::drive_for(base);
+    ASSERT_TRUE(drive) << drive.error().message;
+    std::string const script = R"(
+function build(slice, options, deps)
+    local from = slice.source .. "/include"
+    local found = otok.glob("**/*.h", from)
+    assert(#found == 2, #found)
+    for _, h in ipairs(found) do
+        assert(h:sub(1, #from + 1) == from .. "/", h)
+        otok.write(slice.prefix .. "/include/" .. h:sub(#from + 2), otok.read(h))
+    end
+    return finish(slice)
+end
+)";
+    for (bool const on_drive : {false, true}) {
+        SCOPED_TRACE(on_drive ? "on the letter" : "real");
+        std::filesystem::path const root = on_drive ? *drive : base;
+        slice.virtual_paths = on_drive;
+        slice.source = root / "source";
+        slice.build = root / "build";
+        slice.prefix = root / "prefix";
+        auto out = run(script);
+        ASSERT_TRUE(out.has_value()) << out.error().message;
+        EXPECT_EQ(read_file(base / "prefix" / "include" / "core" / "a.h").value_or("?"), "a\n");
+        EXPECT_EQ(read_file(base / "prefix" / "include" / "b.h").value_or("?"), "b\n");
+        EXPECT_EQ(out->libraries.at("p"), root / "prefix" / "lib" / "libp.a");
+        std::filesystem::remove_all(base / "prefix");
+    }
+    virtual_drives::release(*drive);
+}
+#endif
 
 TEST_F(build_script, files_are_confined)
 {

@@ -71,6 +71,9 @@ struct slice_context
 
     std::filesystem::path source, build, prefix;   // writable
     std::filesystem::path recipe;                   // read-only
+    // the paths of the slice are on the builder's virtual drives (core/virtual_drives): the script's paths are taken
+    // through them too, else as they are, whatever letters other builders of the process have
+    bool virtual_paths = false;
     std::map<std::string, std::filesystem::path> resources;
     std::map<std::string, option_data> vars;
     std::int64_t jobs = 1;

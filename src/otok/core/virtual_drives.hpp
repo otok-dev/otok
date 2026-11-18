@@ -40,6 +40,12 @@ std::filesystem::path to_virtual(std::filesystem::path const& p);
 // `p` on a virtual letter, as the real path; otherwise `p` as it is.
 std::filesystem::path to_real(std::filesystem::path const& p);
 
+// `p` resolved (weakly_canonical, which gives the real path of one on a letter) and, with `through_drives`, through the
+// letters as to_virtual gives it: the form a builder gives its slice's paths in, with or without its drives. The letters
+// are the process's, so a builder without its own must not take them, or a path would come back on another builder's
+// (otok publish, where a drive of the cache may be there while the builds of a project have none).
+std::filesystem::path resolved(std::filesystem::path const& p, bool through_drives, std::error_code& ec);
+
 struct drive
 {
     wchar_t letter = 0;

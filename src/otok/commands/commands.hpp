@@ -41,6 +41,9 @@ struct command_context
     // and their jobs. Nothing: each build has its own.
     progress_display* display = nullptr;
     job_broker* jobs = nullptr;
+    // The cache that command opened: a project takes a session of it (cache.md 7) instead of opening it again, so the
+    // builds of the process share the work directories and their drive (core/virtual_drives). Nothing: opened anew.
+    cache_store const* cache = nullptr;
     // An install another command runs for itself (otok publish): it says what it builds, but not what it packages,
     // and the builders say once what is the same for all.
     bool nested = false;

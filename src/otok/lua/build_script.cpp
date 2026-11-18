@@ -318,7 +318,7 @@ private:
         auto p = lua_detail::confine(env_, given, lua_detail::access::read);
         if (!p) return fail(label_ + ": " + what + ": " + p.error().message);
         std::error_code ec;
-        fs::path const prefix = virtual_drives::to_virtual(fs::weakly_canonical(env_.slice.prefix, ec));
+        fs::path const prefix = virtual_drives::resolved(env_.slice.prefix, env_.slice.virtual_paths, ec);
         auto const [r, q] = std::mismatch(prefix.begin(), prefix.end(), p->begin(), p->end());
         if (r != prefix.end()) return fail(label_ + ": " + what + " '" + given + "' is not inside slice.prefix");
         if (!fs::exists(*p, ec)) return fail(label_ + ": " + what + " '" + given + "' does not exist");

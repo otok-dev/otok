@@ -965,12 +965,17 @@ int otok_glob(lua_State* L)
 {
     std::string const pattern = string_value(L, 1, "otok.glob: the pattern");
     script_env const& e = env_of(L);
-    fs::path const base = lua_isnoneornil(L, 2) ? confined(L, script_path(e.slice.source), access::read) : path_arg(L, 2, "otok.glob", access::read);
+    // the files under the directory as the script named it: a build script cuts the directory off the front of them
+    fs::path given = lua_isnoneornil(L, 2) ? e.slice.source : path_from_utf8(string_value(L, 2, "otok.glob: the path"));
+    if (given.is_relative()) given = e.slice.source / given;
+    given = given.lexically_normal();
+    fs::path const base = confined(L, script_path(given), access::read);
+    std::string const shown = script_path(given);
     std::vector<std::string> found;
     std::error_code ec;
     for (auto it = fs::recursive_directory_iterator{base, ec}; !ec && it != fs::recursive_directory_iterator{}; it.increment(ec)) {
         std::string const relative = path_to_utf8(it->path().lexically_relative(base).generic_u8string());
-        if (glob_match(pattern, relative)) found.push_back(script_path(it->path()));
+        if (glob_match(pattern, relative)) found.push_back(shown + (shown.ends_with('/') ? "" : "/") + relative);
     }
     if (ec) raise(L, "otok.glob: cannot read '" + script_path(base) + "': " + ec.message());
     std::ranges::sort(found);
@@ -1025,11 +1030,12 @@ int otok_warn(lua_State* L)
 
 script_env::script_env(slice_context const& s) : slice{s}
 {
-    auto const add = [](std::vector<fs::path>& roots, fs::path const& p) {
+    auto const add = [&s](std::vector<fs::path>& roots, fs::path const& p) {
         if (p.empty()) return;
         std::error_code ec;
-        // through the virtual drives as the build sees them: resolved, a path on one is the long real path
-        fs::path real = virtual_drives::to_virtual(fs::weakly_canonical(p, ec));
+        // in the form of the slice's paths: resolved, a path on a drive is the long real path, which is taken through the
+        // drives again only when the slice's paths are on them
+        fs::path real = virtual_drives::resolved(p, s.virtual_paths, ec);
         roots.push_back(ec ? p.lexically_normal() : std::move(real));
     };
     for (fs::path const& p : {s.source, s.build, s.prefix}) {
@@ -1064,7 +1070,7 @@ result<fs::path> confine(script_env const& env, std::string_view path, access a)
     fs::path p = path_from_utf8(path);
     if (p.is_relative()) p = env.slice.source / p;
     std::error_code ec;
-    fs::path const real = virtual_drives::to_virtual(fs::weakly_canonical(p, ec));
+    fs::path const real = virtual_drives::resolved(p, env.slice.virtual_paths, ec);
     if (ec) return fail("cannot resolve '" + std::string{path} + "': " + ec.message());
     for (fs::path const& root : a == access::write ? env.write_roots : env.read_roots) {
         if (within(real, root)) return real;

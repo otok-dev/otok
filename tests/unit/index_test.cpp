@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <functional>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "otok/cache/store.hpp"
@@ -947,6 +949,52 @@ TEST(index_view, revalidates_files_over_http)
     ASSERT_FALSE(uncached.has_value());
     EXPECT_EQ(uncached.error().message, "offline, and https://view.example.com/index/advisories.json is not in the cache; read the index online once");
     EXPECT_EQ(server.requests.size(), asked);
+}
+
+// cache.md 11: the views of one process (the projects of otok publish) read a file one after another, so the server is
+// asked for it whole once and the others revalidate; a file the cache cannot take is read as received
+TEST(index_view, shares_the_files_between_views_of_a_process)
+{
+    test::temp_dir dir;
+    std::filesystem::path const index = make_test_index(dir);
+    ASSERT_TRUE(write_index_view(index, hex40, dir.path() / "site", targets).has_value());
+    auto opened = cache_store::open(dir.path() / "cache");
+    ASSERT_TRUE(opened.has_value()) << opened.error().message;
+    fake_view_server server;
+    server.root = dir.path() / "site";
+    std::mutex asking;
+    http_transport const one_at_a_time = [&, inner = server.transport()](http_exchange const& e) {
+        std::lock_guard lock{asking};
+        return inner(e);
+    };
+    std::string const expected = read_file(dir.path() / "site" / "index" / "recipes" / "p" / "a-recipe.json").value_or("!");
+
+    std::vector<std::thread> threads;
+    std::vector<std::string> got(8);
+    for (std::size_t i = 0; i < got.size(); ++i) {
+        threads.emplace_back([&, i] {
+            auto session = opened->session();
+            if (!session) return;
+            auto text = view_over_http("https://view.example.com", *session, one_at_a_time)("recipes/p/a-recipe.json");
+            got[i] = text ? text->value_or("?") : text.error().message;
+        });
+    }
+    for (std::thread& t : threads) t.join();
+    for (std::string const& text : got) EXPECT_EQ(text, expected);
+    ASSERT_EQ(server.requests.size(), got.size());
+    std::size_t whole = 0;
+    for (std::size_t i = 0; i < server.requests.size(); ++i) whole += server.conditional(i) ? 0 : 1;
+    EXPECT_EQ(whole, 1u);
+
+    // a file the cache cannot take (a directory in its place here, another process replacing it on Windows): the reply
+    std::filesystem::path const cached = dir.path() / "cache" / "view" / git_url_key("https://view.example.com") / "config.json";
+    std::filesystem::create_directories(cached / "x");
+    auto text = view_over_http("https://view.example.com", *opened, server.transport())("config.json");
+    ASSERT_TRUE(text.has_value()) << text.error().message;
+    EXPECT_EQ(text->value_or("?"), read_file(dir.path() / "site" / "index" / "config.json").value_or("!"));
+    std::filesystem::path etag = cached;
+    etag += ".etag";
+    EXPECT_FALSE(std::filesystem::exists(etag));
 }
 
 TEST(index_view, opens_the_index_config_names)

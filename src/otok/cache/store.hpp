@@ -97,7 +97,16 @@ public:
     void mark_used(std::filesystem::path const& entry) const;
 
     std::filesystem::path const& root() const noexcept;
-    std::filesystem::path const& tmp() const noexcept;  // this process's tmp directory
+    std::filesystem::path const& tmp() const noexcept;  // this process's tmp directory, a session's own in it
+
+    // `build` in the tmp directory of the store opened, shared by its sessions: the work directories of the builds
+    // (cache.md 7.1), under one virtual drive of the process (core/virtual_drives) whatever sessions build.
+    std::filesystem::path const& builds() const noexcept;
+
+    // A store over the same opening (the same locks, `builds`) with its own notices, offline setting, mirrors and tmp
+    // directory, `session-<n>` in the opener's, removed with the session: what one command of several run at once in the
+    // process uses (the projects of otok publish), whose files in tmp keep their names apart.
+    result<cache_store> session(cache_notices notices = {}) const;
 
     // Offline (cache.md 6.1): nothing is downloaded or fetched; what is missing is an error.
     void set_offline(bool offline) noexcept;

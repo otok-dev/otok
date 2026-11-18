@@ -193,19 +193,22 @@ creating: downloads in progress, archives being unpacked, entries before their r
 the process holds the lock `tmp/<process>.lock`; it removes its directory when it exits. A directory
 whose lock can be taken belongs to a process that no longer runs (a crash): the next otok removes it,
 once per run, when it starts using the cache; not one whose lock file or directory was written within the last
-minute: a process may be creating it (it creates its lock file, locks it, then creates the directory), and the
-builds of `otok publish`, which run at once, each open the cache in one process.
+minute: a process may be creating it (it creates its lock file, locks it, then creates the directory). A command that
+runs others at once in its process (the builds of `otok publish`) opens the cache once and gives each a session of its
+own: `tmp/<process>/session-<n>/` is that one's directory for what it creates, removed when it ends, and the work
+directories of builds (7.1) are shared.
 
 ### 7.1 Builds
 
-A slice is built in `tmp/<process>/build/<library>-<slice>/` (`-debug` for the `debug` configuration,
+A slice is built in `tmp/<process>/build/<n>/<library>-<slice>/` (`<n>` a number per builder of the process, as the
+sessions of 7 build at once; `-debug` for the `debug` configuration,
 `-tool` for a tool package, `-tools` for `build_tools`), which holds `source/` (a fresh copy of the source with resources placed at their
 `dest` and patches applied), `build/`, `prefix/`, `home/` and `tmp/` (`HOME` and `TMPDIR` of the
 build's processes), `toolchain.cmake` and `build.log`; with the sandbox of Windows also `sandbox.log` (what the
 AppContainer was refused) and, for a recipe of a path outside the cache, `recipe/`, its copy (`slice.recipe`; the
 container reads only the cache, `docs/PLAN.md` decision 103). On Windows, with `virtual-paths` (`config.md`), the build
 sees these through short drive letters of a device map of otok's own: one for `tmp/<process>/build/`, so that the work
-directory is `<letter>:\<library>-<slice>\`, and one for the cache root, through which it is given the prefixes of its
+directory is `<letter>:\<n>\<library>-<slice>\` whatever the sessions building at once, and one for the cache root, through which it is given the prefixes of its
 dependencies, toolchains and resources; `build.log` begins with a line per letter naming its directory. The entry is
 created under its lock (6) while the build runs; when the build succeeds it receives:
 
@@ -291,10 +294,15 @@ server sent with it, when it sent one. They are not entries: garbage collection 
 
 A command requests each file it reads at most once, with `If-None-Match` when the `.etag` exists:
 
-- `200`: otok removes the `.etag`, writes the file atomically (6), then writes the new `.etag`; an
-  interrupted update leaves a file without an `ETag`, which the next request fetches whole.
+- `200`: otok writes the file atomically (6), then the new `.etag` (or removes the old one when the server sent none);
+  an interrupted update leaves the file with the `ETag` of the one before, which the server no longer matches, so the
+  next request fetches it whole. A file that cannot be written, because another otok process replaces it at the same
+  moment, is read as received and written another time; it is not an error.
 - `304`: the cached file is read.
 - `404`: the file and its `.etag` are removed; the recipe or library does not exist (`index.md` 8).
+
+The commands one otok process runs at once (the projects of `otok publish`) request a file one after another: the first
+asks the server, the others find its file and `ETag`.
 
 Offline (6.1) nothing is requested: the cached files are read as they are, and a file that is not
 cached is an error.

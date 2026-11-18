@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <map>
@@ -102,8 +103,8 @@ bool just_made(fs::path const& path)
 }
 
 // Removes tmp directories of processes that no longer run (cache.md 7): their lock can be taken. Those made within the
-// last minute are left: another cache_store, of this process (the builds of `otok publish` open one each, at once) or of
-// another, may be between creating its lock file and locking it, and removing the file would orphan its directory.
+// last minute are left: another otok process may be between creating its lock file and locking it, and removing the file
+// would orphan its directory (the sessions of one process are directories inside its own, cache_store::session).
 void remove_stale_tmp(fs::path const& tmp_root, std::string const& own)
 {
     std::error_code ec;
@@ -145,6 +146,10 @@ struct cache_store::state
 {
     fs::path root;
     fs::path tmp;
+    // a session (cache_store::session): the store opened, whose locks and tmp directory it shares; its own tmp is a
+    // directory in that one
+    std::shared_ptr<state const> opened;
+    std::filesystem::path builds;  // the tmp directory of the store opened, "build"
     std::optional<file_lock> use_lock;  // cache.lock, released last (declared before the others)
     std::optional<file_lock> tmp_lock;
     cache_notices notices;
@@ -235,6 +240,7 @@ result<std::optional<cache_store>> cache_store::open_with(fs::path const& root, 
     if (!lock) return std::unexpected{lock.error()};
     s->tmp_lock = std::move(*lock);
     s->tmp = tmp_root / own;
+    s->builds = s->tmp / "build";
     if (!fs::create_directory(s->tmp, ec)) return fail("cannot create '" + path_to_utf8(s->tmp) + "': " + ec.message());
     remove_stale_tmp(tmp_root, own);
     return std::optional<cache_store>{cache_store{std::move(s)}};
@@ -248,6 +254,28 @@ fs::path const& cache_store::root() const noexcept
 fs::path const& cache_store::tmp() const noexcept
 {
     return state_->tmp;
+}
+
+fs::path const& cache_store::builds() const noexcept
+{
+    return state_->builds;
+}
+
+result<cache_store> cache_store::session(cache_notices notices) const
+{
+    static std::atomic<unsigned> sessions{0};
+    std::shared_ptr<state const> const opened = state_->opened ? state_->opened : state_;
+    auto s = std::make_unique<state>();
+    s->root = opened->root;
+    s->access = opened->access;
+    s->notices = std::move(notices);
+    s->opened = opened;
+    s->builds = opened->builds;
+    s->tmp = opened->tmp / ("session-" + std::to_string(++sessions));
+    std::error_code ec;
+    fs::remove_all(long_path(s->tmp), ec);
+    if (!fs::create_directory(s->tmp, ec)) return fail("cannot create '" + path_to_utf8(s->tmp) + "': " + ec.message());
+    return cache_store{std::move(s)};
 }
 
 void cache_store::set_offline(bool offline) noexcept

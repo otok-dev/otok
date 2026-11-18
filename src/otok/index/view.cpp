@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <set>
 #include <utility>
 #include <vector>
@@ -227,16 +229,29 @@ struct http_view
     std::map<std::string, std::optional<std::string>, std::less<>> read;  // this command's files
     std::size_t staged = 0;
 
-    // Writes `content` to `file` through this process's tmp directory: two otok processes may update it.
-    result<void> store(std::filesystem::path const& file, std::string_view content)
+    // Writes `content` to `file` through this process's tmp directory: two otok processes may update it. Whether it did.
+    bool store(std::filesystem::path const& file, std::string_view content)
     {
         std::error_code ec;
         std::filesystem::create_directories(file.parent_path(), ec);
         std::filesystem::path const staging = cache->tmp() / ("view-" + std::to_string(++staged));
-        if (auto ok = write_file_atomic(staging, content); !ok) return ok;
+        if (!write_file_atomic(staging, content)) return false;
         rename_path(staging, file, ec);
-        if (ec) return fail("cannot write '" + path_to_utf8(file) + "': " + ec.message());
-        return {};
+        if (!ec) return true;
+        std::filesystem::remove(staging, ec);
+        return false;
+    }
+
+    // The lock of a file of the cache for the views of this process: the projects of otok publish, each with its own view,
+    // read the same files at once; one asks the server, the others then find its file and ETag (cache.md 11).
+    static std::mutex& file_mutex(std::filesystem::path const& file)
+    {
+        static std::mutex registry;
+        static std::map<std::string, std::unique_ptr<std::mutex>, std::less<>> mutexes;
+        std::lock_guard lock{registry};
+        auto& m = mutexes[path_to_utf8(file)];
+        if (!m) m = std::make_unique<std::mutex>();
+        return *m;
     }
 
     result<std::optional<std::string>> get(std::string const& path)
@@ -247,6 +262,7 @@ struct http_view
         etag_file += ".etag";
         std::string const url = base + "/index/" + path;
         std::error_code ec;
+        std::lock_guard one_at_a_time{file_mutex(file)};
 
         if (cache->offline()) {
             auto cached = read_file(file);
@@ -280,10 +296,12 @@ struct http_view
         }
         if (reply->status != 200) return fail("GET " + url + ": " + http_status_text(reply->status));
 
-        std::filesystem::remove(etag_file, ec);
-        if (auto ok = store(file, reply->body); !ok) return std::unexpected{ok.error()};
-        if (std::string const* tag = reply->header("etag"); tag && !tag->empty()) {
-            if (auto ok = store(etag_file, *tag); !ok) return std::unexpected{ok.error()};
+        // the file, then its ETag: a file written with the ETag of the one before is fetched whole the next time, as the
+        // server no longer matches that ETag; one not written (replaced by another otok process at the same moment) is
+        // read as received and written another time
+        if (store(file, reply->body)) {
+            std::string const* tag = reply->header("etag");
+            if (!tag || tag->empty() || !store(etag_file, *tag)) std::filesystem::remove(etag_file, ec);
         }
         return read.emplace(path, std::move(reply->body)).first->second;
     }

@@ -369,7 +369,7 @@ std::unique_ptr<project> load_project(command_context& ctx, parsed_command const
         .waiting = [&ctx](std::string const& what) { ctx.err << "note: " << what << "\n"; },
         .fetching = [&ctx](std::string const& what) { ctx.err << what << "\n"; },
     };
-    auto cache = cache_store::open(config->cache_dir, std::move(notices));
+    auto cache = ctx.cache ? ctx.cache->session(std::move(notices)) : cache_store::open(config->cache_dir, std::move(notices));
     if (!cache) {
         diags.error({}, cache.error().message);
         return nullptr;
@@ -2525,6 +2525,7 @@ int publish(parsed_command const& cmd, command_context& ctx)
                 sub.git_env = git_env;
                 sub.display = &err_lines;
                 sub.jobs = one_at_a_time ? nullptr : &broker;
+                sub.cache = &*cache;
                 parsed_command install;
                 install.command = "install";
                 // what the build shows, as asked
