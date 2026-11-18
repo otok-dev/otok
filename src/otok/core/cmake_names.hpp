@@ -20,6 +20,7 @@ struct cmake_name
     std::string name;
     std::vector<std::string> products;
     bool include = false;                   // a variable of the include directories of its one product
+    bool pattern = false;                   // a target pattern (`absl::*`), found among the targets a build exports
 
     bool operator==(cmake_name const&) const = default;
 };
@@ -40,6 +41,10 @@ struct cmake_package_spec
 
 bool is_cmake_package_name(std::string_view name) noexcept;     // [A-Za-z0-9_.+-]{1,64}
 bool is_cmake_target_name(std::string_view name) noexcept;      // <namespace>::<name>, not otok::
+// A target pattern: a target name whose last part holds `*` (recipe-toml.md 11.4).
+bool is_cmake_target_pattern(std::string_view pattern) noexcept;
+// Whether `name` is of the form of `pattern`: its namespace the same, `*` any run of characters but `:` in the last part.
+bool cmake_target_matches(std::string_view pattern, std::string_view name) noexcept;
 bool is_cmake_variable_name(std::string_view name) noexcept;    // [A-Za-z_][A-Za-z0-9_]{0,127}
 
 // ASCII case folding, as package names are matched (otok-toml.md 4.12).

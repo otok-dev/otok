@@ -1449,7 +1449,7 @@ TEST_F(builder_test, writes_the_output)
         if (d.is_directory()) entry = d.path();
     }
     std::string const key = read_file(entry / "key.txt").value_or("?");
-    EXPECT_NE(key.find("packager = 10\n"), std::string::npos) << key;
+    EXPECT_NE(key.find("packager = 11\n"), std::string::npos) << key;
     EXPECT_NE(key.find("slice.native-" + machine_arch() + ".release = "), std::string::npos) << key;
     EXPECT_EQ(sha256_hex(key).substr(0, 32), entry.filename().string());
     std::string const state = read_file(output / ".otok-output.toml").value_or("?");

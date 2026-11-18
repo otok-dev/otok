@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <set>
 #include <vector>
 
@@ -303,6 +304,60 @@ std::string provider_text(std::vector<package_view> const& views, std::span<outp
 
 }
 
+std::vector<std::string> cmake_exported_targets(std::string_view text)
+{
+    auto const space = [](char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
+    std::vector<std::string> names;
+    for (std::size_t at = text.find("add_library("); at != std::string_view::npos; at = text.find("add_library(", at + 1)) {
+        if (at > 0 && (std::isalnum(static_cast<unsigned char>(text[at - 1])) || text[at - 1] == '_')) continue;  // _add_library(
+        std::size_t const close = text.find(')', at);
+        if (close == std::string_view::npos) break;
+        // the arguments: the name, then the kind
+        std::vector<std::string_view> args;
+        std::string_view const inner = text.substr(at + 12, close - at - 12);
+        for (std::size_t i = 0; i < inner.size();) {
+            while (i < inner.size() && space(inner[i])) ++i;
+            std::size_t const start = i;
+            while (i < inner.size() && !space(inner[i])) ++i;
+            if (i > start) args.push_back(inner.substr(start, i - start));
+        }
+        if (args.size() < 2) continue;
+        std::string_view const name = args.front();
+        bool const alias = args[1] == "ALIAS";
+        bool const imported = std::ranges::find(args, std::string_view{"IMPORTED"}) != args.end();
+        if ((alias || imported) && name.find("::") != std::string_view::npos && name.find_first_of("${}\"") == std::string_view::npos) {
+            names.emplace_back(name);
+        }
+    }
+    std::ranges::sort(names);
+    names.erase(std::unique(names.begin(), names.end()), names.end());
+    return names;
+}
+
+result<std::vector<std::string>> cmake_exported_targets_of(std::filesystem::path const& prefix)
+{
+    namespace fs = std::filesystem;
+    std::set<std::string> names;
+    std::error_code ec;
+    for (auto const& top : fs::directory_iterator{long_path(prefix), ec}) {
+        std::string const first = path_to_utf8(top.path().filename());
+        if (!top.is_directory() || !(first.starts_with("lib") || first == "share")) continue;
+        for (auto it = fs::recursive_directory_iterator{top.path(), ec}; !ec && it != fs::recursive_directory_iterator{}; it.increment(ec)) {
+            if (!it->is_regular_file() || it->path().extension() != ".cmake") continue;
+            bool under_cmake = false;
+            for (fs::path const& part : it->path().lexically_relative(top.path()).parent_path()) {
+                if (cmake_lower(path_to_utf8(part)) == "cmake") under_cmake = true;
+            }
+            if (!under_cmake) continue;
+            auto text = read_file(it->path());
+            if (!text) return std::unexpected{text.error()};
+            for (std::string& name : cmake_exported_targets(*text)) names.insert(std::move(name));
+        }
+        if (ec) return fail("cannot read '" + path_to_utf8(top.path()) + "': " + ec.message());
+    }
+    return std::vector<std::string>{names.begin(), names.end()};
+}
+
 std::string cmake_package_version(std::string_view version)
 {
     std::string out;
@@ -323,29 +378,54 @@ std::string cmake_package_version(std::string_view version)
     return out;
 }
 
-result<std::map<std::string, std::string>> cmake_package_files(std::span<output_package const> packages)
+result<std::map<std::string, std::string>> cmake_package_files(std::span<output_package const> packages, std::vector<std::string>* warnings)
 {
+    // the patterns of `targets` found among the targets the builds export; the names of other keys keep their products
+    std::vector<std::pair<output_package const*, cmake_package_spec>> expanded;
+    for (output_package const& o : packages) {
+        for (cmake_package_spec const& spec : o.cmake) {
+            cmake_package_spec e = spec;
+            e.targets.clear();
+            for (cmake_name const& t : spec.targets) {
+                if (!t.pattern) e.targets.push_back(t);
+            }
+            for (cmake_name const& t : spec.targets) {
+                if (!t.pattern) continue;
+                bool found = false;
+                for (std::string const& exported : o.cmake_exported) {
+                    if (!cmake_target_matches(t.name, exported)) continue;
+                    found = true;
+                    if (std::ranges::find(e.targets, exported, &cmake_name::name) == e.targets.end()) e.targets.push_back(cmake_name{exported, t.products});
+                }
+                if (!found && warnings) {
+                    warnings->push_back("the pattern '" + t.name + "' of the CMake package '" + spec.name + "' of " + o.library
+                        + " finds none of the targets its build exports: it installed no CMake package, or one of other names (otok-toml.md 4.12)");
+                }
+            }
+            expanded.emplace_back(&o, std::move(e));
+        }
+    }
+
     std::vector<package_view> views;
     std::map<std::string, package_view> by_name;           // lower case → its package
     std::map<std::string, std::pair<std::string, std::string>> targets;  // target → library, package
-    for (output_package const& o : packages) {
-        for (cmake_package_spec const& spec : o.cmake) {
-            package_view const v{&o, &spec};
-            if (auto [it, added] = by_name.emplace(cmake_lower(spec.name), v); !added) {
-                std::string const other = it->second.package->library;
-                return fail("the CMake package '" + spec.name + "' of " + o.library + " and '" + it->second.spec->name + "' of " + other
-                    + " are one for find_package; give one of them other names with 'cmake' in [deps." + o.library + "] or [deps." + other
-                    + "] of otok.toml (cmake = false for none)");
-            }
-            for (cmake_name const& t : spec.targets) {
-                if (auto [it, added] = targets.try_emplace(t.name, o.library, spec.name); !added) {
-                    return fail("the CMake target '" + t.name + "' is in the package '" + it->second.second + "' of " + it->second.first
-                        + " and in '" + spec.name + "' of " + o.library + "; give one of them other names with 'cmake' in [deps."
-                        + o.library + "] of otok.toml");
-                }
-            }
-            views.push_back(v);
+    for (auto const& [package, spec] : expanded) {
+        output_package const& o = *package;
+        package_view const v{&o, &spec};
+        if (auto [it, added] = by_name.emplace(cmake_lower(spec.name), v); !added) {
+            std::string const other = it->second.package->library;
+            return fail("the CMake package '" + spec.name + "' of " + o.library + " and '" + it->second.spec->name + "' of " + other
+                + " are one for find_package; give one of them other names with 'cmake' in [deps." + o.library + "] or [deps." + other
+                + "] of otok.toml (cmake = false for none)");
         }
+        for (cmake_name const& t : spec.targets) {
+            if (auto [it, added] = targets.try_emplace(t.name, o.library, spec.name); !added) {
+                return fail("the CMake target '" + t.name + "' is in the package '" + it->second.second + "' of " + it->second.first
+                    + " and in '" + spec.name + "' of " + o.library + "; give one of them other names with 'cmake' in [deps."
+                    + o.library + "] of otok.toml");
+            }
+        }
+        views.push_back(v);
     }
 
     std::map<std::string, std::string> files;
@@ -363,9 +443,9 @@ result<std::map<std::string, std::string>> cmake_package_files(std::span<output_
     return files;
 }
 
-result<void> write_cmake_packages(std::filesystem::path const& dir, std::span<output_package const> packages)
+result<void> write_cmake_packages(std::filesystem::path const& dir, std::span<output_package const> packages, std::vector<std::string>& warnings)
 {
-    auto files = cmake_package_files(packages);
+    auto files = cmake_package_files(packages, &warnings);
     if (!files) return std::unexpected{files.error()};
     std::array<std::string, 2> const owned{cmake_packages_dir, cmake_provider_file};
     auto written = write_generated_files(dir, *files, owned);

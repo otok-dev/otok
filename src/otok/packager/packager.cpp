@@ -29,7 +29,7 @@ namespace {
 // Bumped when the meaning of a package key changes (cache-key.md 4), and the packager version, bumped
 // when otok changes how it packages.
 constexpr char const* key_format = "1";
-constexpr char const* packager_version = "10";
+constexpr char const* packager_version = "11";
 
 constexpr int output_state_format = 1;
 
@@ -303,6 +303,16 @@ result<std::vector<packaged>> package_all(resolution const& r, std::size_t confi
                         fs::copy_file(long_path(from), long_path(to), fs::copy_options::overwrite_existing, ec);
                         if (ec) return fail("packaging " + label + ": cannot copy the license file '" + file.path + "': " + ec.message());
                     }
+                    // the targets of the CMake packages the build installed, for the patterns of `cmake` (otok-toml.md 4.12)
+                    std::set<std::string> exported;
+                    for (built_slice const& s : mine.slices) {
+                        auto names = cmake_exported_targets_of(s.entry / "prefix");
+                        if (!names) return fail("packaging " + label + ": " + names.error().message);
+                        exported.insert(names->begin(), names->end());
+                    }
+                    std::string listed;
+                    for (std::string const& name : exported) listed += name + "\n";
+                    if (auto ok = write_file_atomic(staging / cmake_targets_file, listed); !ok) return std::unexpected{ok.error()};
                     return write_file_atomic(staging / "key.txt", text);
                 });
                 if (!made) return std::unexpected{made.error()};
@@ -543,11 +553,21 @@ result<output_changes> write_output(fs::path const& dir, build_target const& tar
             std::erase(*text, '\r');
             o.licenses.push_back({file.path, std::move(*text)});
         }
+        if (auto listed = read_file(dir / o.dir / cmake_targets_file)) {
+            for (std::size_t at = 0; at < listed->size();) {
+                std::size_t const end = listed->find('\n', at);
+                std::string target_name = listed->substr(at, end == std::string::npos ? std::string::npos : end - at);
+                std::erase(target_name, '\r');
+                if (!target_name.empty()) o.cmake_exported.push_back(std::move(target_name));
+                if (end == std::string::npos) break;
+                at = end + 1;
+            }
+        }
         outputs.push_back(std::move(o));
     }
     if (auto ok = write_file_if_changed(dir / "Acknowledgements.md", acknowledgements_markdown(outputs)); !ok) return std::unexpected{ok.error()};
     if (auto ok = target.finish_output(dir, outputs, deployment, changes.warnings); !ok) return fail("the output '" + name + "': " + ok.error().message);
-    if (auto ok = write_cmake_packages(dir, outputs); !ok) return fail("the output '" + name + "': " + ok.error().message);
+    if (auto ok = write_cmake_packages(dir, outputs, changes.warnings); !ok) return fail("the output '" + name + "': " + ok.error().message);
     changes.problems = target.output_problems(dir, outputs, deployment, changes.warnings);
     return changes;
 }

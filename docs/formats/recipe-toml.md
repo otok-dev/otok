@@ -534,9 +534,31 @@ differing only in case are an error.
 
 | Key | Type | Meaning |
 |---|---|---|
-| `targets` | table: target name → product name or array of product names | — (required, non-empty). Each target is an interface target holding the products named (their `otok::<product>`). A name holds `::` (`<namespace>::<name>`, so that it cannot be a target of the consumer's own) and does not start with `otok::`. A target is defined only when every product it names exists (their `when` holds). |
+| `targets` | table: target name or pattern (below) → product name or array of product names | — (required, non-empty). Each target is an interface target holding the products named (their `otok::<product>`). A name holds `::` (`<namespace>::<name>`, so that it cannot be a target of the consumer's own) and does not start with `otok::`. A target is defined only when every product it names exists (their `when` holds). |
 | `components` | table: component name → product name or array of product names | `find_package(<package> COMPONENTS …)`: a component is found when every product it names exists. Without it, a call naming components finds none of them. |
 | `variables` | table: variable name → product name, array of product names, or `{ include = "<product>" }` | Variables of the package beyond those every package gets (`otok-toml.md` 4.12): a product name is its `otok::<product>` (link items), `include` the include directories of the product's headers. Names `[A-Za-z_][A-Za-z0-9_]*`. |
+
+A key of `targets` names targets in one of three forms; the braces and the star go in its last part only, after the last
+`::`, where `:` cannot appear:
+
+| Key | The targets |
+|---|---|
+| `"ZLIB::ZLIB"` | that one |
+| `"ZLIB::{ZLIB,ZLIBSTATIC}"` | one per alternative of the one group of braces, read with the recipe: `ZLIB::ZLIB`, `ZLIB::ZLIBSTATIC`. An alternative may be empty (`"LZ4::lz4{,_static,_shared}"`); a group needs two alternatives, without repeats. |
+| `"absl::*"` | the targets of that form among those the library's own build exports, found when it is packaged (`otok-toml.md` 4.12): `*` stands for any run of characters. For libraries whose builds install CMake packages with many targets (Abseil's are some two hundred, and change from version to version). |
+
+A pattern does not hold braces too. A target named twice in one package, by two keys or by the alternatives of one, is an
+error; a target a pattern finds that another key names takes that key's products. A pattern takes every target of its
+namespace a build exports, also those a library defines over its own dependencies (`CURL::OpenSSL_Crypto` of curl's
+package): such libraries list their targets.
+
+```toml
+[cmake.absl.targets]
+"absl::*" = "Abseil"
+
+[cmake.zstd.targets]
+"zstd::libzstd{,_static,_shared}" = "Zstd"
+```
 
 Products named are products of this recipe. The project may replace or drop the tables (`otok-toml.md` 6: `cmake` in
 `[deps.<library>]`).
@@ -775,7 +797,8 @@ products: unique names, `depends` and `headers`
 refer to existing products and libraries, no dependency cycles, a product of headers only without
 `headers` or `defines`, `headers = false` only with libraries, `headers-slice = true` only with a product of headers only, an `alternatives` group named by two products or more and
 held twice by no product (11.2); `[cmake.<package>]` (11.4): package, target, component and variable names of their
-syntax, targets with `::` and not in `otok::`, no two packages differing only in case, products named that exist; at least one product unless `[tool]` is there; `[tool] programs`
+syntax, targets with `::` and not in `otok::`, braces and stars only in the last part of a target, one group of braces of two
+alternatives or more without repeats, not with a star, no target named twice in a package, no two packages differing only in case, products named that exist; at least one product unless `[tool]` is there; `[tool] programs`
 names without repeats; `default-recipe` of a toolchain without `targets` and not beside a tool dependency on the same library; referenced files (patches,
 wrappers, privacy manifest, license files of the recipe directory) exist; `license-files` paths are
 unique; directory limits (15).

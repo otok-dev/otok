@@ -13,6 +13,7 @@
 
 #include "otok/builder/cmake_packages.hpp"
 #include "otok/builder/consumer.hpp"
+#include "otok/core/cmake_names.hpp"
 #include "otok/core/fs.hpp"
 #include "test_util.hpp"
 
@@ -497,4 +498,68 @@ TEST(cmake_packages, refuse_one_target_in_two_packages)
     ASSERT_FALSE(files);
     EXPECT_EQ(files.error().message, "the CMake target 'SSL::SSL' is in the package 'OpenSSL' of openssl and in 'LibreSSL' of libressl; give one of "
                                      "them other names with 'cmake' in [deps.libressl] of otok.toml");
+}
+
+// docs/PLAN.md decision 128: patterns of `targets`, found among the targets the builds export
+TEST(cmake_packages, match_patterns_in_the_last_part)
+{
+    EXPECT_TRUE(cmake_target_matches("absl::*", "absl::strings"));
+    EXPECT_TRUE(cmake_target_matches("LZ4::lz4*", "LZ4::lz4"));
+    EXPECT_TRUE(cmake_target_matches("LZ4::lz4*", "LZ4::lz4_static"));
+    EXPECT_TRUE(cmake_target_matches("a::x*y*", "a::x1y2"));
+    EXPECT_FALSE(cmake_target_matches("absl::*", "absl::inner::strings"));
+    EXPECT_FALSE(cmake_target_matches("absl::*", "abs::strings"));
+    EXPECT_FALSE(cmake_target_matches("LZ4::lz4*", "lz4::lz4"));
+    EXPECT_FALSE(cmake_target_matches("a::x*y", "a::x1y2"));
+}
+
+TEST(cmake_packages, read_the_targets_of_cmake_exports)
+{
+    std::string const text =
+        "# Create imported target absl::base\nadd_library(absl::base STATIC IMPORTED)\n"
+        "add_library(absl::core_headers INTERFACE IMPORTED)\n"
+        "add_library( LZ4::lz4\n  ALIAS LZ4::lz4_static)\n"
+        "add_library(png_static STATIC IMPORTED)\n"            // no namespace
+        "add_library(${_name} STATIC IMPORTED)\n"              // not a name
+        "add_library(x::built STATIC a.c)\n"                   // not imported
+        "_add_library(y::z INTERFACE IMPORTED)\n"
+        "add_library(absl::base STATIC IMPORTED)\n";
+    EXPECT_EQ(cmake_exported_targets(text), (std::vector<std::string>{"LZ4::lz4", "absl::base", "absl::core_headers"}));
+}
+
+TEST(cmake_packages, read_the_exports_of_a_prefix)
+{
+    test::temp_dir dir;
+    dir.write("lib/cmake/absl/abslTargets.cmake", "add_library(absl::base STATIC IMPORTED)\n");
+    dir.write("lib64/cmake/b/bConfig.cmake", "add_library(b::b ALIAS b::b_static)\n");
+    dir.write("share/WebP/cmake/WebPTargets.cmake", "add_library(WebP::webp STATIC IMPORTED)\n");
+    dir.write("lib/other/x.cmake", "add_library(no::no STATIC IMPORTED)\n");          // not under cmake/
+    dir.write("include/cmake/y.cmake", "add_library(no::include STATIC IMPORTED)\n");  // not in lib*/ or share/
+    dir.write("lib/cmake/absl/notes.txt", "add_library(no::txt STATIC IMPORTED)\n");
+    auto names = cmake_exported_targets_of(dir.path());
+    ASSERT_TRUE(names) << names.error().message;
+    EXPECT_EQ(*names, (std::vector<std::string>{"WebP::webp", "absl::base", "b::b"}));
+    auto none = cmake_exported_targets_of(dir.path() / "missing");
+    ASSERT_TRUE(none) << none.error().message;
+    EXPECT_TRUE(none->empty());
+}
+
+TEST(cmake_packages, expand_patterns_with_the_exported_targets)
+{
+    cmake_library lz4{"lz4", "1.11.1", {"LZ4", "Other"}, {"LZ4", "Other"},
+        {{"lz4", {{"LZ4::lz4_static", {"Other"}}, {"LZ4::lz4*", {"LZ4"}, false, true}, {"lz4::*", {"LZ4"}, false, true}}, {}, {}}}};
+    lz4.package.cmake_exported = {"LZ4::lz4", "LZ4::lz4_static", "LZ4::other", "zstd::libzstd"};
+    std::vector<output_package> const packages{lz4.package};
+    std::vector<std::string> warnings;
+    auto files = cmake_package_files(packages, &warnings);
+    ASSERT_TRUE(files) << files.error().message;
+    std::string const config = file_of(*files, "cmake.d/lz4/lz4Config.cmake");
+    EXPECT_NE(config.find("set_property(TARGET LZ4::lz4 PROPERTY INTERFACE_LINK_LIBRARIES otok::LZ4)\n"), std::string::npos) << config;
+    // the name of another key keeps its products
+    EXPECT_NE(config.find("set_property(TARGET LZ4::lz4_static PROPERTY INTERFACE_LINK_LIBRARIES otok::Other)\n"), std::string::npos) << config;
+    EXPECT_EQ(config.find("LZ4::other"), std::string::npos) << config;
+    EXPECT_EQ(config.find("LZ4::lz4*"), std::string::npos) << config;
+    ASSERT_EQ(warnings.size(), 1u);
+    EXPECT_EQ(warnings[0], "the pattern 'lz4::*' of the CMake package 'lz4' of lz4 finds none of the targets its build exports: it installed no "
+                           "CMake package, or one of other names (otok-toml.md 4.12)");
 }

@@ -999,8 +999,14 @@ TEST(host_target, gives_cmake_packages_under_their_usual_names)
     if (std::string const missing = p.missing_tools(); !missing.empty()) GTEST_SKIP() << missing;
     use_system_libraries_of_the_machine(p);
     std::string recipe = read_file(p.project_dir() / "recipes" / "tiny-b" / "recipe.toml").value_or("");
-    p.write("recipes/tiny-b/recipe.toml", recipe + "\n[cmake.TinyB]\ntargets = { \"Tiny::B\" = \"TinyB\" }\ncomponents = { b = \"TinyB\" }\n"
-        "variables = { TINYB_INCLUDE_DIR = { include = \"TinyB\" } }\n");
+    // tiny-b installs a CMake package of its own, whose targets a pattern takes (docs/PLAN.md decision 128)
+    std::string build_lists = read_file(p.project_dir() / "vendor" / "tiny-b" / "CMakeLists.txt").value_or("");
+    std::string const installed = "install(TARGETS tiny_b ARCHIVE DESTINATION lib)";
+    build_lists.replace(build_lists.find(installed), installed.size(),
+        "install(TARGETS tiny_b EXPORT tinyb ARCHIVE DESTINATION lib)\ninstall(EXPORT tinyb NAMESPACE TinyB:: DESTINATION lib/cmake/TinyB)");
+    p.write("vendor/tiny-b/CMakeLists.txt", build_lists);
+    p.write("recipes/tiny-b/recipe.toml", recipe + "\n[cmake.TinyB]\ntargets = { \"Tiny::B\" = \"TinyB\", \"Tiny::{X,Y}\" = \"TinyB\", \"TinyB::*\" = \"TinyB\" }\n"
+        "components = { b = \"TinyB\" }\nvariables = { TINYB_INCLUDE_DIR = { include = \"TinyB\" } }\n");
     std::string manifest = p.manifest();
     manifest.insert(manifest.find("cflags = [\"-DTINY_BONUS=3\"]"), "cmake = { TinyA = { targets = { \"TinyA::TinyA\" = \"TinyA\" } } }\n");
     p.write("otok.toml", manifest);
@@ -1010,12 +1016,14 @@ TEST(host_target, gives_cmake_packages_under_their_usual_names)
              "cmake.d/TinyB/module/FindTinyB.cmake", "cmake.d/TinyA/TinyAConfig.cmake"}) {
         EXPECT_TRUE(std::filesystem::exists(p.output(file))) << file;
     }
+    EXPECT_EQ(read_file(p.output("tiny-b/cmake-targets.txt")).value_or(""), "TinyB::tiny_b\n");
+    EXPECT_EQ(read_file(p.output("tiny-a/cmake-targets.txt")).value_or("?"), "");
 
     p.write("FindTinyB.cmake", "message(FATAL_ERROR \"CMake's own search for TinyB ran\")\n");
     std::string const lists =
         "list(APPEND CMAKE_MODULE_PATH \"" + path_to_utf8(p.project_dir().generic_u8string()) + "\")\n"
         "find_package(TinyB 1.0 MODULE REQUIRED COMPONENTS b)\n"
-        "if(NOT TINYB_LIBRARIES STREQUAL \"Tiny::B\" OR NOT TinyB_VERSION STREQUAL \"1.0\" OR NOT TINYB_INCLUDE_DIR OR NOT TinyB_b_FOUND)\n"
+        "if(NOT TINYB_LIBRARIES STREQUAL \"Tiny::B;Tiny::X;Tiny::Y;TinyB::tiny_b\" OR NOT TinyB_VERSION STREQUAL \"1.0\" OR NOT TINYB_INCLUDE_DIR OR NOT TinyB_b_FOUND)\n"
         "  message(FATAL_ERROR \"the variables: '${TINYB_LIBRARIES}' '${TinyB_VERSION}' '${TINYB_INCLUDE_DIR}' '${TinyB_b_FOUND}'\")\n"
         "endif()\n"
         "find_package(tinya REQUIRED)\n"
@@ -1023,7 +1031,7 @@ TEST(host_target, gives_cmake_packages_under_their_usual_names)
         "if(TinyB_FOUND)\n  message(FATAL_ERROR \"TinyB 2.0 was found\")\nendif()\n"
         "find_package(TinyB QUIET COMPONENTS nope)\n"
         "if(TinyB_FOUND)\n  message(FATAL_ERROR \"TinyB with the component nope was found\")\nendif()\n"
-        "add_executable(app main.c)\ntarget_link_libraries(app PRIVATE Tiny::B TinyA::TinyA)\notok_copy_runtime_dlls(app)\n";
+        "add_executable(app main.c)\ntarget_link_libraries(app PRIVATE Tiny::Y TinyB::tiny_b TinyA::TinyA)\notok_copy_runtime_dlls(app)\n";
     std::vector<std::string> const provider{"-DCMAKE_PROJECT_TOP_LEVEL_INCLUDES=" + path_to_utf8(p.output("otok-provider.cmake").generic_u8string())};
     auto code = p.run_cmake_project(tiny_main, lists, "Release", "Ninja", {}, provider);
     ASSERT_TRUE(code) << code.error().message;

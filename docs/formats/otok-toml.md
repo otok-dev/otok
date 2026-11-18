@@ -251,7 +251,7 @@ Its output is one directory per library, `<output>/<library>/`, with:
 - `debug/lib/` and `debug/bin/`: the same for the `debug` configuration; `lib/` and `bin/` hold
   `release`;
 - `data/`: the files `build` returned as `data` (`build-lua-api.md` 8), as they are;
-- `licenses/` (4.2).
+- `licenses/` (4.2). Every package entry, on every target, also has `cmake-targets.txt` (4.12).
 
 Shared objects on Linux carry `$ORIGIN` in their `RUNPATH` (`build-lua-api.md` 6.2), so the libraries of
 one recipe find each other in its `lib/` wherever it is copied. Libraries of different recipes find each
@@ -680,6 +680,13 @@ Its own toolchain file (the NDK's, an iOS one) stays as it is.
   a target of that name exists already. Everything the products carry (libraries, include directories, `defines`,
   system libraries, the checks of 4 and 4.11) comes through them, so the names work the same on every target,
   XCFrameworks included.
+- A pattern of `targets` (`"absl::*"`, `recipe-toml.md` 11.4) stands for the targets the library's own build exports:
+  while packaging, otok reads the `.cmake` files under a directory named `cmake` in `lib*/` and `share/` of the prefix
+  of every slice of the package, takes the names of `add_library(<name> … IMPORTED)` and `add_library(<name> ALIAS …)`
+  that hold `::` (what `install(EXPORT)` writes, and the aliases of the packages' config files), and keeps them, in
+  name order, in `cmake-targets.txt` of the package entry, one per line, whatever the recipe says: the project may give
+  patterns of its own (6) without the entry being made again. A pattern that finds none of them is warned of when the
+  output is written (the build installed no CMake package, or one of other names).
 - `COMPONENTS` and `OPTIONAL_COMPONENTS`: `<name>_<component>_FOUND` for each component asked for, true when its
   products exist; a required component not found makes the package not found, with a message naming the components its
   products give.
@@ -1126,7 +1133,7 @@ Reported before resolution, all at once rather than one per run:
 
 Reported before building: a target table this machine cannot build, a note, and an error when it can build none of
 them (4.9). After building: a delivered tool whose program is a script, and a `tools-output` where a library of an output is
-(7.1). When writing an output: one CMake package name in two of its libraries or one target name in two packages (4.12).
+(7.1). When writing an output: one CMake package name in two of its libraries or one target name in two packages (4.12), and as a warning a pattern of `targets` finding no target.
 
 Reported after resolution: `cmake` of `[deps.<library>]` naming a product its recipe does not have (6).
 

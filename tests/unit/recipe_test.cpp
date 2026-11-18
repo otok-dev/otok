@@ -504,10 +504,49 @@ TEST(recipe, reads_cmake_packages)
 
 TEST(recipe, cmake_targets_have_a_namespace)
 {
-    EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { LZ4 = \"LZ4\" }\n").reports("'LZ4' in 'LZ4' in cmake.LZ4.targets is not a target name for a package"));
+    EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { LZ4 = \"LZ4\" }\n").reports("'LZ4' in cmake.LZ4.targets is not a target name for a package"));
     EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { \"LZ4::\" = \"LZ4\" }\n").reports("is not a target name for a package"));
     EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { \"LZ4 ::x\" = \"LZ4\" }\n").reports("is not a target name for a package"));
     EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { \"lz4::a::b\" = \"LZ4\" }\n").r);
+}
+
+// recipe-toml.md 11.4: a name, the alternatives of braces, a pattern
+TEST(recipe, reads_the_forms_of_cmake_targets)
+{
+    auto p = parse_with("[cmake.zstd.targets]\n\"zstd::libzstd{,_static,_shared}\" = \"LZ4\"\n\"zstd::x\" = \"LZ4\"\n\"zstd::*\" = \"LZ4\"\n"
+                        "\"z::lib*_x*\" = \"LZ4\"\n");
+    ASSERT_TRUE(p.r) << messages(p.diags);
+    EXPECT_EQ(p.r->cmake[0].targets, (std::vector<cmake_name>{{"zstd::libzstd", {"LZ4"}}, {"zstd::libzstd_static", {"LZ4"}},
+                                         {"zstd::libzstd_shared", {"LZ4"}}, {"zstd::x", {"LZ4"}}, {"zstd::*", {"LZ4"}, false, true},
+                                         {"z::lib*_x*", {"LZ4"}, false, true}}));
+}
+
+TEST(recipe, cmake_target_braces_are_one_group_in_the_last_part)
+{
+    EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { \"a::{b,c}{d,e}\" = \"LZ4\" }\n").reports("has one group of braces { … } at most"));
+    EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { \"a::b{c,d\" = \"LZ4\" }\n").reports("has one group of braces { … } at most"));
+    EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { \"{a,b}::c\" = \"LZ4\" }\n").reports("has braces in its namespace"));
+}
+
+TEST(recipe, cmake_target_braces_have_two_alternatives)
+{
+    EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { \"a::b{c}\" = \"LZ4\" }\n").reports("needs two alternatives or more in its braces"));
+    EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { \"a::b{c,c}\" = \"LZ4\" }\n").reports("has the alternative 'c' twice in its braces"));
+    EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { \"a::b{c,d e}\" = \"LZ4\" }\n").reports("names 'a::bd e', which is not a target name"));
+}
+
+TEST(recipe, cmake_target_patterns_are_in_the_last_part)
+{
+    EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { \"a*::b\" = \"LZ4\" }\n").reports("'*' goes in its last part, after the last '::'"));
+    EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { \"*\" = \"LZ4\" }\n").reports("'*' goes in its last part, after the last '::'"));
+    EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { \"otok::*\" = \"LZ4\" }\n").reports("not in otok::"));
+    EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { \"a::{b,*}\" = \"LZ4\" }\n").reports("is a pattern with braces: give the one or the other"));
+}
+
+TEST(recipe, cmake_targets_are_named_once)
+{
+    auto p = parse_with("[cmake.LZ4.targets]\n\"a::b\" = \"LZ4\"\n\"a::{b,c}\" = \"LZ4\"\n");
+    EXPECT_TRUE(p.reports("the target 'a::b' is named twice in cmake.LZ4.targets")) << messages(p.diags);
 }
 
 TEST(recipe, cmake_targets_are_not_otok_s)

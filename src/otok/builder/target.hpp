@@ -176,6 +176,7 @@ struct output_package
     bool bundle_data = false;              // and they are resources (otok-toml.md 6)
     std::string linkage = "static";        // of its slices (otok-toml.md 5)
     std::vector<cmake_package_spec> cmake{};  // its CMake packages (otok-toml.md 4.12)
+    std::vector<std::string> cmake_exported{};  // the targets its build exports, for the patterns of `cmake` (cmake-targets.txt)
 };
 
 class build_target
