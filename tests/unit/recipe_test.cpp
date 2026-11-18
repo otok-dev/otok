@@ -120,6 +120,9 @@ TEST(recipe, reads_the_specification_example)
     EXPECT_EQ(r->toolchains[0].name, "make");
     EXPECT_EQ(r->toolchains[1].name, "perl");
     ASSERT_EQ(r->publish_checks.size(), 1u);
+    ASSERT_EQ(r->cmake.size(), 1u);
+    EXPECT_EQ(r->cmake[0].name, "OpenSSL");
+    EXPECT_EQ(r->cmake[0].targets, (std::vector<cmake_name>{{"OpenSSL::SSL", {"OpenSSL"}}, {"OpenSSL::Crypto", {"OpenSSL"}}}));
 }
 
 TEST(recipe, minimal_recipe_is_valid)
@@ -479,6 +482,68 @@ TEST(recipe, checks_products)
         EXPECT_TRUE(p.reports(fragment)) << fragment << "\n" << messages(p.diags);
     }
     EXPECT_TRUE(parse(head_text + source_text + platforms_text).reports("missing required key 'product'"));
+}
+
+// recipe-toml.md 11.4
+TEST(recipe, reads_cmake_packages)
+{
+    auto p = parse(head_text + source_text + platforms_text
+        + "[[product]]\nname = \"ssl\"\nlibraries = [\"ssl\"]\n[[product]]\nname = \"crypto\"\nlibraries = [\"crypto\"]\n"
+          "[cmake.OpenSSL]\ntargets = { \"OpenSSL::SSL\" = \"ssl\", \"OpenSSL::Crypto\" = [\"crypto\"] }\ncomponents = { SSL = \"ssl\", Both = [\"ssl\", \"crypto\"] }\n"
+          "variables = { OPENSSL_SSL_LIBRARY = \"ssl\", OPENSSL_INCLUDE_DIR = { include = \"crypto\" } }\n"
+          "[cmake.libcrypto]\ntargets = { \"crypto::crypto\" = \"crypto\" }\n");
+    ASSERT_TRUE(p.r) << messages(p.diags);
+    ASSERT_EQ(p.r->cmake.size(), 2u);
+    cmake_package_spec const& c = p.r->cmake[0];
+    EXPECT_EQ(c.name, "OpenSSL");
+    EXPECT_EQ(c.targets, (std::vector<cmake_name>{{"OpenSSL::SSL", {"ssl"}}, {"OpenSSL::Crypto", {"crypto"}}}));
+    EXPECT_EQ(c.components, (std::vector<cmake_name>{{"SSL", {"ssl"}}, {"Both", {"ssl", "crypto"}}}));
+    EXPECT_EQ(c.variables, (std::vector<cmake_name>{{"OPENSSL_SSL_LIBRARY", {"ssl"}}, {"OPENSSL_INCLUDE_DIR", {"crypto"}, true}}));
+    EXPECT_EQ(p.r->cmake[1].name, "libcrypto");
+}
+
+TEST(recipe, cmake_targets_have_a_namespace)
+{
+    EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { LZ4 = \"LZ4\" }\n").reports("'LZ4' in 'LZ4' in cmake.LZ4.targets is not a target name for a package"));
+    EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { \"LZ4::\" = \"LZ4\" }\n").reports("is not a target name for a package"));
+    EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { \"LZ4 ::x\" = \"LZ4\" }\n").reports("is not a target name for a package"));
+    EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { \"lz4::a::b\" = \"LZ4\" }\n").r);
+}
+
+TEST(recipe, cmake_targets_are_not_otok_s)
+{
+    EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { \"otok::LZ4\" = \"LZ4\" }\n").reports("not in otok::"));
+    EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { \"Otok::LZ4\" = \"LZ4\" }\n").reports("not in otok::"));
+}
+
+TEST(recipe, cmake_packages_need_targets)
+{
+    EXPECT_TRUE(parse_with("[cmake.LZ4]\ncomponents = { a = \"LZ4\" }\n").reports("missing required key 'targets' in cmake.LZ4"));
+    EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = {}\n").reports("'targets' in cmake.LZ4 names no target"));
+}
+
+TEST(recipe, cmake_package_names_differ_in_more_than_case)
+{
+    auto p = parse_with("[cmake.LZ4]\ntargets = { \"LZ4::LZ4\" = \"LZ4\" }\n[cmake.lz4]\ntargets = { \"lz4::lz4\" = \"LZ4\" }\n");
+    EXPECT_TRUE(p.reports("the CMake packages 'LZ4' and 'lz4' differ only in case")) << messages(p.diags);
+}
+
+TEST(recipe, checks_cmake_names)
+{
+    EXPECT_TRUE(parse_with("[cmake.\"L Z\"]\ntargets = { \"a::b\" = \"LZ4\" }\n").reports("is not a valid CMake package name"));
+    EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { \"a::b\" = \"LZ4\" }\ncomponents = { \"a b\" = \"LZ4\" }\n").reports("is not a valid component name"));
+    EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { \"a::b\" = \"LZ4\" }\nvariables = { 1X = \"LZ4\" }\n").reports("is not a valid variable name"));
+    EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { \"a::b\" = 5 }\n").reports("must be a product name or a list of them, not an integer"));
+    EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { \"a::b\" = [] }\n").reports("names no product"));
+    EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { \"a::b\" = [\"LZ4\", \"LZ4\"] }\n").reports("names the product 'LZ4' twice"));
+    EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { \"a::b\" = \"LZ4\" }\nvariables = { X = { include = \"LZ4\", more = 1 } }\n").reports("unknown key 'more'"));
+    EXPECT_TRUE(parse_with("[cmake.LZ4]\ntargets = { \"a::b\" = \"LZ4\" }\nunknown = 1\n").reports("unknown key 'unknown' in cmake.LZ4"));
+}
+
+TEST(recipe, cmake_names_name_products_of_the_recipe)
+{
+    auto p = parse_with("[cmake.LZ4]\ntargets = { \"LZ4::LZ4\" = \"LZ4\" }\nvariables = { X = { include = \"Nope\" } }\n");
+    EXPECT_TRUE(p.reports("the CMake package 'LZ4' names the product 'Nope', which the recipe does not have")) << messages(p.diags);
 }
 
 TEST(recipe, reads_products_of_headers_only)

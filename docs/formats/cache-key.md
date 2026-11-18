@@ -91,8 +91,8 @@ slice of the package is that entry, so in the package key (4) each `slice.<slice
 The SHA-256 of a canonical description of: the key format version, the packager version (bumped when
 otok changes how it packages), the slice keys of all slices in the package, the recipe's
 `recipe-sha256` (products, wrappers, privacy manifest), the merged options (wrapper compilation
-conditions). `Package.swift`, `otok-config.cmake`, `otok.props` and `otok.targets` are not part of any entry: they are
-written into the project from the entries of all libraries (`otok-toml.md` 4, 4.11), which is cheap.
+conditions). `Package.swift`, `otok-config.cmake`, `otok-provider.cmake`, `cmake.d/`, `otok.props` and `otok.targets` are not part of any entry: they are
+written into the project from the entries of all libraries (`otok-toml.md` 4, 4.11, 4.12), which is cheap.
 
 The description has the form of 3, with the names:
 

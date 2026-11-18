@@ -278,7 +278,7 @@ zlib = "3f5c…"   # 64 hex digits
 
 A library whose package key has not changed is not copied again, so the consumer's build sees the same
 files with the same times. The files otok writes beside the libraries on every run (`Acknowledgements.md`,
-`Package.swift`, `otok-config.cmake`, `otok.props`, …) are written only when their contents change, for the same
+`Package.swift`, `otok-config.cmake`, `otok-provider.cmake` and `cmake.d/` (4.12), `otok.props`, …) are written only when their contents change, for the same
 reason.
 
 Every library's directory has `licenses/` with the recipe's `license-files` (`recipe-toml.md` 3) at
@@ -658,6 +658,78 @@ Android Gradle Plugin packs into the app the shared objects of the imported libr
 `libc++_shared.so` when it uses `c++_shared` (`arguments += "-DANDROID_STL=c++_shared"`, which dynamic libraries of
 `stl = "shared"` need): no `jniLibs` (checked with AGP 9.5.1 and NDK r30).
 
+### 4.12 CMake packages under their usual names
+
+A project moving to otok from another package manager or from the system's libraries keeps its `find_package(ZLIB)`
+and `target_link_libraries(app PRIVATE ZLIB::ZLIB)`: the output of every target gives the CMake packages of its
+libraries' recipes (`recipe-toml.md` 11.4) under their names, as thin targets over `otok::<product>` (4, 4.11), and a
+dependency provider that answers `find_package` with them. The project is configured with one setting more and no
+change of its own files:
+
+```sh
+cmake -S . -B build -DCMAKE_PROJECT_TOP_LEVEL_INCLUDES=Otok/otok-provider.cmake
+```
+
+Its own toolchain file (the NDK's, an iOS one) stays as it is.
+
+**The packages.** For each `[cmake.<package>]` of a library of the output, otok writes an ordinary config package in
+`<output>/cmake.d/<package>/` (`cmake.d`, since a library's directory may be named `cmake` on the targets of 4.11):
+
+- `<package>Config.cmake` includes `<output>/otok-config.cmake` (once, as `find_package(Otok)` does) and defines each
+  target of `targets` whose products all exist as an `INTERFACE IMPORTED` target linking their `otok::<product>`, unless
+  a target of that name exists already. Everything the products carry (libraries, include directories, `defines`,
+  system libraries, the checks of 4 and 4.11) comes through them, so the names work the same on every target,
+  XCFrameworks included.
+- `COMPONENTS` and `OPTIONAL_COMPONENTS`: `<name>_<component>_FOUND` for each component asked for, true when its
+  products exist; a required component not found makes the package not found, with a message naming the components its
+  products give.
+- The variables every package gets, under the package name as written, in upper case and as the call wrote it
+  (`ZLIB_FOUND`, `zlib_FOUND`): `_FOUND`; `_VERSION`, its `_MAJOR`, `_MINOR`, `_PATCH`, `_TWEAK` parts and `_COUNT`;
+  `_LIBRARIES`, the targets of `targets` defined; `_INCLUDE_DIRS`, the include directories of their products, through
+  the targets those link. Then those of `variables`, whose products the output does not have giving nothing. A target that
+  keeps its headers inside its libraries (XCFrameworks of the Apple target, 4) has no include directories to give: the
+  `include` variables and `_INCLUDE_DIRS` are empty there, and a project using them instead of the targets needs the
+  targets.
+- The version is the library's version up to its fourth numeric component (`1.92.0`, `79.1`; `1.2.3-rc1` is `1.2.3`). A
+  request for it or an older one is found (`find_package(OpenSSL 3.0)` finds 4.1.0), `EXACT` only the same, a range
+  when it holds it: otok chose the version, and the call only checks it. `<package>Config.cmake` refuses another with a
+  message, and `<package>ConfigVersion.cmake` lets every request through to it: CMake goes on looking elsewhere for a
+  package whose version file refuses, and finds the system's. A version starting with no number gives none, and any
+  request is accepted with a `VERBOSE` message.
+- `module/Find<package>.cmake` finds nothing (below).
+- One package name in two libraries of an output (without regard to case), or one target name in two packages, is an
+  error when the output is written, naming the libraries and the cure (`cmake` in `[deps.<library>]`, 6).
+
+**The provider.** `<output>/otok-provider.cmake`, read by CMake 3.28 or later through
+`CMAKE_PROJECT_TOP_LEVEL_INCLUDES` (it refuses an older CMake), sets a dependency provider
+(`cmake_language(SET_DEPENDENCY_PROVIDER … SUPPORTED_METHODS FIND_PACKAGE)`), which sees every `find_package` of the
+project after its first `project()`, in subdirectories, functions and FetchContent too:
+
+- A package of the output, matched without regard to case, is looked for in `<output>/cmake.d/<package>/` alone,
+  whatever the call says of where to look: in config mode even when the call asks for `MODULE` (CMake's find module
+  would find the system's library), outside `CMAKE_FIND_ROOT_PATH` (4: CMake looks for packages only in the SDK when
+  building for a device, and in the NDK's sysroot for Android), before `CMAKE_MODULE_PATH` and `CMAKE_PREFIX_PATH`. The
+  call's version, `EXACT`, `QUIET`, `REQUIRED`, `COMPONENTS`, `OPTIONAL_COMPONENTS`, `GLOBAL` and `NO_POLICY_SCOPE` are
+  kept; its `MODULE`, `CONFIG`, `NO_MODULE`, `NAMES`, `CONFIGS`, `HINTS`, `PATHS`, `PATH_SUFFIXES`, `REGISTRY_VIEW`,
+  `CMAKE_FIND_ROOT_PATH_BOTH`, `ONLY_CMAKE_FIND_ROOT_PATH` and `NO_*` arguments are dropped.
+- A package of the output not found (a version or a component it does not have, without `REQUIRED`) must stay not found,
+  but CMake then runs its own search for the call. So the provider sets the cache entry `<name>_DIR` to the package's
+  directory, where a config search looks first and stops, since the version file refuses nothing, and puts
+  `<output>/cmake.d/<package>/module` first in `CMAKE_MODULE_PATH` of the calling scope, whose `Find<package>.cmake`
+  finds nothing. The project's or CMake's find module does not run, and no other library of that name is taken.
+- Any other name is left to CMake's own search (the provider returns without finding it), `Otok` included, so that a
+  project calling `find_package(Otok …)` as in 4 and 4.11 keeps working beside the provider.
+- A name that is, without regard to case, a library of the output whose recipe gives no such package is warned of once
+  (otok builds the library, CMake may find another one on the machine), naming `cmake` in `[deps.<library>]` (6).
+
+Without the provider, `<output>/cmake.d/<package>` as `<package>_DIR` finds the same package for a call in config mode
+(`CONFIG`, or `CMAKE_FIND_PACKAGE_PREFER_CONFIG` on), but not for one asking for `MODULE`, and CMake's own search after
+a package not found may take another library of that name.
+
+The names move the project's linking, not what it deploys: frameworks embedded by `otok_embed_frameworks` (4) and the
+DLLs copied by `otok_copy_runtime_dlls` (4.11) are still the project's calls, or its own means
+(`$<TARGET_RUNTIME_DLLS>` finds the DLLs through the targets).
+
 ## 5. Configurations and linkage
 
 `configurations` of a target table lists the build configurations of its libraries: each one is a set of slices
@@ -741,6 +813,7 @@ chosen with `recipe`. Transitive dependencies of the same library resolve to thi
 | `linkage` | `"static"` or `"dynamic"` | the target table's | How this library is built on every target (5). |
 | `bundle-data` | boolean | `false` | The library's data files (`build-lua-api.md` 8) also as resources of its products, where the target has bundles: on Apple a target of their own (4). Without it the consumer takes them from `data/` of the output. Not in `[tool-deps]`. |
 | `deliver` | boolean or array of program names | `false` | Also build the library's recipe as a tool for this machine, at the version the library got, and copy the programs named (`true`: all of them) into the tools output (7.1). |
+| `cmake` | table: package → table, or `false` | the recipe's | The CMake packages of the library (4.12), replacing the recipe's `[cmake.<package>]` tables (`recipe-toml.md` 11.4) all together: a table of the same form (`cmake = { ZLIB = { targets = { "ZLIB::ZLIB" = "zlib" } } }`), for a recipe that gives none or other names; `false` for none, when two libraries give one package name. Products named are the recipe's, checked after resolution. Not in `[tool-deps]`. |
 
 Example of the sub-table form, equivalent to an inline table:
 
@@ -1043,6 +1116,8 @@ Reported before resolution, all at once rather than one per run:
   non-empty list of distinct program names, in both `[deps.<library>]` and `[tool-deps.<library>]`, or with a `[tool-deps]`
   entry of another recipe beside it in `[deps]` (7.1);
 - flags that choose the slice (4.3);
+- `cmake` of `[deps.<library>]` neither `false` nor a table of the form of `recipe-toml.md` 11.4 (its syntax rules), or in
+  `[tool-deps]` (6);
 - `configurations` empty, with a value twice, or with more than one value for `[apple]`; `linkage`
   other than `"static"` for `[apple]`;
 - `build-on` missing where the target needs it, empty, with a value twice, or naming an environment the target
@@ -1051,7 +1126,9 @@ Reported before resolution, all at once rather than one per run:
 
 Reported before building: a target table this machine cannot build, a note, and an error when it can build none of
 them (4.9). After building: a delivered tool whose program is a script, and a `tools-output` where a library of an output is
-(7.1).
+(7.1). When writing an output: one CMake package name in two of its libraries or one target name in two packages (4.12).
+
+Reported after resolution: `cmake` of `[deps.<library>]` naming a product its recipe does not have (6).
 
 Reported during resolution: options against recipe schemas, version and platform availability,
 deployment versions, option conflicts between dependents, license policy, a `linkage` the recipe cannot

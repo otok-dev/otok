@@ -14,6 +14,7 @@
 #include <variant>
 #include <vector>
 
+#include "otok/core/cmake_names.hpp"
 #include "otok/core/diagnostics.hpp"
 #include "otok/core/names.hpp"
 #include "otok/core/option_values.hpp"
@@ -71,6 +72,8 @@ struct dependency
     // built for the machine and copied into the tools output (otok-toml.md 7.1): none, every program of the recipe's
     // [tool] programs (`deliver = true`, an empty list here) or the programs named
     std::optional<std::vector<std::string>> deliver;
+    // `cmake` (otok-toml.md 6, 4.12): the CMake packages of the library instead of its recipe's; empty for `false`
+    std::optional<std::vector<cmake_package_spec>> cmake;
     source_position where;                              // the table; `where.file` names the defining file
 };
 

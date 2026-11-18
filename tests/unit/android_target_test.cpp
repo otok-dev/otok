@@ -480,6 +480,7 @@ public:
     std::filesystem::path output(std::string const& relative) const { return project_ / "Otok" / path_from_utf8(relative); }
 
     void write(std::string const& relative, std::string const& text) { dir_.write("project/" + relative, text); }
+    std::filesystem::path project_dir() const { return project_; }
 
     // Links a shared object of `source` against libraries of the output for `abi`, as an app's CMake build would.
     result<void> link_consumer(std::string const& source, std::string const& abi, std::vector<std::string> const& libraries)
@@ -514,13 +515,20 @@ public:
     result<std::filesystem::path> build_cmake_consumer(std::string const& source, std::string const& product, std::string const& abi,
         std::vector<std::string> const& defines = {}, bool cmake_android = false)
     {
+        return build_cmake_project(source,
+            "find_package(Otok CONFIG REQUIRED PATHS \"" + path_to_utf8(output("").generic_u8string()) + "\" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)\n"
+            "add_library(consumer SHARED consumer.c)\ntarget_link_libraries(consumer PRIVATE otok::" + product + ")\n",
+            abi, defines, cmake_android);
+    }
+
+    // The same with a CMake project of `lists` after its `project()`, which builds the shared object `consumer` of consumer.c.
+    result<std::filesystem::path> build_cmake_project(std::string const& source, std::string const& lists, std::string const& abi,
+        std::vector<std::string> const& defines = {}, bool cmake_android = false)
+    {
         std::filesystem::path const dir = base_ / ("cmake-" + abi + "-" + std::to_string(consumers_++));
         std::filesystem::create_directories(dir);
         std::ofstream{dir / "consumer.c", std::ios::binary} << source;
-        std::ofstream{dir / "CMakeLists.txt", std::ios::binary}
-            << "cmake_minimum_required(VERSION 3.28)\nproject(consumer C)\n"
-               "find_package(Otok CONFIG REQUIRED PATHS \"" + path_to_utf8(output("").generic_u8string()) + "\" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)\n"
-               "add_library(consumer SHARED consumer.c)\ntarget_link_libraries(consumer PRIVATE otok::" + product + ")\n";
+        std::ofstream{dir / "CMakeLists.txt", std::ios::binary} << "cmake_minimum_required(VERSION 3.28)\nproject(consumer C)\n" + lists;
         std::string const ndk = profile_.target_tables.at("android").at("ndk");
         std::vector<std::string> configure{"cmake", "-S", path_to_utf8(dir), "-B", path_to_utf8(dir / "build"), "-G", "Ninja",
             "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_TOOLCHAIN_FILE=" + ndk + "/build/cmake/android.toolchain.cmake", "-DANDROID_ABI=" + abi,
@@ -653,6 +661,26 @@ TEST(android_target, gives_cmake_consumers_static_libraries)
         ASSERT_FALSE(older) << cmake_android;
         EXPECT_NE(flat(older.error().message).find(refusal), std::string::npos) << older.error().message;
         EXPECT_NE(flat(older.error().message).find(ndk_name + "': build with that NDK or a newer one"), std::string::npos) << older.error().message;
+    }
+}
+
+// A project written for another package manager, through the provider (otok-toml.md 4.12): find_package of a module, past
+// the CMAKE_FIND_ROOT_PATH of the NDK's toolchain file and of CMake's own Android support.
+TEST(android_target, gives_cmake_packages_through_the_provider)
+{
+    android_project p{"tiny", "architectures = { android = [\"x86_64\"] }\ndeployment = { android = \"24\" }\ncflags = [\"-DTINY_BONUS=2\"]\n"};
+    if (std::string const missing = p.missing_tools(); !missing.empty()) GTEST_SKIP() << missing;
+    std::string const recipe = read_file(p.project_dir() / "recipes" / "tiny-b" / "recipe.toml").value_or("");
+    p.write("recipes/tiny-b/recipe.toml", recipe + "\n[cmake.TinyB]\ntargets = { \"Tiny::B\" = \"TinyB\" }\n");
+
+    ASSERT_EQ(p.install(), 0) << p.err.str() << p.out.str();
+    std::string const source = "#include <tiny_b.h>\n#if TINY_A_EXTRA != 5\n#error the defines of TinyA\n#endif\n\nint consumer(void) { return tiny_b(); }\n";
+    std::string const lists = "find_package(TinyB 1.0 MODULE REQUIRED)\nadd_library(consumer SHARED consumer.c)\ntarget_link_libraries(consumer PRIVATE Tiny::B)\n";
+    std::string const provider = "CMAKE_PROJECT_TOP_LEVEL_INCLUDES=" + path_to_utf8(p.output("otok-provider.cmake").generic_u8string());
+    for (bool const cmake_android : {false, true}) {
+        auto built = p.build_cmake_project(source, lists, "x86_64", {provider}, cmake_android);
+        ASSERT_TRUE(built) << cmake_android << ": " << built.error().message;
+        EXPECT_TRUE(contains(load_names_of(*built).needed, "libz.so")) << cmake_android;  // TinyA's system library, through TinyB
     }
 }
 

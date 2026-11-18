@@ -6,10 +6,12 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <map>
 #include <string>
 #include <vector>
 
+#include "otok/builder/cmake_packages.hpp"
 #include "otok/builder/consumer.hpp"
 #include "otok/core/fs.hpp"
 #include "test_util.hpp"
@@ -360,4 +362,139 @@ TEST(consumer, reads_the_example_of_the_format)
     std::string example = read_file(path_from_utf8(OTOK_TEST_DATA_DIR "/consumer/otok-package.toml")).value_or("");
     std::erase(example, '\r');
     EXPECT_EQ(write_package_files(*files), example);
+}
+
+// otok-toml.md 4.12: CMake packages under their usual names
+TEST(cmake_packages, take_the_numeric_head_of_the_version)
+{
+    EXPECT_EQ(cmake_package_version("1.3.2"), "1.3.2");
+    EXPECT_EQ(cmake_package_version("1.92.0.1.7"), "1.92.0.1");
+    EXPECT_EQ(cmake_package_version("79.1"), "79.1");
+    EXPECT_EQ(cmake_package_version("2175"), "2175");
+    EXPECT_EQ(cmake_package_version("1.2.3-rc1"), "1.2.3");
+    EXPECT_EQ(cmake_package_version("3.0a"), "3.0");
+    EXPECT_EQ(cmake_package_version("1..2"), "1");
+    EXPECT_EQ(cmake_package_version("v1.0"), "");
+    EXPECT_EQ(cmake_package_version(""), "");
+}
+
+namespace {
+
+// A library of products, of which the output has `present`.
+struct cmake_library
+{
+    recipe rec;
+    output_package package;
+
+    cmake_library(std::string const& library, std::string const& version, std::vector<std::string> const& products,
+        std::vector<std::string> const& present, std::vector<cmake_package_spec> cmake)
+    {
+        rec.library = library;
+        rec.version = *otok::version::parse(version);
+        for (std::string const& p : products) {
+            product prod;
+            prod.name = p;
+            prod.libraries = {p};
+            rec.products.push_back(std::move(prod));
+        }
+        package.library = library;
+        package.rec = &rec;
+        for (product const& p : rec.products) {
+            if (std::ranges::find(present, p.name) != present.end()) package.products.push_back(output_product{&p, {}, {}});
+        }
+        package.cmake = std::move(cmake);
+    }
+    cmake_library(cmake_library const&) = delete;
+};
+
+std::string file_of(std::map<std::string, std::string> const& files, std::string const& path)
+{
+    auto it = files.find(path);
+    return it == files.end() ? std::string{} : it->second;
+}
+
+}
+
+TEST(cmake_packages, write_a_package_per_name)
+{
+    cmake_library ssl{"openssl", "4.1.0", {"ssl", "crypto", "legacy"}, {"ssl", "crypto"},
+        {{"OpenSSL", {{"OpenSSL::SSL", {"ssl"}}, {"OpenSSL::Crypto", {"crypto"}}, {"OpenSSL::Legacy", {"legacy"}}},
+            {{"SSL", {"ssl"}}, {"Legacy", {"legacy"}}}, {{"OPENSSL_SSL_LIBRARY", {"ssl"}}, {"OPENSSL_INCLUDE_DIR", {"crypto"}, true}}}}};
+    std::vector<output_package> const packages{ssl.package};
+    auto files = cmake_package_files(packages);
+    ASSERT_TRUE(files) << files.error().message;
+    std::vector<std::string> paths;
+    for (auto const& [path, text] : *files) paths.push_back(path);
+    EXPECT_EQ(paths, (std::vector<std::string>{"cmake.d/OpenSSL/OpenSSLConfig.cmake", "cmake.d/OpenSSL/OpenSSLConfigVersion.cmake",
+                         "cmake.d/OpenSSL/module/FindOpenSSL.cmake", "otok-provider.cmake"}));
+
+    std::string const config = file_of(*files, "cmake.d/OpenSSL/OpenSSLConfig.cmake");
+    EXPECT_NE(config.find("set(_otok_version \"4.1.0\")\n"), std::string::npos) << config;
+    EXPECT_NE(config.find("include(\"${CMAKE_CURRENT_LIST_DIR}/../../otok-config.cmake\")\n"), std::string::npos) << config;
+    EXPECT_NE(config.find("if(NOT TARGET OpenSSL::SSL)\n  add_library(OpenSSL::SSL INTERFACE IMPORTED)\n"
+                          "  set_property(TARGET OpenSSL::SSL PROPERTY INTERFACE_LINK_LIBRARIES otok::ssl)\nendif()\n"),
+        std::string::npos)
+        << config;
+    // a product the output does not have: no target, no component, nothing in the variables
+    EXPECT_EQ(config.find("OpenSSL::Legacy"), std::string::npos) << config;
+    EXPECT_NE(config.find("set(_otok_components \"SSL\")\n"), std::string::npos) << config;
+    EXPECT_NE(config.find("set(_otok_prefixes \"OpenSSL\" \"OPENSSL\" \"${_otok_name}\")\n"), std::string::npos) << config;
+    EXPECT_NE(config.find("  set(${_otok_prefix}_LIBRARIES \"OpenSSL::SSL\" \"OpenSSL::Crypto\")\n"), std::string::npos) << config;
+    EXPECT_NE(config.find("  set(${_otok_prefix}_VERSION_MINOR 1)\n"), std::string::npos) << config;
+    EXPECT_NE(config.find("  set(${_otok_prefix}_VERSION_COUNT 3)\n"), std::string::npos) << config;
+    EXPECT_NE(config.find("set(OPENSSL_SSL_LIBRARY otok::ssl)\n"), std::string::npos) << config;
+    EXPECT_NE(config.find("_otok_cmake_include_dirs(OPENSSL_INCLUDE_DIR otok::crypto)\n"), std::string::npos) << config;
+
+    std::string const version = file_of(*files, "cmake.d/OpenSSL/OpenSSLConfigVersion.cmake");
+    EXPECT_NE(version.find("set(PACKAGE_VERSION \"4.1.0\")\nset(PACKAGE_VERSION_COMPATIBLE TRUE)\nset(PACKAGE_VERSION_EXACT TRUE)\n"), std::string::npos)
+        << version;
+    EXPECT_NE(file_of(*files, "cmake.d/OpenSSL/module/FindOpenSSL.cmake").find("set(${CMAKE_FIND_PACKAGE_NAME}_FOUND FALSE)\n"), std::string::npos);
+
+    std::string const provider = file_of(*files, "otok-provider.cmake");
+    EXPECT_NE(provider.find("set_property(GLOBAL PROPERTY _otok_provider_package_openssl \"OpenSSL\")\n"), std::string::npos) << provider;
+    EXPECT_NE(provider.find("set_property(GLOBAL PROPERTY _otok_provider_library_openssl \"openssl\")\n"), std::string::npos) << provider;
+    EXPECT_NE(provider.find("cmake_language(SET_DEPENDENCY_PROVIDER _otok_provide_package SUPPORTED_METHODS FIND_PACKAGE)\n"), std::string::npos)
+        << provider;
+}
+
+TEST(cmake_packages, give_no_version_of_a_version_without_a_number)
+{
+    cmake_library tool{"tool", "v2", {"tool"}, {"tool"}, {{"Tool", {{"Tool::Tool", {"tool"}}}, {}, {}}}};
+    std::vector<output_package> const packages{tool.package};
+    auto files = cmake_package_files(packages);
+    ASSERT_TRUE(files) << files.error().message;
+    EXPECT_EQ(file_of(*files, "cmake.d/Tool/ToolConfigVersion.cmake").find("PACKAGE_VERSION \""), std::string::npos);
+    EXPECT_EQ(file_of(*files, "cmake.d/Tool/ToolConfig.cmake").find("_VERSION_MAJOR"), std::string::npos);
+}
+
+TEST(cmake_packages, write_the_provider_without_packages)
+{
+    cmake_library plain{"plain", "1.0", {"plain"}, {"plain"}, {}};
+    std::vector<output_package> const packages{plain.package};
+    auto files = cmake_package_files(packages);
+    ASSERT_TRUE(files) << files.error().message;
+    ASSERT_EQ(files->size(), 1u);
+    EXPECT_NE(file_of(*files, "otok-provider.cmake").find("_otok_provider_library_plain"), std::string::npos);
+}
+
+TEST(cmake_packages, refuse_one_package_in_two_libraries)
+{
+    cmake_library a{"openssl", "4.1.0", {"ssl"}, {"ssl"}, {{"OpenSSL", {{"OpenSSL::SSL", {"ssl"}}}, {}, {}}}};
+    cmake_library b{"libressl", "4.0.0", {"tls"}, {"tls"}, {{"openssl", {{"LibreSSL::TLS", {"tls"}}}, {}, {}}}};
+    std::vector<output_package> const packages{a.package, b.package};
+    auto files = cmake_package_files(packages);
+    ASSERT_FALSE(files);
+    EXPECT_EQ(files.error().message, "the CMake package 'openssl' of libressl and 'OpenSSL' of openssl are one for find_package; give one of them "
+                                     "other names with 'cmake' in [deps.libressl] or [deps.openssl] of otok.toml (cmake = false for none)");
+}
+
+TEST(cmake_packages, refuse_one_target_in_two_packages)
+{
+    cmake_library a{"openssl", "4.1.0", {"ssl"}, {"ssl"}, {{"OpenSSL", {{"SSL::SSL", {"ssl"}}}, {}, {}}}};
+    cmake_library b{"libressl", "4.0.0", {"tls"}, {"tls"}, {{"LibreSSL", {{"SSL::SSL", {"tls"}}}, {}, {}}}};
+    std::vector<output_package> const packages{a.package, b.package};
+    auto files = cmake_package_files(packages);
+    ASSERT_FALSE(files);
+    EXPECT_EQ(files.error().message, "the CMake target 'SSL::SSL' is in the package 'OpenSSL' of openssl and in 'LibreSSL' of libressl; give one of "
+                                     "them other names with 'cmake' in [deps.libressl] of otok.toml");
 }

@@ -9,6 +9,7 @@
 #include <set>
 #include <tuple>
 
+#include "otok/core/cmake_names.hpp"
 #include "otok/core/environment.hpp"
 #include "otok/core/fs.hpp"
 #include "otok/core/paths.hpp"
@@ -164,6 +165,7 @@ private:
     void dependencies(toml_table& root, std::string_view key, bool tool, recipe& r);
     void target_tables(toml_table& root, recipe& r);
     void products(toml_table& root, recipe& r);
+    void cmake(toml_table& root, recipe& r);
     void source_delivery(toml_table& root, recipe const& r);
     void toolchains(toml_table& root, recipe& r);
     void publish(toml_table& root, recipe& r);
@@ -1283,6 +1285,23 @@ void recipe_reader::target_tables(toml_table& root, recipe& r)
     }
 }
 
+// recipe-toml.md 11.4: the names of the library's CMake packages, over its products.
+void recipe_reader::cmake(toml_table& root, recipe& r)
+{
+    auto t = root.table("cmake");
+    if (!t) return;
+    r.cmake = read_cmake_packages(*t);
+    for (cmake_package_spec const& p : r.cmake) {
+        for (std::string const& product : cmake_products({p})) {
+            if (std::ranges::find(r.products, product, &product::name) == r.products.end()) {
+                t->error(p.where, "the CMake package " + in_quotes(p.name) + " names the product " + in_quotes(product)
+                    + ", which the recipe does not have");
+            }
+        }
+    }
+    t->finish();
+}
+
 // recipe-toml.md 12.1: nothing is built, so nothing a build needs.
 void recipe_reader::source_delivery(toml_table& root, recipe const& r)
 {
@@ -1296,7 +1315,7 @@ void recipe_reader::source_delivery(toml_table& root, recipe const& r)
     if (files_ && files_("build.lua", false)) {
         root.error(root.position(table), "a recipe that delivers its source has no build.lua: the consumer's build compiles it");
     }
-    for (std::string_view key : {"resource", "vars", "options", "deps", "tool-deps", "toolchains", "tool"}) {
+    for (std::string_view key : {"resource", "vars", "options", "deps", "tool-deps", "toolchains", "tool", "cmake"}) {
         if (root.contains(key)) root.error(root.position(key), "[" + std::string{key} + "]" + why);
     }
     if (r.linkage != std::vector<std::string>{"static"}) root.error(root.position("recipe"), "'linkage' in recipe" + why);
@@ -1502,6 +1521,7 @@ recipe recipe_reader::read(toml_table& root)
     target_tables(root, r);
     tool_table(root, r);
     products(root, r);
+    cmake(root, r);
     if (headers_slice_at_ && std::ranges::none_of(r.products, &product::headers_only)) {
         root.error(*headers_slice_at_, "'headers-slice' in recipe is true, but no product has headers only (libraries = []) (recipe-toml.md 11.3)");
     }

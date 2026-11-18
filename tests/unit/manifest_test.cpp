@@ -402,6 +402,35 @@ TEST(manifest, checks_configurations_and_linkage)
     EXPECT_TRUE(apple("[build]\nconfiguration = \"debug\"\n").reports("unknown key 'build'"));
 }
 
+// otok-toml.md 6: `cmake` of [deps.<library>] replaces the recipe's CMake packages (4.12)
+TEST(manifest, reads_cmake_packages_of_a_dependency)
+{
+    std::string const head = std::string{header} + "[deps.a]\nrecipe = { path = \"a\" }\n";
+    auto named = parse(head + "cmake = { ZLIB = { targets = { \"ZLIB::ZLIB\" = \"zlib\" } } }\n[deps.b]\nrecipe = { path = \"b\" }\ncmake = false\n"
+        "[deps.c]\nrecipe = { path = \"c\" }\n");
+    ASSERT_TRUE(named.m.has_value()) << messages(named.diags);
+    ASSERT_TRUE(named.m->find_dep("a")->cmake);
+    ASSERT_EQ(named.m->find_dep("a")->cmake->size(), 1u);
+    EXPECT_EQ(named.m->find_dep("a")->cmake->front().name, "ZLIB");
+    EXPECT_EQ(named.m->find_dep("a")->cmake->front().targets, (std::vector<cmake_name>{{"ZLIB::ZLIB", {"zlib"}}}));
+    EXPECT_EQ(named.m->find_dep("b")->cmake, std::vector<cmake_package_spec>{});
+    EXPECT_FALSE(named.m->find_dep("c")->cmake);
+}
+
+TEST(manifest, cmake_of_a_dependency_is_false_or_packages)
+{
+    std::string const head = std::string{header} + "[deps.a]\nrecipe = { path = \"a\" }\n";
+    EXPECT_TRUE(parse(head + "cmake = true\n").reports("'cmake' in deps.a must be false or a table of CMake packages (otok-toml.md 4.12), not true"));
+    EXPECT_TRUE(parse(head + "cmake = \"ZLIB\"\n").reports("'cmake' in deps.a must be false or a table of CMake packages (otok-toml.md 4.12), not a string"));
+    EXPECT_TRUE(parse(head + "cmake = { ZLIB = { targets = { ZLIB = \"zlib\" } } }\n").reports("is not a target name for a package"));
+}
+
+TEST(manifest, no_cmake_for_tool_dependencies)
+{
+    EXPECT_TRUE(parse_with_header("[tool-deps.a]\nrecipe = { path = \"a\" }\ncmake = false\n")
+            .reports("'cmake' in tool-deps.a is not allowed: a tool dependency does not reach the consumer's build"));
+}
+
 TEST(manifest, delivered_tools)
 {
     std::string const apple_table = "[apple]\nplatforms = [\"ios\"]\ndeployment = { ios = \"15.0\" }\n";

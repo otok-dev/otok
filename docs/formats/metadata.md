@@ -151,7 +151,7 @@ The values in effect for the selected profile (`otok-toml.md` 5, 8):
 | Key | Type | Meaning |
 |---|---|---|
 | `name` | string | `"apple"`, `"android"`, `"windows"`, `"linux"`. |
-| `output` | path | The output directory (`otok-toml.md` 4.2). Its consumer files are there under fixed names: `otok-config.cmake` on every target, `Package.swift` on Apple, `otok.props` and `otok.targets` on Windows (`otok-toml.md` 4, 4.11); `otok metadata` does not list them. |
+| `output` | path | The output directory (`otok-toml.md` 4.2). Its consumer files are there under fixed names: `otok-config.cmake`, `otok-provider.cmake` and `cmake.d/` on every target, `Package.swift` on Apple, `otok.props` and `otok.targets` on Windows (`otok-toml.md` 4, 4.11, 4.12); `otok metadata` does not list them. |
 | `platforms` | array of strings | The platforms built. |
 | `architectures` | object: platform → array of strings | The architectures of each platform built. |
 | `deployment` | object: key → version | The deployment versions the project sets. |

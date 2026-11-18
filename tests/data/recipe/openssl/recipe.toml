@@ -55,6 +55,9 @@ defines = [{ define = "OPENSSL_NO_DEPRECATED", when = { option = "no-deprecated"
 link = { libraries = ["z"] }
 apple = { module = "COpenSSL", frameworks = ["Security"], wrappers = ["OpenSSLSwift"], privacy-manifest = "PrivacyInfo.xcprivacy" }
 
+[cmake.OpenSSL]
+targets = { "OpenSSL::SSL" = "OpenSSL", "OpenSSL::Crypto" = "OpenSSL" }
+
 [apple]
 xcode = ">= 16"
 

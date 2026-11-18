@@ -124,6 +124,7 @@ struct built_package
     bool bundle_data = false;               // `bundle-data` of its [deps] entry (otok-toml.md 6)
     std::string target{};                   // of its graph; a tool package: the target that builds the tools
     std::string id{};                       // resolved_package::id
+    std::vector<cmake_package_spec> cmake{}; // its CMake packages: of [deps] `cmake`, else of the recipe (otok-toml.md 4.12)
 };
 
 // A library output name of a package: output names are unique in a recipe only (docs/PLAN.md decision 30).
@@ -174,6 +175,7 @@ struct output_package
     std::vector<std::string> data{};       // the names of its data files, in data/ (build-lua-api.md 8)
     bool bundle_data = false;              // and they are resources (otok-toml.md 6)
     std::string linkage = "static";        // of its slices (otok-toml.md 5)
+    std::vector<cmake_package_spec> cmake{};  // its CMake packages (otok-toml.md 4.12)
 };
 
 class build_target

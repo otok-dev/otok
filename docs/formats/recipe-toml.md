@@ -66,6 +66,9 @@ defines = [{ define = "OPENSSL_NO_DEPRECATED", when = { option = "no-deprecated"
 link = { libraries = ["z"] }
 apple = { module = "COpenSSL", frameworks = ["Security"], wrappers = ["OpenSSLSwift"], privacy-manifest = "PrivacyInfo.xcprivacy" }
 
+[cmake.OpenSSL]
+targets = { "OpenSSL::SSL" = "OpenSSL", "OpenSSL::Crypto" = "OpenSSL" }
+
 [apple]
 xcode = ">= 16"
 
@@ -91,6 +94,7 @@ options = { no-deprecated = true, features = ["no-legacy"] }
 | `[deps.<library>]` | no | 9 |
 | `[tool-deps.<library>]` | no | 10 |
 | `[[product]]` | yes (at least one), except in a tool recipe (3.1) | 11 |
+| `[cmake.<package>]` | no | 11.4 |
 | `[apple]` | no | 12 |
 | `[toolchains]` | no | 13 |
 | `[publish]` | no | 14 |
@@ -508,6 +512,35 @@ the target, `headers`, and not from one per platform, architecture and configura
   is an error. Without it, the products decide.
 - A tool package builds its tool slice as always: there is one already.
 
+### 11.4 CMake packages: `[cmake.<package>]`
+
+The names under which CMake projects find the library without otok: the package of `find_package(<package>)` and its
+imported targets, whether CMake's own find module defines them (`ZLIB::ZLIB`, `OpenSSL::SSL`) or the library's installed
+config file does (`fmt::fmt`). otok gives them to the consumer's CMake over its own products (`otok-toml.md` 4.12), so
+that a project moving to otok keeps its `find_package` calls and target names. They are data about the library, the
+same for every target; the mechanism is otok's.
+
+```toml
+[cmake.OpenSSL]
+targets = { "OpenSSL::SSL" = "ssl", "OpenSSL::Crypto" = "crypto" }
+components = { SSL = "ssl", Crypto = "crypto" }
+variables = { OPENSSL_SSL_LIBRARY = "ssl", OPENSSL_CRYPTO_LIBRARY = "crypto", OPENSSL_INCLUDE_DIR = { include = "crypto" } }
+```
+
+The table key is the package name as projects write it (`[A-Za-z0-9_.+-]{1,64}`); a library known under two names (a
+find module's and its own config's: `JPEG` and `libjpeg-turbo`) has a table for each. otok matches the name of a
+`find_package` call without regard to case, as CMake's config search does on most systems, so two tables of one recipe
+differing only in case are an error.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `targets` | table: target name → product name or array of product names | — (required, non-empty). Each target is an interface target holding the products named (their `otok::<product>`). A name holds `::` (`<namespace>::<name>`, so that it cannot be a target of the consumer's own) and does not start with `otok::`. A target is defined only when every product it names exists (their `when` holds). |
+| `components` | table: component name → product name or array of product names | `find_package(<package> COMPONENTS …)`: a component is found when every product it names exists. Without it, a call naming components finds none of them. |
+| `variables` | table: variable name → product name, array of product names, or `{ include = "<product>" }` | Variables of the package beyond those every package gets (`otok-toml.md` 4.12): a product name is its `otok::<product>` (link items), `include` the include directories of the product's headers. Names `[A-Za-z_][A-Za-z0-9_]*`. |
+
+Products named are products of this recipe. The project may replace or drop the tables (`otok-toml.md` 6: `cmake` in
+`[deps.<library>]`).
+
 ## 12. `[apple]`
 
 | Key | Type | Meaning |
@@ -741,7 +774,8 @@ every supported slice with one type per variable; `build-on` non-empty, without 
 products: unique names, `depends` and `headers`
 refer to existing products and libraries, no dependency cycles, a product of headers only without
 `headers` or `defines`, `headers = false` only with libraries, `headers-slice = true` only with a product of headers only, an `alternatives` group named by two products or more and
-held twice by no product (11.2); at least one product unless `[tool]` is there; `[tool] programs`
+held twice by no product (11.2); `[cmake.<package>]` (11.4): package, target, component and variable names of their
+syntax, targets with `::` and not in `otok::`, no two packages differing only in case, products named that exist; at least one product unless `[tool]` is there; `[tool] programs`
 names without repeats; `default-recipe` of a toolchain without `targets` and not beside a tool dependency on the same library; referenced files (patches,
 wrappers, privacy manifest, license files of the recipe directory) exist; `license-files` paths are
 unique; directory limits (15).
@@ -759,7 +793,7 @@ After building a slice: every library named by a product whose `when` holds was 
 `build.lua`; the programs it returns are those of `[tool] programs`, files in `slice.prefix`.
 
 A recipe that delivers its source (12.1): no `build.lua`; no `[[resource]]`, `[vars]`, `[options]`,
-`[deps]`, `[tool-deps]`, `[toolchains]`, `[tool]` or `linkage`; products with a name only; platforms
+`[deps]`, `[tool-deps]`, `[toolchains]`, `[tool]`, `[cmake]` or `linkage`; products with a name only; platforms
 of the target that takes the source. When packaging: the directory holds a `Package.swift` without `.package(…)`.
 
 When publishing: `supported` of one target; variants of the id published for the version share no cell (6.1,

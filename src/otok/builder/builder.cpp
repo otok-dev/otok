@@ -822,7 +822,24 @@ std::expected<std::vector<built_package>, std::vector<error>> builder::build_all
             packages.back().recipe_dir = in->second.recipe_dir;
             packages.back().source = in->second.source;
         }
-        if (dependency const* entry = tool ? nullptr : m_.find_dep(p->library)) packages.back().bundle_data = entry->bundle_data;
+        if (!tool) packages.back().cmake = p->chosen.recipe->cmake;
+        if (dependency const* entry = tool ? nullptr : m_.find_dep(p->library)) {
+            packages.back().bundle_data = entry->bundle_data;
+            // the project's names of the library's CMake packages (otok-toml.md 6, 4.12), over the products of its recipe
+            if (entry->cmake) {
+                for (std::string const& product : cmake_products(*entry->cmake)) {
+                    if (std::ranges::find(p->chosen.recipe->products, product, &product::name) == p->chosen.recipe->products.end()) {
+                        return failed("'cmake' in deps." + p->library + " names the product '" + product + "', which the recipe of "
+                            + p->library + " does not have");
+                    }
+                }
+                if (p->chosen.recipe->delivers_sources && !entry->cmake->empty()) {
+                    return failed("'cmake' in deps." + p->library + ": the recipe of " + p->library
+                        + " delivers its source, whose products have no CMake targets");
+                }
+                packages.back().cmake = *entry->cmake;
+            }
+        }
         if (!tool && p->chosen.recipe->products.empty() && !p->chosen.recipe->programs.empty()) {
             return failed(p->library + ": a tool recipe without products can only be a tool dependency (recipe-toml.md 3.1)");
         }

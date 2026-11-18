@@ -32,6 +32,7 @@
   </ImportGroup>
   <ItemGroup>
     <ClInclude Include="$(OtokRoot)src\otok\builder\builder.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\builder\cmake_packages.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\builder\consumer.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\builder\dev_tree.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\builder\target.hpp" />
@@ -56,6 +57,7 @@
     <ClInclude Include="$(OtokRoot)src\otok\core\sandbox_windows.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\core\virtual_drives.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\core\license.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\core\cmake_names.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\core\names.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\core\option_data.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\core\option_values.hpp" />
@@ -94,6 +96,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="$(OtokRoot)src\otok\builder\builder.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\builder\cmake_packages.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\builder\consumer.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\builder\dev_tree.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\builder\toolchains.cpp" />
@@ -117,6 +120,7 @@
     <ClCompile Include="$(OtokRoot)src\otok\core\virtual_drives.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\core\binary.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\core\license.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\core\cmake_names.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\core\names.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\core\option_values.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\core\paths.cpp" />

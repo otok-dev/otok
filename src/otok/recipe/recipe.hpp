@@ -14,6 +14,7 @@
 #include <string_view>
 #include <vector>
 
+#include "otok/core/cmake_names.hpp"
 #include "otok/core/diagnostics.hpp"
 #include "otok/core/license.hpp"
 #include "otok/core/names.hpp"
@@ -225,6 +226,7 @@ struct recipe
     std::vector<recipe_dependency> dependencies;
     std::vector<recipe_dependency> tool_dependencies;  // by library, then by default-recipe: one order in recipe.toml and an index entry
     std::vector<product> products;
+    std::vector<cmake_package_spec> cmake;       // `[cmake.<package>]` (recipe-toml.md 11.4)
     std::map<std::string, std::any, std::less<>> target_settings;   // `[<target>]`, read by the target module
     // A target table says the recipe delivers its patched source, built by the consumer's tools: no build.lua,
     // no slices, products without libraries (recipe-toml.md 12.1).

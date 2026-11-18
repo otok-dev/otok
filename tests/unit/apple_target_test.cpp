@@ -1043,6 +1043,9 @@ TEST(apple_target, installs_every_platform)
     std::filesystem::path const project = base / "project";
     ASSERT_TRUE(copy_tree(path_from_utf8(OTOK_TEST_DATA_DIR "/projects/tiny"), project));
     dir.write("project/otok.toml", apple_manifest);
+    // the CMake package of tiny-b under a usual name (otok-toml.md 4.12)
+    std::string const tiny_b = read_file(project / "recipes" / "tiny-b" / "recipe.toml").value_or("");
+    dir.write("project/recipes/tiny-b/recipe.toml", tiny_b + "\n[cmake.TinyB]\ntargets = { \"Tiny::B\" = \"TinyB\" }\n");
 
     std::ostringstream out, err;
     auto parsed = parse_command_line(std::vector<std::string>{"install"}, global_options(), command_specs());
@@ -1183,6 +1186,30 @@ TEST(apple_target, installs_every_platform)
         << read_file(base / "cmake-iossim.log").value_or("");
     ASSERT_TRUE(cmake({"--build", path_to_utf8(base / "cmake-iossim"), "--verbose"}, "cmake-iossim.log")) << read_file(base / "cmake-iossim.log").value_or("");
     EXPECT_NE(read_file(base / "cmake-iossim.log").value_or("?").find("tiny-a_tiny_a.xcframework/ios-arm64_x86_64-simulator/Headers"), std::string::npos);
+
+    // the same project written for another package manager, through the provider (otok-toml.md 4.12): find_package of a
+    // module, past CMAKE_FIND_ROOT_PATH of the simulator's SDK
+    dir.write("provider-consumer/CMakeLists.txt",
+        "cmake_minimum_required(VERSION 3.28)\nproject(consumer C)\n"
+        "find_package(TinyB 1.0 MODULE REQUIRED)\n"
+        "if(NOT TINYB_LIBRARIES STREQUAL \"Tiny::B\")\n  message(FATAL_ERROR \"TINYB_LIBRARIES: ${TINYB_LIBRARIES}\")\nendif()\n"
+        "if(NOT CMAKE_SYSTEM_NAME STREQUAL \"Darwin\")\n  set(CMAKE_MACOSX_BUNDLE ON)\nendif()\n"
+        "add_executable(consumer main.c)\nset_target_properties(consumer PROPERTIES MACOSX_BUNDLE_GUI_IDENTIFIER org.otok.consumer)\n"
+        "target_link_libraries(consumer PRIVATE Tiny::B)\n");
+    dir.write("provider-consumer/main.c", read_file(base / "cmake-consumer" / "main.c").value_or(""));
+    std::string const provided = path_to_utf8(base / "provider-consumer");
+    std::string const provider = "-DCMAKE_PROJECT_TOP_LEVEL_INCLUDES=" + path_to_utf8(project / "Otok" / "otok-provider.cmake");
+    ASSERT_TRUE(cmake({"-S", provided, "-B", path_to_utf8(base / "provider-macos"), "-G", "Ninja", provider}, "provider-macos.log"))
+        << read_file(base / "provider-macos.log").value_or("");
+    ASSERT_TRUE(cmake({"--build", path_to_utf8(base / "provider-macos")}, "provider-macos.log")) << read_file(base / "provider-macos.log").value_or("");
+    consumed = run_process({{path_to_utf8(base / "provider-macos" / "consumer")}, env, base, {}, true});
+    ASSERT_TRUE(consumed) << consumed.error().message;
+    EXPECT_EQ(consumed->output, "12 9 5 1 " + arch + "\n");
+    ASSERT_TRUE(cmake({"-S", provided, "-B", path_to_utf8(base / "provider-iossim"), "-G", "Ninja", "-DCMAKE_SYSTEM_NAME=iOS",
+                          "-DCMAKE_OSX_SYSROOT=iphonesimulator", "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64", "-DCMAKE_OSX_DEPLOYMENT_TARGET=16.0", provider},
+        "provider-iossim.log"))
+        << read_file(base / "provider-iossim.log").value_or("");
+    ASSERT_TRUE(cmake({"--build", path_to_utf8(base / "provider-iossim")}, "provider-iossim.log")) << read_file(base / "provider-iossim.log").value_or("");
 }
 
 // A product of headers only beside a compiled one without headers of its own (recipe-toml.md 11.1): the

@@ -14,6 +14,7 @@
 #include <toml++/toml.hpp>
 
 #include "otok/builder/builder.hpp"
+#include "otok/builder/cmake_packages.hpp"
 #include "otok/builder/consumer.hpp"
 #include "otok/core/fs.hpp"
 #include "otok/core/sha256.hpp"
@@ -280,6 +281,7 @@ result<std::vector<packaged>> package_all(resolution const& r, std::size_t confi
                 for (auto const& [name, file] : mine.slices.front().output.data) pk.data.push_back(name);
             }
             pk.bundle_data = bp.bundle_data;
+            pk.cmake = bp.cmake;
             if (!mine.slices.empty()) pk.linkage = mine.slices.front().spec.linkage;
 
             std::error_code ec;
@@ -534,7 +536,7 @@ result<output_changes> write_output(fs::path const& dir, build_target const& tar
 
     std::vector<output_package> outputs;
     for (auto const& [library, p] : current) {
-        output_package o{library, p->rec, p->libraries, p->products, p->option_defines, {}, target.package_output(library), p->data, p->bundle_data, p->linkage};
+        output_package o{library, p->rec, p->libraries, p->products, p->option_defines, {}, target.package_output(library), p->data, p->bundle_data, p->linkage, p->cmake};
         for (license_entry const& file : p->rec->license_files) {
             auto text = read_file(dir / o.dir / "licenses" / path_from_utf8(file.path));
             if (!text) return fail("the output '" + name + "': the license file '" + file.path + "' of '" + library + "': " + text.error().message);
@@ -545,6 +547,7 @@ result<output_changes> write_output(fs::path const& dir, build_target const& tar
     }
     if (auto ok = write_file_if_changed(dir / "Acknowledgements.md", acknowledgements_markdown(outputs)); !ok) return std::unexpected{ok.error()};
     if (auto ok = target.finish_output(dir, outputs, deployment, changes.warnings); !ok) return fail("the output '" + name + "': " + ok.error().message);
+    if (auto ok = write_cmake_packages(dir, outputs); !ok) return fail("the output '" + name + "': " + ok.error().message);
     changes.problems = target.output_problems(dir, outputs, deployment, changes.warnings);
     return changes;
 }

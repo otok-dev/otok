@@ -39,6 +39,7 @@ struct packaged
     std::vector<std::string> data;          // the names of its data files
     bool bundle_data = false;               // as resources (otok-toml.md 6)
     std::string linkage = "static";         // of its slices (otok-toml.md 5)
+    std::vector<cmake_package_spec> cmake{};  // its CMake packages (otok-toml.md 4.12)
 };
 
 // The package entry of every built target package, one per target its slices belong to; tool

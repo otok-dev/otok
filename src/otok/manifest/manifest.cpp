@@ -12,6 +12,7 @@
 #include <string_view>
 #include <vector>
 
+#include "otok/core/cmake_names.hpp"
 #include "otok/core/environment.hpp"
 #include "otok/core/fs.hpp"
 #include "otok/core/option_values.hpp"
@@ -538,7 +539,25 @@ std::optional<dependency> manifest_reader::dependency_entry(toml_table& deps, st
             t->ignore("bundle-data");
             ok = false;
         }
+        if (t->contains("cmake")) {
+            t->error(t->position("cmake"), t->describe("cmake") + " is not allowed: a tool dependency does not reach the consumer's build");
+            t->ignore("cmake");
+            ok = false;
+        }
     } else {
+        if (toml::node const* node = t->node("cmake")) {
+            if (node->is_boolean() && !*t->boolean("cmake")) {
+                dep.cmake.emplace();
+            } else if (node->is_table()) {
+                auto packages = t->table("cmake");
+                dep.cmake = read_cmake_packages(*packages);
+                packages->finish();
+            } else {
+                t->error(t->position("cmake"), t->describe("cmake") + " must be false or a table of CMake packages (otok-toml.md 4.12), not "
+                    + (node->is_boolean() ? std::string{"true"} : std::string{describe_type(node->type())}));
+                ok = false;
+            }
+        }
         if (t->contains("platforms")) {
             dep.platforms = platforms(*t, "platforms", nullptr, need::optional);
             if (!dep.platforms) ok = false;

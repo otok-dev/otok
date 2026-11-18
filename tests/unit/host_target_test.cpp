@@ -525,20 +525,29 @@ public:
     result<int> run_cmake_consumer(std::string const& main_c, std::string const& product, std::string const& configuration,
         std::string const& generator = "Ninja", env_vars const& run_env = {})
     {
+        return run_cmake_project(main_c,
+            "find_package(Otok CONFIG REQUIRED PATHS \"" + path_to_utf8(output("").generic_u8string()) + "\" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)\n"
+            "add_executable(app main.c)\ntarget_link_libraries(app PRIVATE otok::" + product + ")\notok_copy_runtime_dlls(app)\n",
+            configuration, generator, run_env);
+    }
+
+    // A program of `main_c` built by a CMake project of `lists` (after its `project()`, which builds `app`) in `configuration` with
+    // `generator` and the configure arguments `args`, and run: its exit code. A failure carries the log.
+    result<int> run_cmake_project(std::string const& main_c, std::string const& lists, std::string const& configuration,
+        std::string const& generator = "Ninja", env_vars const& run_env = {}, std::vector<std::string> const& args = {})
+    {
         std::string const name = "cmake-" + configuration + "-" + std::to_string(cmake_consumers_++);
         std::filesystem::path const dir = base_ / name;
         std::filesystem::create_directories(dir);
         std::ofstream{dir / "main.c", std::ios::binary} << main_c;
-        std::ofstream{dir / "CMakeLists.txt", std::ios::binary}
-            << "cmake_minimum_required(VERSION 3.28)\nproject(consumer C)\n"
-               "find_package(Otok CONFIG REQUIRED PATHS \"" + path_to_utf8(output("").generic_u8string()) + "\" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)\n"
-               "add_executable(app main.c)\ntarget_link_libraries(app PRIVATE otok::" + product + ")\notok_copy_runtime_dlls(app)\n";
+        std::ofstream{dir / "CMakeLists.txt", std::ios::binary} << "cmake_minimum_required(VERSION 3.28)\nproject(consumer C)\n" + lists;
         env_vars const env = consumer_env();
         std::filesystem::path const log = dir / "build.log";
         bool const multi = generator.starts_with("Visual Studio");
         std::vector<std::string> configure{"cmake", "-S", path_to_utf8(dir), "-B", path_to_utf8(dir / "build"), "-G", generator};
         if (multi) configure.insert(configure.end(), {"-A", machine_arch == std::string_view{"arm64"} ? "ARM64" : "x64"});
         else configure.push_back("-DCMAKE_BUILD_TYPE=" + configuration);
+        configure.insert(configure.end(), args.begin(), args.end());
         for (auto const& argv : {configure, std::vector<std::string>{"cmake", "--build", path_to_utf8(dir / "build"), "--config", configuration}}) {
             auto ran = run_process({argv, env, dir, log});
             if (!ran) return std::unexpected{ran.error()};
@@ -979,6 +988,70 @@ TEST(host_target, serves_or_refuses_a_configuration_not_built)
         std::string::npos)
         << debug.error().message;
 #endif
+}
+
+// CMake packages under their usual names (otok-toml.md 4.12): a project of find_package calls written for another package
+// manager builds unchanged through the provider, with the recipe's names of tiny-b and the project's of tiny-a; a version or a
+// component the output does not have is not found, and CMake's own search (the project's FindTinyB.cmake) never runs.
+TEST(host_target, gives_cmake_packages_under_their_usual_names)
+{
+    host_project p{"tiny"};
+    if (std::string const missing = p.missing_tools(); !missing.empty()) GTEST_SKIP() << missing;
+    use_system_libraries_of_the_machine(p);
+    std::string recipe = read_file(p.project_dir() / "recipes" / "tiny-b" / "recipe.toml").value_or("");
+    p.write("recipes/tiny-b/recipe.toml", recipe + "\n[cmake.TinyB]\ntargets = { \"Tiny::B\" = \"TinyB\" }\ncomponents = { b = \"TinyB\" }\n"
+        "variables = { TINYB_INCLUDE_DIR = { include = \"TinyB\" } }\n");
+    std::string manifest = p.manifest();
+    manifest.insert(manifest.find("cflags = [\"-DTINY_BONUS=3\"]"), "cmake = { TinyA = { targets = { \"TinyA::TinyA\" = \"TinyA\" } } }\n");
+    p.write("otok.toml", manifest);
+
+    ASSERT_EQ(p.run({"install"}), 0) << p.err.str() << p.out.str();
+    for (char const* file : {"otok-provider.cmake", "cmake.d/TinyB/TinyBConfig.cmake", "cmake.d/TinyB/TinyBConfigVersion.cmake",
+             "cmake.d/TinyB/module/FindTinyB.cmake", "cmake.d/TinyA/TinyAConfig.cmake"}) {
+        EXPECT_TRUE(std::filesystem::exists(p.output(file))) << file;
+    }
+
+    p.write("FindTinyB.cmake", "message(FATAL_ERROR \"CMake's own search for TinyB ran\")\n");
+    std::string const lists =
+        "list(APPEND CMAKE_MODULE_PATH \"" + path_to_utf8(p.project_dir().generic_u8string()) + "\")\n"
+        "find_package(TinyB 1.0 MODULE REQUIRED COMPONENTS b)\n"
+        "if(NOT TINYB_LIBRARIES STREQUAL \"Tiny::B\" OR NOT TinyB_VERSION STREQUAL \"1.0\" OR NOT TINYB_INCLUDE_DIR OR NOT TinyB_b_FOUND)\n"
+        "  message(FATAL_ERROR \"the variables: '${TINYB_LIBRARIES}' '${TinyB_VERSION}' '${TINYB_INCLUDE_DIR}' '${TinyB_b_FOUND}'\")\n"
+        "endif()\n"
+        "find_package(tinya REQUIRED)\n"
+        "find_package(TinyB 2.0 QUIET)\n"
+        "if(TinyB_FOUND)\n  message(FATAL_ERROR \"TinyB 2.0 was found\")\nendif()\n"
+        "find_package(TinyB QUIET COMPONENTS nope)\n"
+        "if(TinyB_FOUND)\n  message(FATAL_ERROR \"TinyB with the component nope was found\")\nendif()\n"
+        "add_executable(app main.c)\ntarget_link_libraries(app PRIVATE Tiny::B TinyA::TinyA)\notok_copy_runtime_dlls(app)\n";
+    std::vector<std::string> const provider{"-DCMAKE_PROJECT_TOP_LEVEL_INCLUDES=" + path_to_utf8(p.output("otok-provider.cmake").generic_u8string())};
+    auto code = p.run_cmake_project(tiny_main, lists, "Release", "Ninja", {}, provider);
+    ASSERT_TRUE(code) << code.error().message;
+    EXPECT_EQ(*code, 13);
+
+    // a version older than asked for, REQUIRED: the package's message
+    auto newer = p.run_cmake_project(tiny_main, "find_package(TinyB 1.1 REQUIRED)\n", "Release", "Ninja", {}, provider);
+    ASSERT_FALSE(newer);
+    EXPECT_NE(flat(newer.error().message).find("is tiny-b 1.0, not the version 1.1 asked for"), std::string::npos) << newer.error().message;
+    auto component = p.run_cmake_project(tiny_main, "find_package(TinyB REQUIRED COMPONENTS b nope)\n", "Release", "Ninja", {}, provider);
+    ASSERT_FALSE(component);
+    EXPECT_NE(flat(component.error().message).find("has no component nope of tiny-b; its products give: b"), std::string::npos)
+        << component.error().message;
+
+    // the project's names without the recipe's
+    manifest.insert(manifest.find("[deps.tiny-b]\n") + 14, "cmake = false\n");
+    p.write("otok.toml", manifest);
+    ASSERT_EQ(p.run({"install"}), 0) << p.err.str() << p.out.str();
+    EXPECT_FALSE(std::filesystem::exists(p.output("cmake.d/TinyB")));
+    EXPECT_TRUE(std::filesystem::exists(p.output("cmake.d/TinyA/TinyAConfig.cmake")));
+
+    // a product the recipe does not have, refused before anything is built
+    std::string const wrong = "\"TinyA::TinyA\" = \"TinyA\"";
+    manifest.replace(manifest.find(wrong), wrong.size(), "\"TinyA::TinyA\" = \"Nope\"");
+    p.write("otok.toml", manifest);
+    EXPECT_NE(p.run({"install"}), 0);
+    EXPECT_NE(p.err.str().find("'cmake' in deps.tiny-a names the product 'Nope', which the recipe of tiny-a does not have"), std::string::npos)
+        << p.err.str();
 }
 
 // Dynamic libraries for consumers (otok-toml.md 4.11): imported shared libraries, the DLLs beside the program on Windows
