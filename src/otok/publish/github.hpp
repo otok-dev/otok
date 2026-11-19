@@ -8,6 +8,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "otok/core/error.hpp"
@@ -52,6 +53,26 @@ struct open_pull_request
 // The open pull requests of `repository` ("owner/name") and the files they add, through the REST API at `api`.
 result<std::vector<open_pull_request>> open_pull_requests(http_transport const& transport, std::string const& api, std::string const& token,
     std::string const& repository);
+
+// What GitHub takes in a pull request: a title of 256 characters, a body of 65536 (counted here in bytes, never fewer).
+inline constexpr std::size_t github_title_limit = 256;
+inline constexpr std::size_t github_body_limit = 65536;
+
+// An entry of a publication in its title: its variant ("android") and its release ("a 1.0-r1").
+struct publication_entry
+{
+    std::string variant;
+    std::string release;
+};
+
+// The title of a pull request of `publisher` publishing `entries` of `libraries` libraries: the publisher once and the
+// entries by variant, in the order they come, "Publish p — android: a 1.0-r1, b 2.0-r1; windows: a 1.0-r1", while that
+// fits GitHub's limit, else "Publish p — <n> entries of <m> libraries".
+std::string publication_title(std::string_view publisher, std::span<publication_entry const> entries, std::size_t libraries);
+
+// `head`, the `lines` each on a line of its own, then `tail`, within GitHub's limit of a body: the lines that do not
+// fit are left out and counted ("- … and <n> more").
+std::string publication_body(std::string const& head, std::span<std::string const> lines, std::string const& tail);
 
 class github_index
 {

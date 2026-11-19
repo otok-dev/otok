@@ -2571,8 +2571,16 @@ int publish(parsed_command const& cmd, command_context& ctx)
         else fresh.push_back(&p);
     }
     if (fresh.empty()) return 0;
-    std::string title = "Publish";
-    for (std::size_t i = 0; i < fresh.size(); ++i) title += (i ? ", " : " ") + fresh[i]->addition->label;
+    std::string title;
+    {
+        std::vector<publication_entry> entries;
+        std::set<std::string, std::less<>> libraries;
+        for (publish_recipe const* p : fresh) {
+            entries.push_back({p->addition->variant, p->addition->release});
+            libraries.insert(p->addition->library_path);
+        }
+        title = publication_title(publisher, entries, libraries.size());
+    }
 
     if (checkout) {
         // pushed by one who may push to the index: the time is theirs to write, as the workflow writes it on GitHub (index.md 3)
@@ -2602,10 +2610,11 @@ int publish(parsed_command const& cmd, command_context& ctx)
 
     std::vector<github_file> files;
     std::set<std::string, std::less<>> libraries;
-    std::string body = "Published with otok " + std::string{build_info::version} + ":\n";
+    std::vector<std::string> lines;
+    std::string tail;
     for (publish_recipe const* p : fresh) {
         files.push_back({p->addition->entry_path, p->addition->entry_text});
-        body += "\n- " + p->addition->label + " from " + p->source.git + " at " + p->source.commit;
+        lines.push_back("- " + p->addition->label + " from " + p->source.git + " at " + p->source.commit);
         if (!libraries.insert(p->addition->library_path).second) continue;
         auto library = github->file(p->addition->library_path);
         if (!library) return error(library.error().message);
@@ -2622,11 +2631,12 @@ int publish(parsed_command const& cmd, command_context& ctx)
         publisher_file registration;
         registration.github_id = account->id;
         files.push_back({publisher_path, write_publisher(registration)});
-        body += "\n\nRegisters the publisher " + in_quotes(publisher) + " for the GitHub account " + account->login + ".";
+        tail += "\n\nRegisters the publisher " + in_quotes(publisher) + " for the GitHub account " + account->login + ".";
         ctx.out << "registering the publisher " << in_quotes(publisher) << " for the GitHub account " << account->login
                 << ": an index maintainer accepts the name by merging the pull request\n";
     }
-    auto pr = github->propose(publish_branch_of(publisher, fresh), title, body + "\n", files);
+    std::string const body = publication_body("Published with otok " + std::string{build_info::version} + ":\n", lines, tail + "\n");
+    auto pr = github->propose(publish_branch_of(publisher, fresh), title, body, files);
     if (!pr) return error(pr.error().message);
     ctx.out << (pr->reused ? "updated the pull request " : "opened the pull request ") << pr->url << "\n";
     // what its last check said (index.md 9): the check of this update takes minutes, so the comment is still the earlier one's

@@ -300,7 +300,8 @@ generators. `defines` are passed sorted by name, so the command line is the same
 
 Flags in CMake builds: the generated toolchain file sets `CMAKE_<LANG>_FLAGS_INIT` and the linker
 flags `CMAKE_{EXE,SHARED,MODULE}_LINKER_FLAGS_INIT` to `slice.toolchain.cflags`/`cxxflags`/`ldflags`
-and sets every `CMAKE_<LANG>_FLAGS_<CONFIG>` to empty, so CMake adds no configuration flags of its own
+(C and OBJC to `cflags`, CXX and OBJCXX to `cxxflags`, ASM to `cflags` without the flag of the C standard, so that
+Objective-C and assembly are compiled for the slice too: Mac Catalyst's `-target`) and sets every `CMAKE_<LANG>_FLAGS_<CONFIG>` to empty, so CMake adds no configuration flags of its own
 after otok's and the project's (`otok-toml.md` 4.3). `otok.cmake` runs without `CFLAGS`, `CXXFLAGS`
 and `LDFLAGS` in the environment, which CMake would add a second time. For dynamic `apple` slices the
 toolchain file sets `CMAKE_INSTALL_NAME_DIR` to `@rpath`, so dynamic libraries get

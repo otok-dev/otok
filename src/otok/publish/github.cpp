@@ -20,12 +20,28 @@ bool success(http_reply const& r) noexcept
     return r.status >= 200 && r.status < 300;
 }
 
-// "GitHub: POST /repos/o/r/pulls: 422 Validation Failed"
+// "GitHub: POST /repos/o/r/pulls: 422 Validation Failed: title is too long (maximum is 256 characters)": the message
+// and the details GitHub gives in 'errors', each its 'message' or else its field and code
 error api_error(std::string const& method, std::string const& path, http_reply const& r)
 {
     std::string message;
     auto const body = json::parse(r.body, nullptr, false);
     if (body.is_object() && body.contains("message") && body["message"].is_string()) message = " " + body["message"].get<std::string>();
+    if (body.is_object() && body.contains("errors") && body["errors"].is_array()) {
+        std::string details;
+        for (json const& e : body["errors"]) {
+            std::string detail;
+            if (e.is_string()) detail = e.get<std::string>();
+            else if (e.is_object() && e.contains("message") && e["message"].is_string()) detail = e["message"].get<std::string>();
+            else if (e.is_object()) {
+                for (char const* key : {"resource", "field", "code"}) {
+                    if (e.contains(key) && e[key].is_string()) detail += (detail.empty() ? "" : " ") + e[key].get<std::string>();
+                }
+            }
+            if (!detail.empty()) details += (details.empty() ? "" : "; ") + detail;
+        }
+        if (!details.empty()) message += (message.empty() ? " " : ": ") + details;
+    }
     return error{"GitHub: " + method + " " + path + ": " + std::to_string(r.status) + message};
 }
 
@@ -101,6 +117,39 @@ result<std::vector<open_pull_request>> open_pull_requests(http_transport const& 
         out.push_back(std::move(r));
     }
     return out;
+}
+
+std::string publication_title(std::string_view publisher, std::span<publication_entry const> entries, std::size_t libraries)
+{
+    std::string const head = "Publish " + std::string{publisher} + " — ";
+    // the variants in the order they come, each with its releases
+    std::vector<std::pair<std::string, std::string>> groups;
+    for (publication_entry const& e : entries) {
+        auto it = std::ranges::find(groups, e.variant, &std::pair<std::string, std::string>::first);
+        if (it == groups.end()) groups.emplace_back(e.variant, e.release);
+        else it->second += ", " + e.release;
+    }
+    std::string title = head;
+    for (std::size_t i = 0; i < groups.size(); ++i) title += (i ? "; " : "") + groups[i].first + ": " + groups[i].second;
+    if (title.size() <= github_title_limit) return title;
+    return head + std::to_string(entries.size()) + (entries.size() == 1 ? " entry" : " entries") + " of " + std::to_string(libraries)
+        + (libraries == 1 ? " library" : " libraries");
+}
+
+std::string publication_body(std::string const& head, std::span<std::string const> lines, std::string const& tail)
+{
+    std::string body = head;
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        // room for this line and, when lines are left after it, for the one counting them
+        std::size_t const left = lines.size() - i - 1;
+        std::string const more = "\n- … and " + std::to_string(left) + " more";
+        if (body.size() + 1 + lines[i].size() + (left ? more.size() : 0) + tail.size() > github_body_limit) {
+            body += "\n- … and " + std::to_string(lines.size() - i) + " more";
+            break;
+        }
+        body += "\n" + lines[i];
+    }
+    return body + tail;
 }
 
 bool github_index::is_github_url(std::string const& url)

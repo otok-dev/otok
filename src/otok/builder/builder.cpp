@@ -43,7 +43,7 @@ namespace {
 
 // Bumped when the meaning of a key changes, or when otok changes what it gives builds (cache-key.md 2).
 constexpr char const* key_format = "1";
-constexpr char const* toolchain_profile_version = "9";  // 2: -DNDEBUG, /MD, -ffile-prefix-map; 3: /Z7, @rpath install names; 4: CMake MSVC settings; 5: $ORIGIN in RUNPATH; 6: --build of configure; 7: relocated .pc files; 8: the windows target's -fuse-ld, -Wno-register; 9: the native target's clean environment and CMake searches
+constexpr char const* toolchain_profile_version = "10";  // 2: -DNDEBUG, /MD, -ffile-prefix-map; 3: /Z7, @rpath install names; 4: CMake MSVC settings; 5: $ORIGIN in RUNPATH; 6: --build of configure; 7: relocated .pc files; 8: the windows target's -fuse-ld, -Wno-register; 9: the native target's clean environment and CMake searches; 10: CMake's OBJC, OBJCXX and ASM flags
 
 // 1980-01-01, the earliest time zip archives can store (build-lua-api.md 5).
 constexpr char const* source_date_epoch = "315532800";
@@ -490,9 +490,18 @@ std::string cmake_flags_string(std::vector<std::string> const& flags)
 std::string cmake_flags(slice_toolchain const& t)
 {
     std::string const ld = cmake_flags_string(t.ldflags);
+    std::string const c = cmake_flags_string(t.cflags);
+    std::string const cxx = cmake_flags_string(t.cxxflags);
+    // assembly takes the flags of C but its standard, which clang refuses for it
+    std::vector<std::string> asm_flags;
+    for (std::string const& f : t.cflags)
+        if (!f.starts_with("-std=") && !f.starts_with("/std:") && !f.starts_with("-std:")) asm_flags.push_back(f);
     return "\n# Flags: otok's, then the project's (otok-toml.md 4.3); CMake adds no configuration flags of its own.\n"
-           "set(CMAKE_C_FLAGS_INIT \"" + cmake_flags_string(t.cflags) + "\")\n"
-           "set(CMAKE_CXX_FLAGS_INIT \"" + cmake_flags_string(t.cxxflags) + "\")\n"
+           "set(CMAKE_C_FLAGS_INIT \"" + c + "\")\n"
+           "set(CMAKE_CXX_FLAGS_INIT \"" + cxx + "\")\n"
+           "set(CMAKE_OBJC_FLAGS_INIT \"" + c + "\")\n"
+           "set(CMAKE_OBJCXX_FLAGS_INIT \"" + cxx + "\")\n"
+           "set(CMAKE_ASM_FLAGS_INIT \"" + cmake_flags_string(asm_flags) + "\")\n"
            "set(CMAKE_EXE_LINKER_FLAGS_INIT \"" + ld + "\")\n"
            "set(CMAKE_SHARED_LINKER_FLAGS_INIT \"" + ld + "\")\n"
            "set(CMAKE_MODULE_LINKER_FLAGS_INIT \"" + ld + "\")\n"

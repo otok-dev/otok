@@ -920,7 +920,12 @@ TEST_F(builder_test, passes_the_standards)
                                "    assert(slice.toolchain.env.CXXFLAGS:find(flag, 1, true))\n"
                                "    assert(slice.c_standard == 99)\n"
                                "    assert(slice.toolchain.cflags[#slice.toolchain.cflags] == '-std=c99')\n"
-                               "    assert(slice.toolchain.env.CFLAGS:find('-std=c99', 1, true))\n";
+                               "    assert(slice.toolchain.env.CFLAGS:find('-std=c99', 1, true))\n"
+                               // CMake's Objective-C takes C's standard, its assembly none
+                               "    local tc = otok.read(otok.cmake_toolchain())\n"
+                               "    assert(tc:match('CMAKE_OBJC_FLAGS_INIT \"([^\"]*)\"'):find('-std=c99', 1, true))\n"
+                               "    assert(tc:match('CMAKE_OBJCXX_FLAGS_INIT \"([^\"]*)\"'):find(flag, 1, true))\n"
+                               "    assert(not tc:match('CMAKE_ASM_FLAGS_INIT \"([^\"]*)\"'):find('-std=', 1, true))\n";
     write_recipe("b", "2.0", build_lua("b", checks), options_of_b);
     write_recipe("a", "1.0", build_lua("a", checks), "[deps.b]\nversion = \">= 1\"\ndefault-recipe = \"p/b\"\n");
     with("23");
@@ -1732,6 +1737,9 @@ TEST_F(builder_test, passes_the_projects_flags)
     std::string reported = read_file(project.path() / "Otok" / "a" / "include" / "flags.txt").value_or("?");
     EXPECT_EQ(reported.substr(0, reported.find("# the fake")), "-fake -DT=1 -DA=\"x\"\n-fake -DT=1 -DA=\"x\"\n") << reported;
     EXPECT_NE(reported.find("set(CMAKE_C_FLAGS_INIT \"-fake -DT=1 -DA=\\\"x\\\"\")\n"), std::string::npos) << reported;
+    // Objective-C and assembly get them too (Mac Catalyst's -target)
+    EXPECT_NE(reported.find("set(CMAKE_OBJC_FLAGS_INIT \"-fake -DT=1 -DA=\\\"x\\\"\")\n"), std::string::npos) << reported;
+    EXPECT_NE(reported.find("set(CMAKE_ASM_FLAGS_INIT \"-fake -DT=1 -DA=\\\"x\\\"\")\n"), std::string::npos) << reported;
     EXPECT_NE(reported.find("set(CMAKE_${otok_lang}_FLAGS_${otok_config} \"\" CACHE STRING"), std::string::npos) << reported;
 
     // a profile appends; other flags are other slices
@@ -2265,7 +2273,7 @@ TEST_F(builder_test, publishes_what_it_built)
     EXPECT_EQ(entry.find("validated-with"), std::string::npos) << entry;
     EXPECT_EQ(read_file(index / "libraries" / "b.toml").value_or("?"), "scheme = \"dotted\"\n");
     EXPECT_EQ(git_in(index, {"status", "--porcelain"}), "");
-    EXPECT_EQ(git_in(upstream.path() / "index.git", {"log", "-1", "--format=%s", "main"}), "Publish p/a 1.0-r1 (native), p/b 2.0-r1 (native)\n");
+    EXPECT_EQ(git_in(upstream.path() / "index.git", {"log", "-1", "--format=%s", "main"}), "Publish p — native: a 1.0-r1, b 2.0-r1\n");
 
     // nothing new; a dry run builds all the same
     ASSERT_EQ(run({"publish", "--index", index_arg, "--publisher", "p", "--all"}), 0) << err.str();

@@ -190,6 +190,8 @@ std::string write_availability(input_availability const& a);
 struct index_addition
 {
     std::string label;                 // "p/a 1.0-r1 (apple)"
+    std::string variant;               // "apple"
+    std::string release;               // "a 1.0-r1"
     std::string entry_path;            // "recipes/<publisher>/<name>/<variant>/<version>-r<revision>.toml"
     std::string entry_text;
     std::string library_path;          // "libraries/<library>.toml", added when the index has none

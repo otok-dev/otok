@@ -139,13 +139,20 @@ jobs:
           fi
       - name: Merge
         # a merge commit of the checked base and head holding the checked files with the time of the merge: pushed to the
-        # default branch, it makes GitHub show the pull request merged; refused when the default branch has moved since
+        # default branch, it makes GitHub show the pull request merged.
         # The push: with the deploy key of the secret INDEX_PUSH_KEY when there is one, the bypass of a ruleset that lets no
         # one else update the default branch (GitHub Actions' own token cannot be given that bypass); else with that token.
+        # Pull requests are checked side by side: when another one's merge moved the default branch since this check, the
+        # push is refused, and the head is merged with the new default branch, checked again and pushed, a few times.
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
           PUSH_KEY: ${{ secrets.INDEX_PUSH_KEY }}
+          OTOK_CACHE_DIR: ${{ runner.temp }}/otok-cache
+          AUTHOR_ID: ${{ github.event.pull_request.user.id }}
           NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          APPROVER_ID: ${{ github.event.action == 'labeled' && github.event.sender.id || '' }}
           TITLE: ${{ github.event.pull_request.title }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
         working-directory: index
@@ -155,11 +162,7 @@ jobs:
             echo "verdict: $verdict; it waits for an index maintainer's approval" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          git add -u
-          tree=$(git write-tree)
-          commit=$(printf 'Merge pull request #%s\n\n%s\n' "$NUMBER" "$TITLE" \
-            | git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-              commit-tree "$tree" -p HEAD^1 -p HEAD^2)
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
           if [ -n "$PUSH_KEY" ]; then
             host=${GITHUB_SERVER_URL#https://}
             printf '%s\n' "$PUSH_KEY" > "$RUNNER_TEMP/push-key" && chmod 600 "$RUNNER_TEMP/push-key"
@@ -171,12 +174,50 @@ jobs:
             export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/push-key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
             remote="git@$host:$GITHUB_REPOSITORY.git"
           else
-            auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
             set -- -c http.extraheader="AUTHORIZATION: basic $auth"
             remote="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
           fi
-          if ! git "$@" push -q "$remote" "$commit:refs/heads/$BASE_REF"; then
-            echo "the push to the default branch was refused: it moved since the check (run the check again), or the push" \
-              "is not allowed (the deploy key of INDEX_PUSH_KEY in the ruleset's bypass list)" >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
+          attempt=1
+          while :; do
+            git add -u
+            tree=$(git write-tree)
+            commit=$(printf 'Merge pull request #%s\n\n%s\n' "$NUMBER" "$TITLE" \
+              | git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+                commit-tree "$tree" -p HEAD^1 -p HEAD^2)
+            if git "$@" push -q "$remote" "$commit:refs/heads/$BASE_REF"; then
+              exit 0
+            fi
+            # the default branch as it is now: unmoved, the push is not allowed or failed otherwise
+            git -c http.extraheader="AUTHORIZATION: basic $auth" fetch -q origin "refs/heads/$BASE_REF"
+            if [ "$(git rev-parse FETCH_HEAD)" = "$(git rev-parse HEAD^1)" ]; then
+              echo "the push to the default branch failed with the default branch unmoved: is it allowed (the deploy key of" \
+                "INDEX_PUSH_KEY in the ruleset's bypass list)?" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+            if [ "$attempt" -ge 5 ]; then
+              echo "the default branch kept moving: the pull request was merged with it $attempt times and not pushed (run the" \
+                "check again)" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+            attempt=$((attempt + 1))
+            echo "the default branch moved since the check: merged with it again and checked again (attempt $attempt)"
+            git reset -q --hard FETCH_HEAD
+            if ! git -c user.name=otok -c user.email=otok@invalid merge -q --no-ff --no-edit "$HEAD_SHA"; then
+              echo "the pull request conflicts with the default branch, which moved since the check" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+            approval=
+            [ -n "$APPROVER_ID" ] && approval="--approved-by $APPROVER_ID"
+            rm -f "$RUNNER_TEMP/summary.json"
+            # a refusal exits with 1: the verdict is read from the summary
+            "$RUNNER_TEMP/otok" index-check --base HEAD^1 --author-id "$AUTHOR_ID" --repository "$GITHUB_REPOSITORY" --pull-request "$NUMBER" \
+              $approval --stamp --summary "$RUNNER_TEMP/summary.json" --comment "$RUNNER_TEMP/comment.md" || true
+            [ -f "$RUNNER_TEMP/summary.json" ] || { echo "the check after the default branch moved failed" >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+            verdict=$(jq -r .verdict "$RUNNER_TEMP/summary.json")
+            if [ "$verdict" != auto ]; then
+              # the comment and the label of this run are the earlier verdict's: the check run again writes them
+              echo "the default branch moved since the check, and the check of the merge with it gives the verdict '$verdict'" \
+                "(run the check again for its comment and label)" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+          done

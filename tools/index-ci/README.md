@@ -9,7 +9,10 @@ decision 47). An index maintainer copies them to `.github/workflows/` of the ind
   approves one by adding the label `approved`, and the workflow checks it again and merges it. Either way it
   comments in the pull request with the verdict and its reasons, replacing its comment of an earlier check. It
   merges with a merge commit of its own, pushed to the default branch, whose new entries carry the time of the merge
-  (`published`, `index.md` 3): maintainers never merge with GitHub's button.
+  (`published`, `index.md` 3): maintainers never merge with GitHub's button. Pull requests are checked side by side:
+  when another one's merge moved the default branch since the check, the push is refused, and the workflow merges the
+  head with the new default branch, checks it again and pushes, up to five times; a conflict or a verdict other than
+  `auto` on the new default branch fails the run (run the check again for its comment and label).
 - `probe.yml`: weekly, `otok index-probe` writes `availability.toml`.
 - `view.yml`: on every push, and when `check.yml` or `probe.yml` finish (their pushes, made with the workflow's
   token, start no workflow), `otok index-view` generates the HTTPS view (`index.md` 8) and `otok index-catalog`

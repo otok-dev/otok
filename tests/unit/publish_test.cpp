@@ -359,6 +359,56 @@ TEST(github_index, reads_files_and_reports_errors)
     EXPECT_TRUE(github_index::is_github_url("https://git.example.com/idx/index"));
 }
 
+// a 422 without an open pull request of the branch: GitHub's message and the details of its 'errors'
+TEST(github_index, reports_the_details_of_a_refused_pull_request)
+{
+    fake_github gh;
+    gh.repository(true);
+    gh.on("GET /repos/idx/index/git/commits/head1", 200, {{"tree", {{"sha", "tree1"}}}});
+    gh.on("POST /repos/idx/index/git/trees", 201, {{"sha", "tree2"}});
+    gh.on("POST /repos/idx/index/git/commits", 201, {{"sha", "commit2"}});
+    gh.on("POST /repos/idx/index/git/refs", 201, {{"ref", "refs/heads/publish/p/a-1.0-r1"}});
+    gh.on("POST /repos/idx/index/pulls", 422, {{"message", "Validation Failed"},
+        {"errors", nlohmann::json::array({{{"resource", "PullRequest"}, {"code", "custom"}, {"message", "title is too long (maximum is 256 characters)"}},
+            {{"resource", "Issue"}, {"field", "body"}, {"code", "too_long"}}})}});
+    gh.on("GET /repos/idx/index/pulls?state=open&head=idx:publish/p/a-1.0-r1", 200, nlohmann::json::array());
+    auto index = github_index::open("https://github.com/idx/index", "secret", gh.transport());
+    ASSERT_TRUE(index.has_value()) << index.error().message;
+    auto pr = index->propose("publish/p/a-1.0-r1", "t", "b", entry_files);
+    ASSERT_FALSE(pr.has_value());
+    EXPECT_EQ(pr.error().message, "GitHub: POST /repos/idx/index/pulls: 422 Validation Failed: title is too long (maximum is 256 characters); "
+        "Issue body too_long");
+}
+
+TEST(github_index, keeps_titles_and_bodies_within_the_limits)
+{
+    // the publisher once, the entries by variant in the order they come
+    std::vector<publication_entry> const mixed{{"android", "a 1.0-r1"}, {"windows", "a 1.0-r1"}, {"android", "b 2.0-r1"}};
+    EXPECT_EQ(publication_title("p", mixed, 2), "Publish p — android: a 1.0-r1, b 2.0-r1; windows: a 1.0-r1");
+    EXPECT_EQ(publication_title("p", std::vector<publication_entry>{{"apple", "a 1.0-r1"}}, 1), "Publish p — apple: a 1.0-r1");
+    // what does not fit GitHub's limit is counted
+    std::vector<publication_entry> many;
+    for (int i = 0; i < 40; ++i) many.push_back({i % 2 ? "windows" : "android", "lib" + std::to_string(i / 2) + " 1.0-r1"});
+    EXPECT_EQ(publication_title("p", many, 20), "Publish p — 40 entries of 20 libraries");
+    EXPECT_EQ(publication_title("p", std::vector<publication_entry>{{"apple", std::string(300, 'x')}}, 1), "Publish p — 1 entry of 1 library");
+    // the longest that fits: 256 bytes
+    std::string const head = "Publish p — apple: ";
+    std::string const fits = std::string(github_title_limit - head.size(), 'x');
+    EXPECT_EQ(publication_title("p", std::vector<publication_entry>{{"apple", fits}}, 1), head + fits);
+    EXPECT_EQ(publication_title("p", std::vector<publication_entry>{{"apple", fits + "x"}}, 1), "Publish p — 1 entry of 1 library");
+
+    std::vector<std::string> const two{"p/a 1.0-r1 (native)", "p/b 2.0-r1 (native)"};
+    EXPECT_EQ(publication_body("Head:\n", two, "\n"), "Head:\n\np/a 1.0-r1 (native)\np/b 2.0-r1 (native)\n");
+    std::vector<std::string> const long_lines(1000, "- " + std::string(98, 'y'));  // 100 bytes a line
+    std::string const body = publication_body("Head:\n", long_lines, "\n\nTail.\n");
+    EXPECT_LE(body.size(), github_body_limit);
+    EXPECT_TRUE(body.ends_with("\n\nTail.\n")) << body.substr(body.size() - 100);
+    std::size_t const kept = static_cast<std::size_t>(std::ranges::count(body, 'y')) / 98;
+    EXPECT_LT(kept, 1000u);
+    EXPECT_NE(body.find("\n- … and " + std::to_string(1000 - kept) + " more\n\nTail.\n"), std::string::npos);
+    EXPECT_GT(body.size() + 101, github_body_limit);  // no room for one more line
+}
+
 // index.md 9.2: the open pull requests of the index and the files they add, every page of both listings
 TEST(github_index, lists_open_pull_requests_and_what_they_add)
 {
