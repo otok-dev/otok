@@ -271,6 +271,7 @@ version, a machine whose system the project is built on and `systems` does not n
 | `otok update` | re-resolves without preferences (highest versions within constraints) and writes the lock | same |
 | `otok update <library>` | re-resolves `<library>` without preference, keeping every other locked version where possible | same |
 | `otok update --drop <system>` | as `otok update`, without the graphs of that system, which the lock no longer names (not this machine's) | same |
+| `otok update --no-build` | as `otok update`, and stops once the lock is written: fetches and builds nothing | same |
 
 A version withdrawn by an advisory makes the lock stale, but `install` does not silently replace it:
 it stops with the advisory, unless `--allow-advisory=<id>` is given (`index.md` 7.1), and `otok update`

@@ -397,6 +397,7 @@ consumer_cmake_parts detail::cmake_parts()
     parts.arch_cure = "otok builds for Linux on a machine of the architecture it builds for: install the project on one";
     parts.link_item = [](std::string const& name) { return "-l" + name; };
     parts.cxx_runtime = "-lstdc++";  // of GCC and of Clang on Linux both (recipe-toml.md 11)
+    parts.runtime = consumer_cmake_parts::runtime_copy::shared_objects;
     return parts;
 }
 

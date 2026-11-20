@@ -256,7 +256,10 @@ Its output is one directory per library, `<output>/<library>/`, with:
 Shared objects on Linux carry `$ORIGIN` in their `RUNPATH` (`build-lua-api.md` 6.2), so the libraries of
 one recipe find each other in its `lib/` wherever it is copied. Libraries of different recipes find each
 other the same way once the consumer puts their shared objects into one directory, as an application
-does when it ships them; a consumer that runs them from the output directories sets `LD_LIBRARY_PATH`.
+does when it ships them, and as `otok_copy_runtime_dlls` of `otok-config.cmake` does beside a program it builds (4.11). A
+program run from the output directories instead would load a library's dependency from the system when one of the same
+`SONAME` is there (`$ORIGIN` of a library reaches only its own directory, and the program's `RUNPATH` serves its own needs
+only), or not at all.
 
 Tool dependencies have no output, but for the tools the project delivers (7.1). `otok-config.cmake` gives the libraries and products to a consumer's CMake (4.11).
 
@@ -621,7 +624,11 @@ otok_copy_runtime_dlls(app)
   toolchain file), compared as numbers part by part; the message names its path. When neither names an NDK with that file,
   nothing is checked (a `VERBOSE` message says so).
 - `otok_copy_runtime_dlls(<target>)` copies the DLLs a target loads beside it once it is built
-  (`$<TARGET_RUNTIME_DLLS>`). It does nothing on the other targets, so a project of several targets calls it alike.
+  (`$<TARGET_RUNTIME_DLLS>`). On Linux it copies every shared object of the output of the consumer's architecture beside
+  the target, under its `SONAME`, in the configuration built (`$<TARGET_FILE>`, `$<TARGET_SONAME_FILE_NAME>`), and puts
+  `$ORIGIN` first in the target's `BUILD_RPATH`, before what the project gave it (call it after setting that), so that the
+  program loads them from there and each finds its dependencies beside itself (4.1). It does nothing on Android, whose app
+  Gradle packs, and on Apple, so a project of several targets calls it alike.
 - `Otok_<library>_DATA_DIR` is the `data/` of a library with data files; `Otok_ACKNOWLEDGEMENTS` is
   `Acknowledgements.md`. Paths are relative to the file, so the output may be moved.
 

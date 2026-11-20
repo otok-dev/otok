@@ -285,7 +285,7 @@ TEST(consumer, imports_dynamic_libraries)
                            {"z", "arm64", "release", "z/lib/arm64/libz.so.1.3", "", "", "libz.so.1", true}},
                        {}, {}, true}};
     consumer_cmake_parts parts = test_parts();
-    parts.runtime_dlls = true;
+    parts.runtime = consumer_cmake_parts::runtime_copy::dlls;
     std::string const text = consumer_cmake_config(p, parts);
     EXPECT_NE(text.find("add_library(otok::z_z SHARED IMPORTED)\nset_property(TARGET otok::z_z PROPERTY IMPORTED_CONFIGURATIONS RELEASE DEBUG)\n"
                         "set_property(TARGET otok::z_z PROPERTY MAP_IMPORTED_CONFIG_RELWITHDEBINFO RELEASE)\n"
@@ -312,6 +312,43 @@ TEST(consumer, imports_dynamic_libraries)
                         "endfunction()\n"),
         std::string::npos)
         << text;
+}
+
+// Linux (docs/PLAN.md decision 132): otok_copy_runtime_dlls puts the shared objects of the consumer's architecture beside a
+// target under their SONAMEs, with $ORIGIN first in its RUNPATH; static libraries and other architectures are not copied.
+TEST(consumer, copies_shared_objects_beside_a_target)
+{
+    consumer_package p;
+    p.architectures = {"x86_64", "arm64"};
+    p.configurations = {"release"};
+    p.libraries = {{"z_z", "z", "", true,
+                       {{"z", "x86_64", "release", "z/lib/libz.so.1.3", "", "", "libz.so.1", true},
+                           {"z", "arm64", "release", "z/lib/libz.so.1.3", "", "", "libz.so.1", true}},
+                       {}, {}, true},
+        {"png_png", "png", "", true, {{"png", "x86_64", "release", "png/lib/libpng.so.16.0", "", "", "libpng.so.16", true}}, {}, {}, true},
+        {"s_s", "s", "", false, {{"s", "x86_64", "release", "s/lib/libs.a", "", "", "", false}}, {}, {}, false}};
+    consumer_cmake_parts parts = test_parts();
+    parts.runtime = consumer_cmake_parts::runtime_copy::shared_objects;
+    std::string const text = consumer_cmake_config(p, parts);
+    EXPECT_NE(text.find("if(_otok_arch STREQUAL \"x86_64\")\n  set_property(GLOBAL PROPERTY _otok_shared_objects \"otok::z_z\" \"otok::png_png\")\nendif()\n"
+                        "if(_otok_arch STREQUAL \"arm64\")\n  set_property(GLOBAL PROPERTY _otok_shared_objects \"otok::z_z\")\nendif()\n"
+                        "function(otok_copy_runtime_dlls target)\n"
+                        "  get_property(_otok_libraries GLOBAL PROPERTY _otok_shared_objects)\n"
+                        "  if(NOT _otok_libraries)\n"
+                        "    return()\n"
+                        "  endif()\n"
+                        "  set(_otok_commands)\n"
+                        "  foreach(_otok_library IN LISTS _otok_libraries)\n"
+                        "    list(APPEND _otok_commands COMMAND \"${CMAKE_COMMAND}\" -E copy_if_different \"$<TARGET_FILE:${_otok_library}>\"\n"
+                        "      \"$<TARGET_FILE_DIR:${target}>/$<TARGET_SONAME_FILE_NAME:${_otok_library}>\")\n"
+                        "  endforeach()\n"
+                        "  add_custom_command(TARGET ${target} POST_BUILD ${_otok_commands} VERBATIM)\n"
+                        "  get_property(_otok_rpath TARGET ${target} PROPERTY BUILD_RPATH)\n"
+                        "  set_property(TARGET ${target} PROPERTY BUILD_RPATH \"$ORIGIN\" ${_otok_rpath})\n"
+                        "endfunction()\n\nunset(_otok_dir)"),
+        std::string::npos)
+        << text;
+    EXPECT_EQ(text.find("TARGET_RUNTIME_DLLS"), std::string::npos) << text;
 }
 
 // The other configuration serves when one was not built; a target whose configurations do not mix refuses it.

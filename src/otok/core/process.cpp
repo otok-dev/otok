@@ -191,6 +191,20 @@ HANDLE children_job()
     return job;
 }
 
+// No dialog of Windows for an error of a process of a build: an image of another machine (meson's sanity check of the
+// build machine's compiler in a cross build, which runs an arm64 program on x64), a missing DLL, a drive not ready.
+// The process gets the error instead, as on other systems. The error mode is the process's, inherited by every process
+// started without CREATE_DEFAULT_ERROR_MODE: set in otok once, before its first child, it holds for every process of
+// its builds (docs/PLAN.md decision 74).
+void quiet_error_mode()
+{
+    static bool const done = [] {
+        ::SetErrorMode(::GetErrorMode() | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+        return true;
+    }();
+    (void)done;
+}
+
 // "NAME=value\0..." sorted case-insensitively, as CreateProcessW requires, ending with "\0\0".
 std::wstring environment_block(env_vars const& env)
 {
@@ -291,6 +305,7 @@ result<process_exit> spawn(std::filesystem::path const& program, process_spec co
     std::wstring env = environment_block(spec.env);
 
     PROCESS_INFORMATION pi{};
+    quiet_error_mode();
     if (spec.sandbox) {
         // in the AppContainer, with otok-sandbox.dll (docs/PLAN.md decision 103)
         STARTUPINFOW plain = si.StartupInfo;

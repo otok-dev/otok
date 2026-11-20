@@ -1063,7 +1063,8 @@ TEST(host_target, gives_cmake_packages_under_their_usual_names)
 }
 
 // Dynamic libraries for consumers (otok-toml.md 4.11): imported shared libraries, the DLLs beside the program on Windows
-// (otok_copy_runtime_dlls, OtokCopyDlls), each configuration with its own.
+// (otok_copy_runtime_dlls, OtokCopyDlls), on Linux the shared objects of both recipes beside it with $ORIGIN first in its
+// RUNPATH, so that tiny-c finds tiny-d without LD_LIBRARY_PATH (docs/PLAN.md decision 132); each configuration with its own.
 TEST(host_target, gives_consumers_dynamic_libraries)
 {
     host_project p{"dynamic"};
@@ -1077,14 +1078,8 @@ TEST(host_target, gives_consumers_dynamic_libraries)
     if (std::string_view{host} == "windows") generators.emplace_back("Visual Studio 18 2026");
     for (std::string const& generator : generators) {
         // tiny_d is 1 in release, 2 in debug
-        for (auto [configuration, expected, lib] : {std::tuple{"Release", 11, ""}, std::tuple{"Debug", 12, "debug/"}}) {
-            env_vars run_env;
-            if (std::string_view{host} != "windows") {
-                // run from the output, not shipped: the shared objects of both recipes on the loader's path (otok-toml.md 4.1)
-                run_env["LD_LIBRARY_PATH"] = path_to_utf8(p.output("tiny-c/" + std::string{lib} + "lib")) + ":"
-                    + path_to_utf8(p.output("tiny-d/" + std::string{lib} + "lib"));
-            }
-            auto code = p.run_cmake_consumer(main_c, "TinyC", configuration, generator, run_env);
+        for (auto [configuration, expected] : {std::pair{"Release", 11}, std::pair{"Debug", 12}}) {
+            auto code = p.run_cmake_consumer(main_c, "TinyC", configuration, generator);
             ASSERT_TRUE(code) << generator << " " << configuration << ": " << code.error().message;
             EXPECT_EQ(*code, expected) << generator << " " << configuration;
         }

@@ -178,6 +178,8 @@ TEST(sandbox, confines_processes)
     // no brokering of refused file functions in any thread (hook 19): its exception, caught inside the broker, was a crash
     // to LLVM's handler (clang's #include <utility> beside a directory 'utility' of an include directory)
     EXPECT_EQ(run({path_to_utf8(child), "brokering"}), "skipped skipped\n");
+    // otok's error mode, without dialogs, in the container too
+    EXPECT_EQ(run({path_to_utf8(child), "error-mode"}), "fail-critical-errors\nno-gp-fault-box\nno-open-file-box\n");
     // the ancestors of the work directory, to pass through them (mkdir -p) and nothing more: not listed, and nothing
     // beside them reached
     for (std::filesystem::path const& ancestor : {root, root.root_path()}) {

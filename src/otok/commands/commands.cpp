@@ -72,6 +72,7 @@ option_spec const jobs_option{"jobs", 'j', "N", "Run at most N jobs at once (ove
 // otok.dev.toml (docs/formats/otok-dev-toml.md 3).
 option_spec const no_dev_option{"no-dev", 0, "", "Build what otok.lock says, ignoring the working trees of otok.dev.toml"};
 option_spec const drop_option{"drop", 0, "SYSTEM,...", "Resolve the project for machines of these systems no longer (windows, linux, macos): remove their graphs from otok.lock"};
+option_spec const no_build_option{"no-build", 0, "", "Resolve and write otok.lock only: fetch and build nothing"};
 
 // The flags of reproducible runs (DESIGN 5.4).
 bool offline(parsed_command const& cmd)
@@ -1120,6 +1121,11 @@ int install_pipeline(parsed_command const& cmd, command_context& ctx, bool use_l
         } else {
             write_changes(*p, *fresh, ctx, diags);
         }
+    }
+    // update --no-build: the lock alone, for scripts that compare it with an earlier one (docs/PLAN.md decision 131)
+    if (cmd.flag("no-build")) {
+        report(diags, ctx.err);
+        return diags.has_errors() ? 1 : 0;
     }
     // the targets and the toolchains before anything is fetched (docs/PLAN.md decision 38); the target tables this machine
     // cannot build are skipped (decision 100)
@@ -2870,7 +2876,7 @@ std::span<command_spec const> command_specs()
         {"install", "", "Resolve the dependencies (keeping locked versions), write otok.lock, fetch the inputs and build the libraries into the output",
             {build_profile_option, locked_option, offline_option, frozen_option, allow_advisory_option, verbose_option, keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option, jobs_option, no_dev_option}, 0, 0},
         {"update", "[LIBRARY...]", "Move every library (or the named ones) to the newest allowed version, then as install",
-            {build_profile_option, offline_option, allow_advisory_option, verbose_option, keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option, jobs_option, no_dev_option, drop_option}, 0, any_number},
+            {build_profile_option, offline_option, allow_advisory_option, verbose_option, keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option, jobs_option, no_dev_option, drop_option, no_build_option}, 0, any_number},
         {"fetch", "", "Resolve and write otok.lock as install does, then fetch the inputs of every package in it (all profiles); build nothing",
             {locked_option, offline_option, frozen_option, allow_advisory_option, no_dev_option}, 0, 0},
         {"tree", "", "Print the resolved graph with versions, recipes, platforms and changed options", {profile_option, offline_option, no_dev_option}, 0, 0},

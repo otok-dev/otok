@@ -111,7 +111,11 @@ struct consumer_cmake_parts
     std::function<std::string(std::string const&)> link_item;  // a system library as INTERFACE_LINK_LIBRARIES takes it
     std::string cxx_runtime;                // what `link.runtime = "c++"` links; empty: nothing
     std::string not_built_suffix;           // the extension of the file a configuration not built links (".lib"), naming the cure
-    bool runtime_dlls = false;              // otok_copy_runtime_dlls copies the DLLs; otherwise it does nothing
+    // What otok_copy_runtime_dlls puts beside a target: nothing; the DLLs it loads ($<TARGET_RUNTIME_DLLS>); or the shared
+    // objects of the output under their SONAMEs, with $ORIGIN first in the target's RUNPATH, so that each loads the
+    // others from there (Linux: $ORIGIN of a library's RUNPATH reaches only its own directory, docs/PLAN.md decision 132)
+    enum class runtime_copy { none, dlls, shared_objects };
+    runtime_copy runtime = runtime_copy::none;
 };
 
 // The text of otok-config.cmake (otok-toml.md 4.11).

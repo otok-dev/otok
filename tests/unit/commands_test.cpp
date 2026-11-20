@@ -1352,3 +1352,23 @@ TEST_F(commands, metadata)
     EXPECT_EQ(j["packages"][0]["outputs"][0]["package-key"], std::string(64, 'e'));
     EXPECT_EQ(j["packages"][0]["outputs"][0]["dir"], path_to_utf8((dir / "Otok" / "Packages" / "a").lexically_normal().generic_u8string()));
 }
+
+// update --no-build (docs/PLAN.md decision 131): the lock is written, nothing is fetched or built
+TEST_F(commands, update_without_building_writes_the_lock_alone)
+{
+    EXPECT_EQ(run({"update", "--no-build"}), 0) << err.str();
+    EXPECT_EQ(out.str(), "otok.lock created:\n  added a 1.0 (r1)\n  added b 2.0 (r1)\n");
+    EXPECT_EQ(err.str(), "");
+    EXPECT_NE(lock_text(), "<missing>");
+    EXPECT_FALSE(std::filesystem::exists(unpacked("a")));
+    EXPECT_FALSE(std::filesystem::exists(unpacked("b")));
+
+    project.write("recipes/b/recipe.toml", recipe_of("b", "2.1", options_of_b));
+    EXPECT_EQ(run({"update", "--no-build"}), 0) << err.str();
+    EXPECT_NE(out.str().find("otok.lock updated:\n"), std::string::npos) << out.str();
+    EXPECT_NE(lock_text().find("2.1"), std::string::npos);
+    EXPECT_FALSE(std::filesystem::exists(unpacked("b")));
+
+    // the option belongs to update alone
+    EXPECT_EQ(run({"install", "--no-build"}), 2);
+}

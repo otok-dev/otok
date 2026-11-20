@@ -15,6 +15,7 @@
 //   exit N        exits with code N
 //   abort         terminates abnormally (a signal on POSIX)
 //   job           Windows: prints the limits otok sets of the job it runs in (kill-on-close, die-on-exception), or none
+//   error-mode    Windows: prints the error mode it inherited (fail-critical-errors, no-gp-fault-box, no-open-file-box)
 //   jobserver     POSIX: takes a token from descriptor 3, gives it back to descriptor 4 and prints it
 //   semaphore N   Windows: opens the semaphore named N and prints opened, or the error
 //   traverse D    Windows: opens the directory D to pass through it and prints opened, or the error
@@ -131,6 +132,11 @@ int run(std::vector<std::string> args)
         DWORD const flags = limits.BasicLimitInformation.LimitFlags;
         if (flags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE) std::cout << "kill-on-close\n";
         if (flags & JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION) std::cout << "die-on-exception\n";
+    } else if (command == "error-mode") {
+        UINT const mode = ::GetErrorMode();
+        if (mode & SEM_FAILCRITICALERRORS) std::cout << "fail-critical-errors\n";
+        if (mode & SEM_NOGPFAULTERRORBOX) std::cout << "no-gp-fault-box\n";
+        if (mode & SEM_NOOPENFILEERRORBOX) std::cout << "no-open-file-box\n";
     } else if ((command == "traverse" || command == "list") && args.size() == 2) {
         std::filesystem::path const dir{std::u8string{args[1].begin(), args[1].end()}};
         HANDLE const h = ::CreateFileW(dir.c_str(), command == "traverse" ? SYNCHRONIZE | FILE_TRAVERSE : SYNCHRONIZE | FILE_LIST_DIRECTORY,

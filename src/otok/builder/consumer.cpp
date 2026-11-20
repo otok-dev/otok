@@ -333,6 +333,7 @@ std::string consumer_cmake_config(consumer_package const& p, consumer_cmake_part
     if (release && !debug) maps.emplace_back("DEBUG", "RELEASE");
     if (debug && !release) maps.insert(maps.end(), {{"RELEASE", "DEBUG"}, {"RELWITHDEBINFO", "DEBUG"}, {"MINSIZEREL", "DEBUG"}});
 
+    std::vector<std::pair<std::string, std::vector<std::string>>> shared_objects;  // architecture → shared otok:: targets
     if (!p.libraries.empty()) text += "\n# the libraries\n";
     for (consumer_library const& l : p.libraries) {
         std::string const target = "otok::" + l.name;
@@ -352,7 +353,12 @@ std::string consumer_cmake_config(consumer_package const& p, consumer_cmake_part
                     properties += "\n    IMPORTED_LOCATION_" + c + " " + cmake_path(f->runtime) + "\n    IMPORTED_IMPLIB_" + c + " " + cmake_path(f->link);
                 } else {
                     properties += "\n    IMPORTED_LOCATION_" + c + " " + cmake_path(f->link);
-                    if (!f->soname.empty()) properties += "\n    IMPORTED_SONAME_" + c + " " + cmake_quoted(f->soname);
+                    if (!f->soname.empty()) {
+                        properties += "\n    IMPORTED_SONAME_" + c + " " + cmake_quoted(f->soname);
+                        auto a = std::ranges::find_if(shared_objects, [&](auto const& s) { return s.first == arch; });
+                        if (a == shared_objects.end()) a = shared_objects.insert(shared_objects.end(), {arch, {}});
+                        if (std::ranges::find(a->second, target) == a->second.end()) a->second.push_back(target);
+                    }
                 }
             }
             text += "if(_otok_arch STREQUAL " + cmake_quoted(arch) + ")\n  set_target_properties(" + target + " PROPERTIES" + properties + ")\nendif()\n";
@@ -387,9 +393,33 @@ std::string consumer_cmake_config(consumer_package const& p, consumer_cmake_part
     for (auto const& [library, data] : p.data_dirs) text += "set(Otok_" + library + "_DATA_DIR " + cmake_path(data) + ")\n";
     text += "set(Otok_ACKNOWLEDGEMENTS \"${_otok_dir}/Acknowledgements.md\")\n";
 
+    using runtime_copy = consumer_cmake_parts::runtime_copy;
+    if (parts.runtime == runtime_copy::shared_objects) {
+        text += "\n# the shared objects of the architecture, which otok_copy_runtime_dlls puts beside a target under their SONAMEs, with\n"
+                "# $ORIGIN first in its RUNPATH: $ORIGIN of a library's RUNPATH reaches only the directory the library is in\n";
+        for (auto const& [arch, targets] : shared_objects) {
+            text += "if(_otok_arch STREQUAL " + cmake_quoted(arch) + ")\n  set_property(GLOBAL PROPERTY _otok_shared_objects" + joined(targets, cmake_quoted)
+                + ")\nendif()\n";
+        }
+        text += "function(otok_copy_runtime_dlls target)\n"
+                "  get_property(_otok_libraries GLOBAL PROPERTY _otok_shared_objects)\n"
+                "  if(NOT _otok_libraries)\n"
+                "    return()\n"
+                "  endif()\n"
+                "  set(_otok_commands)\n"
+                "  foreach(_otok_library IN LISTS _otok_libraries)\n"
+                "    list(APPEND _otok_commands COMMAND \"${CMAKE_COMMAND}\" -E copy_if_different \"$<TARGET_FILE:${_otok_library}>\"\n"
+                "      \"$<TARGET_FILE_DIR:${target}>/$<TARGET_SONAME_FILE_NAME:${_otok_library}>\")\n"
+                "  endforeach()\n"
+                "  add_custom_command(TARGET ${target} POST_BUILD ${_otok_commands} VERBATIM)\n"
+                "  get_property(_otok_rpath TARGET ${target} PROPERTY BUILD_RPATH)\n"
+                "  set_property(TARGET ${target} PROPERTY BUILD_RPATH \"$ORIGIN\" ${_otok_rpath})\n"
+                "endfunction()\n";
+        return text + "\nunset(_otok_dir)\nunset(_otok_arch)\nunset(_otok_architectures)\nunset(_otok_multi)\nunset(_otok_build_type)\nunset(_otok_not_built)\n";
+    }
     text += "\n# the DLLs a target loads, beside it once it is built: those of the otok:: targets it links\n"
             "function(otok_copy_runtime_dlls target)\n";
-    if (parts.runtime_dlls) {
+    if (parts.runtime == runtime_copy::dlls) {
         text += "  add_custom_command(TARGET ${target} POST_BUILD\n"
                 "    COMMAND \"${CMAKE_COMMAND}\" -E copy -t \"$<TARGET_FILE_DIR:${target}>\" $<TARGET_RUNTIME_DLLS:${target}>\n"
                 "    COMMAND_EXPAND_LISTS)\n";

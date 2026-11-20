@@ -304,6 +304,7 @@ TEST(android_target, writes_its_parts_of_the_cmake_config)
     EXPECT_EQ(parts.link_item("log"), "-llog");
     EXPECT_EQ(parts.cxx_runtime, "");  // the app's ANDROID_STL
     EXPECT_EQ(parts.checks, "");       // static libraries take the app's runtime
+    EXPECT_EQ(parts.runtime, consumer_cmake_parts::runtime_copy::none);  // Gradle packs the shared objects
 
     p.libraries.front().shared = true;
     p.properties = {{"stl", "shared"}};

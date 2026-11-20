@@ -222,6 +222,16 @@ TEST(process, runs_in_a_job_that_ends_with_otok)
     EXPECT_EQ(e->output, "kill-on-close\ndie-on-exception\n");
 }
 
+// an error of a process of a build is its own, never a dialog of Windows that holds the build (an image of another
+// machine: meson's sanity check of the build machine's compiler in a cross build)
+TEST(process, children_inherit_an_error_mode_without_dialogs)
+{
+    test::temp_dir dir;
+    auto e = run_process(child(dir.path(), {"error-mode"}));
+    ASSERT_TRUE(e.has_value()) << e.error().message;
+    EXPECT_EQ(e->output, "fail-critical-errors\nno-gp-fault-box\nno-open-file-box\n");
+}
+
 #endif
 
 TEST(process, program_lookup)

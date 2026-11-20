@@ -174,7 +174,7 @@ consumer_cmake_parts detail::cmake_parts(consumer_package const& package)
     parts.strict_configurations = true;
     parts.link_item = library_file;
     parts.not_built_suffix = ".lib";
-    parts.runtime_dlls = true;
+    parts.runtime = consumer_cmake_parts::runtime_copy::dlls;
     return parts;
 }
 

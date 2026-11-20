@@ -411,7 +411,7 @@ TEST(windows_target, writes_its_parts_of_the_cmake_config)
 {
     consumer_cmake_parts const parts = cmake_parts(windows_output());
     EXPECT_TRUE(parts.strict_configurations);
-    EXPECT_TRUE(parts.runtime_dlls);
+    EXPECT_EQ(parts.runtime, consumer_cmake_parts::runtime_copy::dlls);
     EXPECT_EQ(parts.link_item("ws2_32"), "ws2_32.lib");
     EXPECT_EQ(parts.link_item("Crypt32.Lib"), "Crypt32.Lib");
     EXPECT_NE(parts.detect.find("if(CMAKE_VS_PLATFORM_NAME)\n  set(_otok_arch \"${CMAKE_VS_PLATFORM_NAME}\")\n"), std::string::npos) << parts.detect;
