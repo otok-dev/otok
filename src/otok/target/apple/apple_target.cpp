@@ -36,7 +36,7 @@ target_info const& info()
             {"catalyst",   {"arm64", "x86_64"},   {"catalyst", "ios"}},  // Mac Catalyst uses iOS versions
             {"tvos",       {"arm64"},             {"tvos"}},
             {"tvossim",    {"arm64", "x86_64"},   {"tvos"}},
-            {"watchos",    {"arm64_32", "arm64"}, {"watchos"}},
+            {"watchos",    {"arm64_32", "arm64"}, {"watchos"}, {{"arm64", "26.0"}}},  // Apple Watch's arm64 from watchOS 26
             {"watchossim", {"arm64", "x86_64"},   {"watchos"}},
             {"xros",       {"arm64"},             {"visionos"}},
             {"xrossim",    {"arm64"},             {"visionos"}},

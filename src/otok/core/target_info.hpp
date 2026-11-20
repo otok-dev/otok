@@ -27,6 +27,9 @@ struct platform_info
     std::string name;                         // "iossim"
     std::vector<std::string> architectures;   // supported, default first
     std::vector<std::string> deployment_keys; // keys of the deployment table that apply, most specific first
+    // Architectures that exist only from a deployment version (Apple Watch's arm64 from watchOS 26): arch → version. A
+    // project building one for a lower version is refused when otok.toml is read (docs/PLAN.md decision 134).
+    std::map<std::string, std::string, std::less<>> architecture_since{};
 };
 
 // A key of the project's target table that only the target reads (otok-toml.md 4): `stl` of `[android]`.

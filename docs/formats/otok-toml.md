@@ -116,6 +116,12 @@ version is required for every platform in the effective platform set (12) — th
 default, because Xcode's default changes with every Xcode release and would silently change the
 output. Keys for platforms that are not used are allowed (a profile may add the platform).
 
+An architecture that exists only from a version of its platform is refused below it when the manifest is read (with
+the profile applied), naming the cure: `arm64` of `watchos` (Apple Watch's 64-bit ABI) exists from watchOS 26, so a
+project deploying lower keeps the platform to `arm64_32` (`architectures = { watchos = ["arm64_32"] }`) or deploys to
+26. Clang would otherwise raise the version of that slice silently, and the build's check of every object's minimum
+version would refuse it only after the build.
+
 The output is one SwiftPM package: `<output>/Package.swift` and, per library,
 `<output>/Packages/<library>/` with one XCFramework per library output name:
 
@@ -194,9 +200,13 @@ target_link_libraries(app PRIVATE otok::OpenSSL)
 - A dynamic library (4.10) is an imported shared library `otok::<library>_<output name>` on its XCFramework of
   frameworks, with the static `otok::<library>_<output name>_headers` on the XCFramework of its headers. The file
   defines `otok_embed_frameworks(<target>)`: with the Xcode generator it embeds the frameworks in the target's bundle
-  (`XCODE_EMBED_FRAMEWORKS`, signed on copy) and adds the run paths of 4.10; with the others it adds the directories
-  of the frameworks for macOS to the target's `BUILD_RPATH`, so a program runs from the build tree. An app bundle
-  made by the other generators gets the frameworks by the project's means.
+  (`XCODE_EMBED_FRAMEWORKS`, signed on copy) and adds the run paths of 4.10. With the others it takes the frameworks of
+  the platform built for (the slice the file chose): a target that is a bundle (`MACOSX_BUNDLE`, which CMake sets by
+  default on the platforms other than macOS) gets them copied with `ditto` (keeping the links of versioned frameworks
+  and the ad hoc signatures) into `Frameworks/` of the bundle once it is built (`Contents/Frameworks/` on macOS) and
+  `@executable_path/Frameworks` (`@executable_path/../Frameworks`) in its `BUILD_RPATH`, so the app runs on macOS or a
+  simulator as built; signing it for a device is the project's. A target that is no bundle gets the directories of the
+  frameworks in its `BUILD_RPATH`, so a program runs from the build tree.
 - Each product whose `when` holds is an interface target `otok::<product>` holding what its SwiftPM product
   holds: the targets of its libraries; the link settings of the products whose libraries it holds and of the
   products of headers only it holds (`-l<name>` for `link.libraries`, `-framework <name>` for `apple.frameworks`, and for `link.runtime`

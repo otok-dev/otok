@@ -353,7 +353,7 @@ result<detail::cmake_package> cmake_package_of(fs::path const& dir, std::span<ou
                 std::string const identifier = path_to_utf8(it->path().filename());
                 auto s = detail::cmake_slice_of(identifier);
                 if (!s) continue;
-                if (dynamic && *s == "macos") c.macos_frameworks.push_back(slashed(framework / path_from_utf8(identifier)));
+                if (dynamic) c.slice_frameworks.emplace_back(*s, slashed(framework / path_from_utf8(identifier) / path_from_utf8(name + ".framework")));
                 mine.insert(*s);
             }
             if (mine.empty()) continue;
@@ -1817,19 +1817,62 @@ std::string detail::cmake_config(cmake_package const& p)
     text += "\n# the data files of the libraries (build-lua-api.md 8), and the notices of their licenses (otok-toml.md 4.2)\n";
     for (auto const& [library, data] : p.data_dirs) text += "set(Otok_" + library + "_DATA_DIR " + cmake_path(data) + ")\n";
     text += "set(Otok_ACKNOWLEDGEMENTS \"${_otok_dir}/Acknowledgements.md\")\n";
-    text += "\n# the frameworks of the dynamic libraries in the bundle of a target of the Xcode generator, or on the run path of its build\n"
+    if (!p.slice_frameworks.empty()) {
+        // the frameworks of the platform built for, which the other generators copy (docs/PLAN.md decision 133)
+        text += "\n# the frameworks of the platform built for\n";
+        std::vector<std::string> order;
+        for (auto const& [slice, framework] : p.slice_frameworks) {
+            if (std::ranges::find(order, slice) == order.end()) order.push_back(slice);
+        }
+        std::ranges::sort(order);  // not the order of the directory's entries, which differs between file systems
+        for (std::string const& slice : order) {
+            std::vector<std::string> mine;
+            for (auto const& [s, framework] : p.slice_frameworks) {
+                if (s == slice) mine.push_back(framework);
+            }
+            text += "if(_otok_slice STREQUAL " + cmake_string(slice) + ")\n  set_property(GLOBAL PROPERTY _otok_frameworks" + cmake_list(mine, cmake_path)
+                + ")\nendif()\n";
+        }
+    }
+    text += "\n# the frameworks of the dynamic libraries in the bundle of a target (Xcode embeds them; with the other generators they are\n"
+            "# copied into the bundle a target is), or on the run path of its build when it is no bundle\n"
             "function(otok_embed_frameworks target)\n";
     if (!p.frameworks.empty()) {
         auto const at = [](std::string_view relative) { return "\"${CMAKE_CURRENT_FUNCTION_LIST_DIR}/" + cmake_escaped(relative) + "\""; };
-        std::string frameworks, macos;
+        std::string frameworks;
         for (std::string const& f : p.frameworks) frameworks += " " + at(f);
-        for (std::string const& f : p.macos_frameworks) macos += " " + at(f);
         text += "  if(CMAKE_GENERATOR STREQUAL \"Xcode\")\n"
                 "    set_property(TARGET ${target} APPEND PROPERTY XCODE_EMBED_FRAMEWORKS" + frameworks + ")\n"
                 "    set_property(TARGET ${target} PROPERTY XCODE_EMBED_FRAMEWORKS_CODE_SIGN_ON_COPY ON)\n"
-                "    set_property(TARGET ${target} PROPERTY XCODE_ATTRIBUTE_LD_RUNPATH_SEARCH_PATHS \"$(inherited) @executable_path/Frameworks @executable_path/../Frameworks\")\n";
-        if (!macos.empty()) text += "  elseif(CMAKE_SYSTEM_NAME STREQUAL \"Darwin\")\n    set_property(TARGET ${target} APPEND PROPERTY BUILD_RPATH" + macos + ")\n";
-        text += "  endif()\n";
+                "    set_property(TARGET ${target} PROPERTY XCODE_ATTRIBUTE_LD_RUNPATH_SEARCH_PATHS \"$(inherited) @executable_path/Frameworks @executable_path/../Frameworks\")\n"
+                "    return()\n"
+                "  endif()\n"
+                "  get_property(_otok_frameworks GLOBAL PROPERTY _otok_frameworks)\n"
+                "  if(NOT _otok_frameworks)\n"
+                "    return()\n"
+                "  endif()\n"
+                "  get_target_property(_otok_bundle ${target} MACOSX_BUNDLE)\n"
+                "  if(NOT _otok_bundle)\n"
+                "    foreach(_otok_framework IN LISTS _otok_frameworks)\n"
+                "      get_filename_component(_otok_slice_dir \"${_otok_framework}\" DIRECTORY)\n"
+                "      set_property(TARGET ${target} APPEND PROPERTY BUILD_RPATH \"${_otok_slice_dir}\")\n"
+                "    endforeach()\n"
+                "    return()\n"
+                "  endif()\n"
+                "  if(CMAKE_SYSTEM_NAME STREQUAL \"Darwin\")\n"
+                "    set(_otok_into \"$<TARGET_BUNDLE_CONTENT_DIR:${target}>/Frameworks\")\n"
+                "    set_property(TARGET ${target} APPEND PROPERTY BUILD_RPATH \"@executable_path/../Frameworks\")\n"
+                "  else()\n"
+                "    set(_otok_into \"$<TARGET_BUNDLE_DIR:${target}>/Frameworks\")\n"
+                "    set_property(TARGET ${target} APPEND PROPERTY BUILD_RPATH \"@executable_path/Frameworks\")\n"
+                "  endif()\n"
+                "  set(_otok_commands)\n"
+                "  foreach(_otok_framework IN LISTS _otok_frameworks)\n"
+                "    get_filename_component(_otok_name \"${_otok_framework}\" NAME)\n"
+                "    # ditto keeps the links of a versioned framework and its signature\n"
+                "    list(APPEND _otok_commands COMMAND /usr/bin/ditto \"${_otok_framework}\" \"${_otok_into}/${_otok_name}\")\n"
+                "  endforeach()\n"
+                "  add_custom_command(TARGET ${target} POST_BUILD ${_otok_commands} VERBATIM)\n";
     }
     text += "endfunction()\n"
             "\n# the DLLs a target loads on Windows (otok-toml.md 4.11): nothing on Apple's platforms, so that a project of several targets calls it alike\n"

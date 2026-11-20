@@ -28,6 +28,25 @@ std::string in_quotes(std::string_view s)
     return "'" + std::string{s} + "'";
 }
 
+// Whether deployment version `a` is below `b`, both digits and dots ("8.0" < "26.0"; "26" == "26.0").
+bool dotted_below(std::string_view a, std::string_view b)
+{
+    auto const next = [](std::string_view& s) {
+        unsigned long n = 0;
+        while (!s.empty() && s.front() != '.') {
+            n = n * 10 + static_cast<unsigned long>(s.front() - '0');
+            s.remove_prefix(1);
+        }
+        if (!s.empty()) s.remove_prefix(1);
+        return n;
+    };
+    while (!a.empty() || !b.empty()) {
+        unsigned long const x = next(a), y = next(b);
+        if (x != y) return x < y;
+    }
+    return false;
+}
+
 std::string joined(std::vector<std::string> const& names)
 {
     std::string text;
@@ -782,6 +801,41 @@ void manifest_reader::check_deployment(manifest const& m, profile const* p)
             if (!found) {
                 diags_.error(p ? p->where : settings.where, "no deployment version for platform " + in_quotes(platform) + context
                     + ": set " + in_quotes(info->deployment_keys.back()) + " in [" + settings.target + "] deployment");
+                continue;
+            }
+            // an architecture that exists only from a later version (docs/PLAN.md decision 134)
+            if (info->architecture_since.empty()) continue;
+            std::string key, version;
+            for (std::string const& k : info->deployment_keys) {
+                if (auto it = deployment.find(k); it != deployment.end()) {
+                    key = k;
+                    version = it->second;
+                    break;
+                }
+            }
+            std::vector<std::string> const* arches = &info->architectures;
+            if (auto it = settings.architectures.find(platform); it != settings.architectures.end()) arches = &it->second;
+            if (p) {
+                if (auto t = p->targets.find(settings.target); t != p->targets.end()) {
+                    if (auto it = t->second.architectures.find(platform); it != t->second.architectures.end()) arches = &it->second;
+                }
+            }
+            for (std::string const& arch : *arches) {
+                auto const since = info->architecture_since.find(arch);
+                if (since == info->architecture_since.end() || !dotted_below(version, since->second)) continue;
+                std::vector<std::string> others;
+                for (std::string const& a : *arches) {
+                    if (!info->architecture_since.contains(a) || !dotted_below(version, info->architecture_since.at(a))) others.push_back(a);
+                }
+                std::string cure = "deploy to " + in_quotes(since->second) + " or later";
+                if (!others.empty()) {
+                    std::string list;
+                    for (std::string const& a : others) list += (list.empty() ? "\"" : ", \"") + a + "\"";
+                    cure = "keep the platform to the others (architectures = { " + platform + " = [" + list + "] }) or " + cure;
+                }
+                diags_.error(p ? p->where : settings.where, "platform " + in_quotes(platform) + " has the architecture " + in_quotes(arch)
+                    + " only from deployment version " + in_quotes(since->second) + ", and " + in_quotes(key) + " in [" + settings.target
+                    + "] deployment is " + in_quotes(version) + context + ": " + cure);
             }
         }
     }

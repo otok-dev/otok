@@ -362,7 +362,8 @@ TEST(apple_target, writes_the_cmake_config)
         "# the data files of the libraries (build-lua-api.md 8), and the notices of their licenses (otok-toml.md 4.2)\n"
         "set(Otok_icu4c_DATA_DIR \"${_otok_dir}/Packages/icu4c/data\")\n"
         "set(Otok_ACKNOWLEDGEMENTS \"${_otok_dir}/Acknowledgements.md\")\n\n"
-        "# the frameworks of the dynamic libraries in the bundle of a target of the Xcode generator, or on the run path of its build\n"
+        "# the frameworks of the dynamic libraries in the bundle of a target (Xcode embeds them; with the other generators they are\n"
+        "# copied into the bundle a target is), or on the run path of its build when it is no bundle\n"
         "function(otok_embed_frameworks target)\nendfunction()\n\n"
         "# the DLLs a target loads on Windows (otok-toml.md 4.11): nothing on Apple's platforms, so that a project of several targets calls it alike\n"
         "function(otok_copy_runtime_dlls target)\nendfunction()\n\n"
@@ -462,14 +463,26 @@ TEST(apple_target, declares_frameworks_and_their_headers)
     EXPECT_NE(cmake.find("set_property(TARGET otok::D PROPERTY INTERFACE_LINK_LIBRARIES \"otok::d_core\" \"otok::d_core_headers\" \"otok::a_util\")\n"),
         std::string::npos) << cmake;
     EXPECT_NE(cmake.find("set(Otok_PRIVACY_MANIFESTS)\n"), std::string::npos) << cmake;
+    // the frameworks of the platform built for, which the other generators copy into a bundle (docs/PLAN.md decision 133)
+    EXPECT_NE(cmake.find("# the frameworks of the platform built for\n"
+                         "if(_otok_slice STREQUAL \"ios\")\n"
+                         "  set_property(GLOBAL PROPERTY _otok_frameworks \"${_otok_dir}/Packages/d/d_core.xcframework/ios-arm64/d_core.framework\")\n"
+                         "endif()\n"
+                         "if(_otok_slice STREQUAL \"macos\")\n"
+                         "  set_property(GLOBAL PROPERTY _otok_frameworks \"${_otok_dir}/Packages/d/d_core.xcframework/macos-arm64_x86_64/d_core.framework\")\n"
+                         "endif()\n"),
+        std::string::npos) << cmake;
     EXPECT_NE(cmake.find("function(otok_embed_frameworks target)\n"
                          "  if(CMAKE_GENERATOR STREQUAL \"Xcode\")\n"
                          "    set_property(TARGET ${target} APPEND PROPERTY XCODE_EMBED_FRAMEWORKS \"${CMAKE_CURRENT_FUNCTION_LIST_DIR}/Packages/d/d_core.xcframework\")\n"
                          "    set_property(TARGET ${target} PROPERTY XCODE_EMBED_FRAMEWORKS_CODE_SIGN_ON_COPY ON)\n"
                          "    set_property(TARGET ${target} PROPERTY XCODE_ATTRIBUTE_LD_RUNPATH_SEARCH_PATHS \"$(inherited) @executable_path/Frameworks @executable_path/../Frameworks\")\n"
-                         "  elseif(CMAKE_SYSTEM_NAME STREQUAL \"Darwin\")\n"
-                         "    set_property(TARGET ${target} APPEND PROPERTY BUILD_RPATH \"${CMAKE_CURRENT_FUNCTION_LIST_DIR}/Packages/d/d_core.xcframework/macos-arm64_x86_64\")\n"
-                         "  endif()\nendfunction()\n"),
+                         "    return()\n"
+                         "  endif()\n"
+                         "  get_property(_otok_frameworks GLOBAL PROPERTY _otok_frameworks)\n"),
+        std::string::npos) << cmake;
+    EXPECT_NE(cmake.find("    set(_otok_into \"$<TARGET_BUNDLE_DIR:${target}>/Frameworks\")\n"
+                         "    set_property(TARGET ${target} APPEND PROPERTY BUILD_RPATH \"@executable_path/Frameworks\")\n"),
         std::string::npos) << cmake;
 
     // both static: the overlap is refused
@@ -1393,7 +1406,9 @@ TEST(apple_target, installs_dynamic_frameworks)
     dir.write("cmake-consumer/CMakeLists.txt",
         "cmake_minimum_required(VERSION 3.28)\nproject(consumer C)\n"
         "find_package(Otok CONFIG REQUIRED PATHS \"${CMAKE_CURRENT_SOURCE_DIR}/../project/Otok\" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)\n"
-        "add_executable(consumer main.c)\ntarget_link_libraries(consumer PRIVATE otok::TinyC)\notok_embed_frameworks(consumer)\n");
+        "add_executable(consumer main.c)\ntarget_link_libraries(consumer PRIVATE otok::TinyC)\notok_embed_frameworks(consumer)\n"
+        // a bundle gets the frameworks in Contents/Frameworks (docs/PLAN.md decision 133)
+        "add_executable(bundled MACOSX_BUNDLE main.c)\ntarget_link_libraries(bundled PRIVATE otok::TinyC)\notok_embed_frameworks(bundled)\n");
     dir.write("cmake-consumer/main.c", "#include <stdio.h>\n#include <tiny_c.h>\n\nint main(void)\n{\n    printf(\"%d\\n\", tiny_c());\n    return 0;\n}\n");
     for (std::vector<std::string> const& args : {std::vector<std::string>{"cmake", "-S", path_to_utf8(base / "cmake-consumer"), "-B", path_to_utf8(base / "cmake-build"), "-G", "Ninja"},
              std::vector<std::string>{"cmake", "--build", path_to_utf8(base / "cmake-build")}}) {
@@ -1403,6 +1418,11 @@ TEST(apple_target, installs_dynamic_frameworks)
     auto consumed = run_process({{path_to_utf8(base / "cmake-build" / "consumer")}, env, base, {}, true});
     ASSERT_TRUE(consumed) << consumed.error().message;
     EXPECT_EQ(consumed->output, "11\n");
+    std::filesystem::path const contents = base / "cmake-build" / "bundled.app" / "Contents";
+    EXPECT_TRUE(std::filesystem::is_symlink(contents / "Frameworks" / "tiny-c_tiny_c.framework" / "Versions" / "Current"));
+    auto bundled = run_process({{path_to_utf8(contents / "MacOS" / "bundled")}, env, base, {}, true});
+    ASSERT_TRUE(bundled) << bundled.error().message;
+    EXPECT_EQ(bundled->output, "11\n");
 }
 
 // A SwiftPM package delivered patched by its recipe (recipe-toml.md 12.1, otok-toml.md 4.6), which a

@@ -147,7 +147,7 @@ struct cmake_package
     std::vector<std::pair<std::string, std::string>> libraries;        // target name, the XCFramework relative to the output
     std::set<std::string> shared;                                      // the targets of dynamic libraries (otok-toml.md 4.10)
     std::vector<std::string> frameworks;                               // their XCFrameworks, relative to the output
-    std::vector<std::string> macos_frameworks;                         // the directories of their macOS frameworks
+    std::vector<std::pair<std::string, std::string>> slice_frameworks; // slice ("ios-simulator") → a framework of it, relative to the output
     std::vector<cmake_product> products;
     std::vector<std::string> privacy_manifests;                        // relative to the output
     std::vector<std::pair<std::string, std::string>> data_dirs;        // library → its data/, relative to the output

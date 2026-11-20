@@ -215,6 +215,27 @@ TEST(manifest, requires_a_deployment_version_for_every_platform)
     EXPECT_TRUE(parse_with_header("[profile.mac]\napple = { platforms = [\"macosx\"], deployment = { macos = \"12.0\" } }\n").m.has_value());
 }
 
+// Apple Watch's arm64 exists only from watchOS 26 (docs/PLAN.md decision 134): refused when otok.toml is read, not after a build
+TEST(manifest, refuses_an_architecture_older_than_its_platform_allows)
+{
+    auto p = parse("[otok]\nformat = 1\n[apple]\nplatforms = [\"watchos\"]\ndeployment = { watchos = \"8.0\" }\n");
+    EXPECT_TRUE(p.reports("platform 'watchos' has the architecture 'arm64' only from deployment version '26.0', and 'watchos' in [apple] "
+                          "deployment is '8.0': keep the platform to the others (architectures = { watchos = [\"arm64_32\"] }) or deploy to "
+                          "'26.0' or later")) << messages(p.diags);
+    auto only = parse("[otok]\nformat = 1\n[apple]\nplatforms = [\"watchos\"]\narchitectures = { watchos = [\"arm64\"] }\ndeployment = { watchos = \"9.4\" }\n");
+    EXPECT_TRUE(only.reports("is '9.4': deploy to '26.0' or later")) << messages(only.diags);
+
+    // narrowed, or deployed to 26 (written either way), or on the simulator, it is accepted
+    EXPECT_TRUE(parse("[otok]\nformat = 1\n[apple]\nplatforms = [\"watchos\"]\narchitectures = { watchos = [\"arm64_32\"] }\ndeployment = { watchos = \"8.0\" }\n").m.has_value());
+    EXPECT_TRUE(parse("[otok]\nformat = 1\n[apple]\nplatforms = [\"watchos\"]\ndeployment = { watchos = \"26\" }\n").m.has_value());
+    EXPECT_TRUE(parse("[otok]\nformat = 1\n[apple]\nplatforms = [\"watchossim\"]\ndeployment = { watchos = \"8.0\" }\n").m.has_value());
+
+    // a profile's deployment and architectures count
+    auto q = parse("[otok]\nformat = 1\n[apple]\nplatforms = [\"watchos\"]\narchitectures = { watchos = [\"arm64_32\"] }\ndeployment = { watchos = \"8.0\" }\n"
+                   "[profile.new]\napple = { architectures = { watchos = [\"arm64\"] } }\n");
+    EXPECT_TRUE(q.reports("is '8.0' in profile 'new': deploy to '26.0' or later")) << messages(q.diags);
+}
+
 TEST(manifest, checks_deployment_values)
 {
     auto p = parse("[otok]\nformat = 1\n[apple]\nplatforms = [\"ios\"]\ndeployment = { ios = 15, tvos = \"17\", vision = \"1.0\" }\n");
