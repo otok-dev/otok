@@ -154,7 +154,7 @@ TEST(catalog, generates_the_site_of_a_checkout)
 
     std::string const front = read_file(out / "index.html").value_or("");
     EXPECT_TRUE(has(front, "<title>Test index · Test index</title>")) << front;
-    EXPECT_TRUE(has(front, "3 libraries, 2 recipes. Each recipe builds a library from source on your machine, or delivers its Swift package.")) << front;
+    EXPECT_TRUE(has(front, "3 libraries, 2 recipe variants. Each recipe builds a library from source on your machine, or delivers its Swift package.")) << front;
     // the versions published last: at one time here, so by id and version
     // with their targets, for the filter by target
     EXPECT_TRUE(has(front, "<tbody id=\"recent\">\n<tr data-target=\"apple\">\n<td><a href=\"libraries/a/\">a</a></td>\n"
@@ -170,8 +170,8 @@ TEST(catalog, generates_the_site_of_a_checkout)
     EXPECT_TRUE(has(front, "<script src=\"" + versioned("minisearch.js") + "\"></script>")) << front;
     std::string const all = read_file(out / "libraries" / "index.html").value_or("");
     EXPECT_TRUE(has(all, "<p class=\"letters\"><a href=\"#A\">A</a><a href=\"#B\">B</a><a href=\"#C\">C</a></p>")) << all;
-    EXPECT_TRUE(has(all, "<li><a href=\"a/\">a</a> <span class=\"meta\">1 recipe</span></li>")) << all;
-    EXPECT_TRUE(has(all, "<li><a href=\"c/\">c</a> <span class=\"meta\">0 recipes</span></li>")) << all;
+    EXPECT_TRUE(has(all, "<li><a href=\"a/\">a</a> <span class=\"meta\">apple</span></li>")) << all;
+    EXPECT_TRUE(has(all, "<li><a href=\"c/\">c</a> <span class=\"meta\">no recipe yet</span></li>")) << all;
     // what the browser compares versions with
     std::string const entries = read_file(out / "recipes" / "p" / "a-recipe" / "entries.json").value_or("");
     EXPECT_TRUE(entries.starts_with("{\"entries\":[{\"dir\":\"apple/1.1-r1\",\"label\":\"1.1 (r1, apple)\",\"files\":{\"PrivacyInfo.xcprivacy\":\"")) << entries;

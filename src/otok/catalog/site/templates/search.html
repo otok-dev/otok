@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>{{ site.name }}</h1>
-<p class="lead">{% if libraries == 1 %}1 library{% else %}{{ libraries }} libraries{% endif %}, {% if recipes == 1 %}1 recipe{% else %}{{ recipes }} recipes{% endif %}. Each recipe builds a library from source on your machine, or delivers its Swift package.</p>
+<p class="lead">{% if libraries == 1 %}1 library{% else %}{{ libraries }} libraries{% endif %}, {% if variants == 1 %}1 recipe variant{% else %}{{ variants }} recipe variants{% endif %}. Each recipe builds a library from source on your machine, or delivers its Swift package.</p>
 <input type="search" id="search" class="search" data-root="{{ root }}" placeholder="Search by library, recipe, description or keyword" aria-label="Search" autofocus hidden>
 {% if length(targets) > 1 %}
 <select id="target" class="target" aria-label="Target" hidden>

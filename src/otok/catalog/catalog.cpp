@@ -290,7 +290,6 @@ public:
         for (recipe_id const& id : *ids) {
             if (auto ok = recipe_pages(id, search); !ok) return std::unexpected{ok.error()};
         }
-        recipes_ = ids->size();
         files_["search.json"] = search.dump() + "\n";
 
         std::error_code ec;
@@ -642,7 +641,10 @@ private:
         library_row["options"] = std::move(options);
         library_row["advisories"] = newest_advisories;
         library_row["deprecated"] = text_or_null(deprecation);
-        libraries_[newest.projection.library].push_back(std::move(library_row));
+
+        std::set<std::string> variant_dirs;
+        for (index_entry const* e : *sorted) variant_dirs.insert(e->projection.variant);
+        variants_ += variant_dirs.size();
 
         nlohmann::ordered_json item = nlohmann::ordered_json::object();
         item["id"] = id.str();
@@ -669,6 +671,8 @@ private:
             targets_seen_.insert(t->name);
         }
         item["targets"] = item_targets;
+        library_row["built_for"] = item_targets;  // every target of any version, for /libraries/
+        libraries_[newest.projection.library].push_back(std::move(library_row));
         item["license"] = newest.projection.license_text;
         item["variants"] = std::move(variants);
         search.push_back(std::move(item));
@@ -768,7 +772,7 @@ private:
         json front = page_of(0, site_["name"].get<std::string>());
         front["recent"] = std::move(recent);
         front["libraries"] = libraries_.size();
-        front["recipes"] = recipes_;
+        front["variants"] = variants_;
         front["targets"] = targets_seen_;
         front["commit"] = s_.commit;
         if (auto ok = render("search.html", "index.html", front); !ok) return ok;
@@ -786,9 +790,20 @@ private:
                 g["libraries"] = json::array();
                 groups.push_back(std::move(g));
             }
+            // the targets any recipe of the library builds for, in the order of the targets
+            std::set<std::string> of_library;
+            if (rows.is_array()) {
+                for (json const& r : rows) {
+                    for (json const& t : r["built_for"]) of_library.insert(t.get<std::string>());
+                }
+            }
+            json built_for = json::array();
+            for (target_info const* t : s_.targets) {
+                if (of_library.contains(t->name)) built_for.push_back(t->name);
+            }
             json l = json::object();
             l["name"] = library;
-            l["recipes"] = rows.is_array() ? rows.size() : 0;
+            l["targets"] = std::move(built_for);
             groups.back()["libraries"].push_back(std::move(l));
         }
         json page = page_of(1, "Libraries");
@@ -862,7 +877,7 @@ private:
     catalog_written done_;
     std::string catalog_;                       // index.toml: the catalog's URL, the repository's
     std::string repository_;
-    std::size_t recipes_ = 0;
+    std::size_t variants_ = 0;  // the directories of variants of all recipes (index.md 3)
 
     struct recent_version
     {

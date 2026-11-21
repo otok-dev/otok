@@ -8,7 +8,7 @@
 <h2>{{ g.letter }}</h2>
 <ul class="columns">
 {% for l in g.libraries %}
-<li><a href="{{ l.name }}/">{{ l.name }}</a> <span class="meta">{% if l.recipes == 1 %}1 recipe{% else %}{{ l.recipes }} recipes{% endif %}</span></li>
+<li><a href="{{ l.name }}/">{{ l.name }}</a> <span class="meta">{% if length(l.targets) == 0 %}no recipe yet{% else %}{% for t in l.targets %}{{ t }}{% if not loop.is_last %}{{ " · " }}{% endif %}{% endfor %}{% endif %}</span></li>
 {% endfor %}
 </ul>
 </section>
