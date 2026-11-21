@@ -127,6 +127,9 @@ struct recipe_dependency
     bool prerelease = false;
     option_values requires_options;
     std::optional<std::string> linkage;  // "static" or "dynamic": the dependency's when the project chooses none
+    // `export`: a static dependency's symbols stay exported from this recipe's dynamic library, neither hidden nor checked
+    // (otok-toml.md 5.2, docs/PLAN.md decision 136)
+    bool export_symbols = false;
     std::optional<condition> when;
     // A tool dependency giving programs to build.lua as toolchains, not in deps.tools: those with `default-recipe`
     // (recipe-toml.md 13.1; `library` empty, learned from that recipe by the resolver), or of a dependency

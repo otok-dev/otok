@@ -80,6 +80,7 @@ The project of `tests/data/projects/tiny` with an Apple target and a profile, be
           "target": "apple",
           "dir": "/work/app/Otok/Packages/tiny-a",
           "linkage": "static",
+          "linkage-fallback": null,
           "package-key": null,
           "products": [{ "name": "TinyA", "libraries": ["tiny_a"], "depends": [], "link": ["z"], "runtime": "c++" }]
         }
@@ -112,6 +113,7 @@ The project of `tests/data/projects/tiny` with an Apple target and a profile, be
           "target": "apple",
           "dir": "/work/app/Otok/Packages/tiny-b",
           "linkage": "static",
+          "linkage-fallback": null,
           "package-key": null,
           "products": [{ "name": "TinyB", "libraries": ["tiny_b"], "depends": [], "link": [], "runtime": null }]
         }
@@ -188,5 +190,6 @@ and what the resolution adds:
 | `target` | string | The target. |
 | `dir` | path | Where the target puts the library in its output: `<output>/<library>` for `android`, `windows` and `linux`, `<output>/Packages/<library>` for Apple (`otok-toml.md` 4, 4.1). |
 | `linkage` | string | How the library is built there (`otok-toml.md` 5). |
+| `linkage-fallback` | string or null | Why `linkage` is not the one the target table prefers (`otok-toml.md` 5), as `otok install` notes it (`"its recipe builds no dynamic library for 'apple'"`); `null` when it is that one or chosen for the library. |
 | `package-key` | string or null | The package key the output's state file records for it (`otok-toml.md` 4.2, `cache-key.md` 4): what `otok install` put there last; `null` when it is not there. Whether it is up to date needs the toolchain, so `otok metadata` does not say. |
 | `products` | array of `{ name, libraries, depends, link, runtime }` | The recipe's products whose `when` holds on the target (`recipe-toml.md` 11): their library output names, the products they depend on, the system libraries of their `link` whose `when` holds there, and their `link.runtime` (`"c++"`: the C++ standard library, which the consumer's toolchain names) or null. |

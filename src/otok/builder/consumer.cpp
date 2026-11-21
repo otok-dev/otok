@@ -272,6 +272,11 @@ result<consumer_package> consumer_package_of(fs::path const& dir, std::span<outp
                 add_unique(cp.libraries, c.libraries[at->second].name);
                 if (auto it = defines_of.find(l); it != defines_of.end()) add_unique(cp.defines, it->second);
             }
+            // inside a dynamic library: the headers without the code (otok-toml.md 4.11, 5)
+            for (library_ref const& l : o.hidden_libraries) {
+                if (auto it = include_of.find(l.package); it != include_of.end()) add_unique(cp.include_dirs, it->second);
+                if (auto it = defines_of.find(l); it != defines_of.end()) add_unique(cp.defines, it->second);
+            }
             for (library_ref const& h : o.header_products) {
                 if (auto it = include_of.find(h.package); it != include_of.end()) add_unique(cp.include_dirs, it->second);
                 if (auto it = header_link.find(h); it != header_link.end()) add_unique(cp.link, it->second);

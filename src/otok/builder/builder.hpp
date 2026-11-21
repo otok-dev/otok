@@ -130,6 +130,11 @@ std::vector<kept_log> find_build_logs(cache_store const& cache, std::string cons
 // Package keys: "<library>" for target packages, "tool:<library>" for tool packages.
 std::string package_key(std::string const& library, bool tool);
 
+// The dynamic libraries of the built slices that export symbols of the static libraries inside them, which their links
+// should have hidden (otok-toml.md 5.2, docs/PLAN.md decision 136): a message for each. A warning of `otok install`, an
+// error of `otok publish`.
+std::vector<std::string> hidden_export_problems(resolution const& r, std::size_t configuration, std::span<built_package const> built);
+
 // The canonical description of a key (cache-key.md 3) and its SHA-256.
 std::string key_text(std::map<std::string, std::string> const& inputs);
 

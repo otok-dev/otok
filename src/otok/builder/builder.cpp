@@ -43,10 +43,36 @@ namespace {
 
 // Bumped when the meaning of a key changes, or when otok changes what it gives builds (cache-key.md 2).
 constexpr char const* key_format = "1";
-constexpr char const* toolchain_profile_version = "10";  // 2: -DNDEBUG, /MD, -ffile-prefix-map; 3: /Z7, @rpath install names; 4: CMake MSVC settings; 5: $ORIGIN in RUNPATH; 6: --build of configure; 7: relocated .pc files; 8: the windows target's -fuse-ld, -Wno-register; 9: the native target's clean environment and CMake searches; 10: CMake's OBJC, OBJCXX and ASM flags
+constexpr char const* toolchain_profile_version = "11";  // 2: -DNDEBUG, /MD, -ffile-prefix-map; 3: /Z7, @rpath install names; 4: CMake MSVC settings; 5: $ORIGIN in RUNPATH; 6: --build of configure; 7: relocated .pc files; 8: the windows target's -fuse-ld, -Wno-register; 9: the native target's clean environment and CMake searches; 10: CMake's OBJC, OBJCXX and ASM flags; 11: the static archives inside dynamic slices hidden, -fPIC on Linux
 
 // 1980-01-01, the earliest time zip archives can store (build-lua-api.md 5).
 constexpr char const* source_date_epoch = "315532800";
+
+// The static archives inside a dynamic slice of `p` (otok-toml.md 5.2): of its static dependencies, and of theirs through
+// static ones, but those a recipe exports (`[deps.<library>] export`). `dep_slice` finds a dependency's slice of the same
+// platform, architecture and configuration.
+std::vector<fs::path> hidden_archives(resolution const& r, resolved_package const& p, std::size_t c, std::string const& os, std::string const& platform,
+    std::function<built_slice const*(resolved_package const&)> const& dep_slice)
+{
+    std::vector<fs::path> out;
+    std::set<std::string> seen;
+    auto const visit = [&](auto& self, resolved_package const& of) -> void {
+        merged_options const& options = of.configurations[c].options;
+        for (recipe_dependency const& d : of.chosen.recipe->dependencies) {
+            if (d.export_symbols || (d.when && !condition_holds(*d.when, options, os, platform))) continue;
+            resolved_package const* dp = r.find(d.library, p.target);
+            if (!dp || !seen.insert(d.library).second) continue;
+            built_slice const* s = dep_slice(*dp);
+            if (!s || s->spec.linkage != "static") continue;
+            for (auto const& [name, lib] : s->output.libraries) {
+                if (binary_kind_of(lib) == binary_kind::archive) out.push_back(lib);
+            }
+            self(self, *dp);
+        }
+    };
+    visit(visit, p);
+    return out;
+}
 
 std::string slashed(fs::path const& p)
 {
@@ -528,6 +554,53 @@ std::string source_pin(locked_location const& l)
 std::string package_key(std::string const& library, bool tool)
 {
     return (tool ? "tool:" : "") + library;
+}
+
+std::vector<std::string> hidden_export_problems(resolution const& r, std::size_t configuration, std::span<built_package const> built)
+{
+    std::vector<std::string> problems;
+    for (built_package const& bp : built) {
+        if (bp.tool) continue;
+        resolved_package const* p = r.find(bp.library, bp.target);
+        if (!p) continue;
+        for (built_slice const& s : bp.slices) {
+            if (s.spec.linkage != "dynamic" || s.spec.headers) continue;
+            auto const dep_slice = [&](resolved_package const& dp) -> built_slice const* {
+                for (built_package const& other : built) {
+                    if (other.tool || other.library != dp.library || other.target != bp.target) continue;
+                    for (built_slice const& d : other.slices) {
+                        if (d.spec.platform == s.spec.platform && d.spec.arch == s.spec.arch && d.spec.configuration == s.spec.configuration) return &d;
+                    }
+                }
+                return nullptr;
+            };
+            if (configuration >= p->configurations.size()) continue;
+            auto const archives = hidden_archives(r, *p, configuration, bp.target, s.spec.platform, dep_slice);
+            if (archives.empty()) continue;
+            std::set<std::string> hidden;
+            for (fs::path const& a : archives) {
+                for (std::string& symbol : archive_symbols_of(a)) hidden.insert(std::move(symbol));
+            }
+            for (auto const& [name, lib] : s.output.libraries) {
+                auto const runtime = s.output.runtimes.find(name);
+                fs::path const file = runtime != s.output.runtimes.end() ? runtime->second : lib;
+                binary_kind const kind = binary_kind_of(file);
+                if (kind != binary_kind::elf_shared && kind != binary_kind::macho_dylib && kind != binary_kind::pe_dll) continue;
+                std::vector<std::string> found;
+                for (std::string const& symbol : exported_symbols_of(file)) {
+                    if (hidden.contains(symbol)) found.push_back(symbol);
+                }
+                if (found.empty()) continue;
+                std::string some;
+                for (std::size_t i = 0; i < found.size() && i < 5; ++i) some += (i == 0 ? "" : ", ") + found[i];
+                if (found.size() > 5) some += ", … (" + std::to_string(found.size()) + " in all)";
+                problems.push_back("the dynamic library '" + name + "' of " + bp.library + " for " + slice_label(s.spec)
+                    + " exports symbols of the static libraries inside it: " + some + "; its link did not get slice.toolchain.ldflags, which hide "
+                    + "them, or its recipe exports them on purpose and says so with 'export = true' in [deps.<library>] (otok-toml.md 5.2)");
+            }
+        }
+    }
+    return problems;
 }
 
 std::string key_text(std::map<std::string, std::string> const& inputs)
@@ -1870,6 +1943,11 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         // the headers slice: the environment of processes only, without the compilers (build-lua-api.md 3.5)
         if (headers) slice.toolchain.env = headers_slice_env(profile->toolchain.env);
         else slice.toolchain = profile->toolchain;
+        // the static archives inside a dynamic library, hidden in it (otok-toml.md 5.2)
+        if (!tool && !headers && !building_tools && spec.linkage == "dynamic") {
+            auto const archives = hidden_archives(r_, p, c, os, platform, [&](resolved_package const& dp) { return find_built(&dp, false); });
+            for (std::string& flag : target->hidden_archive_flags(archives, spec)) slice.toolchain.ldflags.push_back(std::move(flag));
+        }
         if (!profile->prefix_map_flag.empty() && !headers) {
             std::string const map = profile->prefix_map_flag + path_to_utf8(base) + "=/otok";
             slice.toolchain.cflags.push_back(map);

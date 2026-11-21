@@ -595,26 +595,55 @@ TEST(resolver, platforms)
     EXPECT_NE(o.text().find("p/c 1.0 does not support platform 'iossim' (it supports 'ios')"), std::string::npos) << o.text();
 }
 
+// The linkage chosen for a library needs its recipe; the target table's is a preference (docs/PLAN.md decision 136)
 TEST(resolver, linkage_needs_the_recipe)
 {
     target_info const* const native[] = {&test::native_info()};
     memory_provider p;
-    p.add({.library = "a", .version = "1.0", .platforms = "\"native\"", .recipe_keys = "linkage = [\"static\", \"dynamic\"]\n"});
+    std::string const both = "linkage = [\"static\", \"dynamic\"]\n";
+    p.add({.library = "a", .version = "1.0", .platforms = "\"native\"", .recipe_keys = both});
     p.add({.library = "b", .version = "1.0", .platforms = "\"native\""});
+    p.add({.library = "b", .version = "0.9", .platforms = "\"native\"", .recipe_keys = both});
+    p.add({.library = "c", .version = "1.0", .extra = recipe_dep("b", ">= 0.9"), .platforms = "\"native\"", .recipe_keys = both});
+    struct result
+    {
+        std::optional<resolution> r;
+        std::string text;
+        package_configuration const& of(std::string_view library) const { return first(*r, library)->configurations[0]; }
+    };
     auto const resolve_with = [&](std::string const& body) {
         diagnostics d;
         auto m = parse_manifest("[otok]\nformat = 1\n[native]\nplatforms = [\"native\"]\nlinkage = \"dynamic\"\n" + body, "otok.toml", native, {}, d);
         EXPECT_TRUE(m) << messages(d);
         auto r = resolve(*m, native, p, {}, d);
-        return std::pair{r.has_value(), messages(d)};
+        return result{std::move(r), messages(d)};
     };
-    EXPECT_TRUE(resolve_with("[deps.a]\nrecipe = \"p/a\"\nversion = \"1.0\"\n").first);
-    // static only: the target table's dynamic is refused, the dependency's static is fine
-    auto const [ok, text] = resolve_with("[deps.b]\nrecipe = \"p/b\"\nversion = \"1.0\"\n");
-    EXPECT_FALSE(ok);
-    EXPECT_NE(text.find("p/b 1.0 cannot be built as dynamic libraries for 'native' (its recipe builds 'static'); set 'linkage' in [deps.b]"),
-        std::string::npos) << text;
-    EXPECT_TRUE(resolve_with("[deps.b]\nrecipe = \"p/b\"\nversion = \"1.0\"\nlinkage = \"static\"\n").first);
+    auto o = resolve_with("[deps.a]\nrecipe = \"p/a\"\nversion = \"1.0\"\n");
+    ASSERT_TRUE(o.r) << o.text;
+    EXPECT_EQ(o.of("a").linkage.at("native"), "dynamic");
+    EXPECT_TRUE(o.of("a").linkage_fallback.empty());
+
+    // static only: the target table's dynamic falls back to static, with the reason, for a library of [deps] too
+    o = resolve_with("[deps.b]\nrecipe = \"p/b\"\nversion = \"1.0\"\n");
+    ASSERT_TRUE(o.r) << o.text;
+    EXPECT_EQ(o.of("b").linkage.at("native"), "static");
+    EXPECT_EQ(o.of("b").linkage_fallback.at("native"), "its recipe builds no dynamic library for 'native'");
+
+    // and for a dependency of a dependency; the preference never chooses a version (b 0.9 could build dynamic)
+    o = resolve_with("[deps.c]\nrecipe = \"p/c\"\nversion = \"1.0\"\n[deps.b]\nrecipe = \"p/b\"\nversion = \">= 0.9\"\n");
+    ASSERT_TRUE(o.r) << o.text;
+    EXPECT_EQ(first(*o.r, "b")->chosen.recipe->version->str(), "1.0");
+    EXPECT_EQ(o.of("b").linkage.at("native"), "static");
+    EXPECT_EQ(o.of("c").linkage.at("native"), "dynamic");
+
+    // a choice for the library is strict
+    o = resolve_with("[deps.b]\nrecipe = \"p/b\"\nversion = \"1.0\"\nlinkage = \"dynamic\"\n");
+    EXPECT_FALSE(o.r);
+    EXPECT_NE(o.text.find("p/b 1.0 cannot be built as dynamic libraries for 'native' (its recipe builds 'static'); set 'linkage' in [deps.b]"),
+        std::string::npos) << o.text;
+    o = resolve_with("[deps.b]\nrecipe = \"p/b\"\nversion = \"1.0\"\nlinkage = \"static\"\n");
+    ASSERT_TRUE(o.r) << o.text;
+    EXPECT_TRUE(o.of("b").linkage_fallback.empty());
 }
 
 // [deps.<library>] linkage: the dependency's when the project chooses none (docs/PLAN.md decision 68)

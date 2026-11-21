@@ -29,7 +29,12 @@ namespace {
 // Bumped when the meaning of a package key changes (cache-key.md 4), and the packager version, bumped
 // when otok changes how it packages.
 constexpr char const* key_format = "1";
-constexpr char const* packager_version = "11";
+constexpr char const* packager_version = "12";
+
+std::string in_quotes(std::string_view s)
+{
+    return "'" + std::string{s} + "'";
+}
 
 constexpr int output_state_format = 1;
 
@@ -95,6 +100,18 @@ void append_unique(std::vector<library_ref>& to, std::vector<library_ref> const&
     }
 }
 
+// The linkage a package was built with for `target` (otok-toml.md 5); "" when it was not built for it.
+std::string linkage_on(std::string const& library, build_target const& target, std::span<built_package const> built)
+{
+    for (built_package const& bp : built) {
+        if (bp.tool || bp.library != library) continue;
+        for (built_slice const& s : bp.slices) {
+            if (target.info().find_platform(s.spec.platform)) return s.spec.linkage;
+        }
+    }
+    return {};
+}
+
 // Whether a package was built for `target`.
 bool built_on(std::string const& library, build_target const& target, std::span<built_package const> built)
 {
@@ -127,30 +144,36 @@ bool dependency_holds(recipe_dependency const& d, resolved_package const& of, st
 // The products of a package whose `when` holds, each with the libraries it holds (otok-toml.md 4): its
 // own, those of the products it depends on, and every library of the recipe's dependencies built for
 // the target whose `when` holds, transitively; and so the products of headers only among them
-// (recipe-toml.md 11.1).
+// (recipe-toml.md 11.1). A static library reached only through a dynamic one (the package itself among them) is
+// inside that dynamic library: the products hold its headers, not its code (otok-toml.md 5, docs/PLAN.md decision 136).
 result<std::vector<output_product>> products_on(resolved_package const& p, std::size_t configuration, build_target const& target,
     resolution const& r, std::span<built_package const> built)
 {
     recipe const& rec = *p.chosen.recipe;
     merged_options const& options = p.configurations[configuration].options;
 
-    std::vector<library_ref> dependencies, dependency_headers;
-    std::set<std::string> seen;
-    auto const visit = [&](auto& self, resolved_package const& of) -> void {
+    std::vector<library_ref> dependencies, dependency_headers, hidden;
+    // a library is visited once with its code and once without: a path of static libraries alone may reach it after
+    // a path through a dynamic one did
+    std::set<std::pair<std::string, bool>> seen;
+    auto const visit = [&](auto& self, resolved_package const& of, bool inside_dynamic) -> void {
         for (recipe_dependency const& d : of.chosen.recipe->dependencies) {
             resolved_package const* dp = r.find(d.library, p.target);
             if (!dp || !built_on(d.library, target, built) || !dependency_holds(d, of, configuration, target, built)) continue;
-            if (!seen.insert(d.library).second) continue;
-            append_unique(dependencies, libraries_on(d.library, target, built));
+            bool const dynamic = linkage_on(d.library, target, built) == "dynamic";
+            bool const code = dynamic || !inside_dynamic;
+            if (!seen.insert({d.library, code}).second) continue;
+            append_unique(code ? dependencies : hidden, libraries_on(d.library, target, built));
             for (product const& prod : dp->chosen.recipe->products) {
                 if (!prod.headers_only()) continue;
                 if (prod.when && !condition_holds(*prod.when, dp->configurations[configuration].options, target.info().name, "")) continue;
                 append_unique(dependency_headers, {{d.library, prod.name}});
             }
-            self(self, *dp);
+            self(self, *dp, inside_dynamic || dynamic);
         }
     };
-    visit(visit, p);
+    visit(visit, p, linkage_on(p.library, target, built) == "dynamic");
+    std::erase_if(hidden, [&](library_ref const& l) { return std::ranges::find(dependencies, l) != dependencies.end(); });
 
     std::vector<output_product> out;
     for (product const& prod : rec.products) {
@@ -170,6 +193,7 @@ result<std::vector<output_product>> products_on(resolved_package const& p, std::
         };
         if (auto ok = expand(expand, prod); !ok) return std::unexpected{ok.error()};
         append_unique(o.libraries, dependencies);
+        o.hidden_libraries = hidden;
         append_unique(o.header_products, dependency_headers);
         for (product_define const& d : prod.defines) {
             if (!d.when || condition_holds(*d.when, options, target.info().name, "")) o.defines.push_back(d.define);
@@ -178,6 +202,25 @@ result<std::vector<output_product>> products_on(resolved_package const& p, std::
         out.push_back(std::move(o));
     }
     return out;
+}
+
+// The static libraries inside a dynamic package (otok-toml.md 5): its static dependencies, and theirs through static
+// ones, up to a dynamic one.
+std::vector<std::string> static_inside(resolved_package const& p, std::size_t configuration, build_target const& target, resolution const& r,
+    std::span<built_package const> built)
+{
+    std::vector<std::string> inside;
+    auto const visit = [&](auto& self, resolved_package const& of) -> void {
+        for (recipe_dependency const& d : of.chosen.recipe->dependencies) {
+            resolved_package const* dp = r.find(d.library, p.target);
+            if (!dp || !built_on(d.library, target, built) || !dependency_holds(d, of, configuration, target, built)) continue;
+            if (linkage_on(d.library, target, built) == "dynamic" || std::ranges::find(inside, d.library) != inside.end()) continue;
+            inside.push_back(d.library);
+            self(self, *dp);
+        }
+    };
+    visit(visit, p);
+    return inside;
 }
 
 // The data files of the slices (build-lua-api.md 8) into `dir`: every slice returns the same names with the
@@ -287,6 +330,14 @@ result<std::vector<packaged>> package_all(resolution const& r, std::size_t confi
             pk.bundle_data = bp.bundle_data;
             pk.cmake = bp.cmake;
             if (!mine.slices.empty()) pk.linkage = mine.slices.front().spec.linkage;
+            pk.direct = std::ranges::any_of(p->required_by, [](package_requirement const& q) { return q.requester == "otok.toml"; });
+            for (auto const& [platform, why] : p->configurations[configuration].linkage_fallback) {
+                if (target->info().find_platform(platform)) {
+                    pk.linkage_fallback = why;
+                    break;
+                }
+            }
+            if (pk.linkage == "dynamic") pk.static_inside = static_inside(*p, configuration, *target, r, built);
 
             std::error_code ec;
             pk.cached = fs::exists(long_path(pk.entry), ec);
@@ -496,24 +547,79 @@ result<output_changes> write_tools_output(fs::path const& dir, std::span<deliver
     return changes;
 }
 
+static_copies check_static_copies(std::span<packaged const* const> packages)
+{
+    static_copies out;
+    for (packaged const* lib : packages) {
+        if (lib->linkage != "static" || lib->libraries.empty()) continue;
+        std::vector<std::string> inside;  // the dynamic libraries holding a copy
+        for (packaged const* p : packages) {
+            if (std::ranges::find(p->static_inside, lib->library) != p->static_inside.end()) inside.push_back(p->library);
+        }
+        if (inside.empty()) continue;
+        // the products of [deps] holding its code: the consumer links one copy through them however many they are
+        std::vector<std::string> direct;
+        for (packaged const* p : packages) {
+            if (!p->direct) continue;
+            bool const holds = std::ranges::any_of(p->products, [&](output_product const& o) {
+                return std::ranges::any_of(o.libraries, [&](library_ref const& l) { return l.package == lib->library; });
+            });
+            if (holds) direct.push_back(p->library);
+        }
+        if (inside.size() + (direct.empty() ? 0 : 1) < 2) continue;
+        std::string where;
+        for (std::string const& d : inside) where += (where.empty() ? "inside " : ", inside ") + in_quotes(d);
+        if (!direct.empty()) {
+            std::string names;
+            for (std::string const& d : direct) names += (names.empty() ? "" : ", ") + in_quotes(d);
+            where += ", and through the products of [deps] (" + names + ")";
+        }
+        std::string const copies = "the consumer gets the code of the static library " + in_quotes(lib->library) + " twice or more, each copy with its own "
+            "global state: " + where;
+        if (lib->linkage_fallback.empty()) {
+            out.warnings.push_back(copies);
+            continue;
+        }
+        std::string holders;
+        for (std::string const& d : inside) holders += (holders.empty() ? "" : ", ") + in_quotes(d);
+        std::string message = copies + "; " + in_quotes(lib->library) + " is static as the target table falls back (" + lib->linkage_fallback
+            + "), which nobody chose. Choose one: [deps." + lib->library + "] linkage = \"static\" takes the copies; linkage = \"static\" for "
+            + holders + " in [deps.<library>] or a profile's deps.<library> puts none inside them";
+        if (lib->direct) message += "; or leave " + in_quotes(lib->library) + " out of [deps] if it is there only for its version or flags";
+        out.errors.push_back(std::move(message));
+    }
+    return out;
+}
+
 result<output_changes> write_output(fs::path const& dir, build_target const& target, std::span<packaged const> packages,
     std::map<std::string, std::string> const& deployment)
 {
     std::string const name = slashed(dir);
     fs::path const state_file = dir / output_state_file;
     std::error_code ec;
-    auto opened = open_output(dir, "output");
-    if (!opened) return std::unexpected{opened.error()};
-    output_state state = std::move(*opened);
 
     std::map<std::string, packaged const*> current;
     for (packaged const& p : packages) {
         if (p.target == target.info().name) current.emplace(p.library, &p);
     }
+    // copies of static libraries the project did not choose: nothing is written (otok-toml.md 5)
+    std::vector<packaged const*> of_output;
+    for (auto const& [library, p] : current) of_output.push_back(p);
+    static_copies copies = check_static_copies(of_output);
+    if (!copies.errors.empty()) {
+        std::string message = "the output '" + name + "':";
+        for (std::string const& e : copies.errors) message += "\n  " + e;
+        return fail(message);
+    }
+
+    auto opened = open_output(dir, "output");
+    if (!opened) return std::unexpected{opened.error()};
+    output_state state = std::move(*opened);
 
     // The state is written after each step, so an interrupted run leaves no directory it does not list
     // with its key, and the next run copies again what it did not finish.
     output_changes changes;
+    changes.warnings = std::move(copies.warnings);
     auto const remove = [&](std::string const& library) -> result<void> {
         fs::path const out = dir / target.package_output(library);
         fs::remove_all(long_path(out), ec);

@@ -298,28 +298,6 @@ std::string framework_name(std::string const& package, std::string const& librar
     return package + "_" + library;
 }
 
-// Warnings about the products of a dynamic library holding a static library of another recipe, which the dynamic one
-// holds a copy of (otok-toml.md 5, 4.10).
-void mixed_linkage(std::span<output_package const> packages, std::vector<std::string>& warnings)
-{
-    std::map<std::string, std::string> linkage;
-    for (output_package const& p : packages) linkage[p.library] = p.linkage;
-    for (output_package const& p : packages) {
-        if (p.linkage != "dynamic") continue;
-        std::set<library_ref> seen;
-        for (output_product const& o : p.products) {
-            for (library_ref const& l : o.libraries) {
-                if (l.package == p.library || !seen.insert(l).second) continue;
-                auto const it = linkage.find(l.package);
-                if (it == linkage.end() || it->second == "dynamic") continue;
-                warnings.push_back("the dynamic library '" + p.library + "' holds a copy of the static library '" + framework_name(l.package, l.name) + "' of '"
-                    + l.package + "', which its products hold too: an app linking them has its code twice; 'linkage = \"dynamic\"' in [deps."
-                    + l.package + "] avoids it");
-            }
-        }
-    }
-}
-
 template <class T>
 void add_unique(std::vector<T>& to, std::vector<T> const& items)
 {
@@ -343,7 +321,7 @@ result<detail::cmake_package> cmake_package_of(fs::path const& dir, std::span<ou
     std::set<library_ref> header_cxx;                               // the products of headers only needing it
     std::map<std::string, fs::path> package_dirs;
     std::set<std::string> library_targets;
-    std::set<std::string> with_headers;            // the dynamic libraries with an XCFramework of their headers
+    std::set<std::string> with_headers;            // the libraries with an XCFramework of their headers
     std::optional<std::set<std::string>> slices;  // those every XCFramework has
     for (output_package const& p : packages) {
         if (swift_package_settings(*p.rec)) {
@@ -360,15 +338,16 @@ result<detail::cmake_package> cmake_package_of(fs::path const& dir, std::span<ou
             library_targets.insert(name);
             std::error_code ec;
             if (dynamic) {
-                // frameworks, and their headers in an XCFramework of their own (otok-toml.md 4.10)
+                // frameworks (otok-toml.md 4.10)
                 c.shared.insert(name);
                 c.frameworks.push_back(slashed(framework));
-                fs::path const headers = p.dir / (name + "_headers.xcframework");
-                if (fs::is_directory(dir / headers, ec)) {
-                    c.libraries.emplace_back(name + "_headers", slashed(headers));
-                    library_targets.insert(name + "_headers");
-                    with_headers.insert(name);
-                }
+            }
+            // the headers in an XCFramework of their own (otok-toml.md 4.10), which the library's target links
+            if (fs::path const headers = p.dir / (name + "_headers.xcframework"); fs::is_directory(dir / headers, ec)) {
+                c.libraries.emplace_back(name + "_headers", slashed(headers));
+                library_targets.insert(name + "_headers");
+                with_headers.insert(name);
+                c.headers_of.emplace_back(name, name + "_headers");
             }
             std::set<std::string> mine;
             for (auto it = fs::directory_iterator{dir / framework, ec}; !ec && it != fs::directory_iterator{}; it.increment(ec)) {
@@ -432,6 +411,12 @@ result<detail::cmake_package> cmake_package_of(fs::path const& dir, std::span<ou
             detail::cmake_product cp;
             cp.name = prod.name;
             add_unique(cp.defines, o.defines);
+            // inside a dynamic library: its headers only (otok-toml.md 4.10, 5)
+            for (library_ref const& l : o.hidden_libraries) {
+                std::string const name = framework_name(l.package, l.name);
+                if (with_headers.contains(name) && std::ranges::find(cp.libraries, name + "_headers") == cp.libraries.end()) cp.libraries.push_back(name + "_headers");
+                if (auto it = defines_of.find(l); it != defines_of.end()) add_unique(cp.defines, it->second);
+            }
             for (library_ref const& l : o.libraries) {
                 std::string const name = framework_name(l.package, l.name);
                 cp.libraries.push_back(name);
@@ -789,6 +774,17 @@ public:
         return detail::check_build_versions(detail::parse_build_versions(*load_commands), slice);
     }
 
+    // ld64 loads an archive named by -load_hidden first with its symbols hidden, also when the build names the same file
+    // afterwards in another spelling (otok-toml.md 5.2; -unexported_symbols_list cannot stand beside a build's
+    // -exported_symbols_list)
+    std::vector<std::string> hidden_archive_flags(std::vector<fs::path> const& archives, slice_spec const& slice) const override
+    {
+        (void)slice;
+        std::vector<std::string> flags;
+        for (fs::path const& a : archives) flags.push_back("-Wl,-load_hidden," + path_to_utf8(a));
+        return flags;
+    }
+
     // One XCFramework per library output name (otok-toml.md 4)
     result<void> make_package(built_package const& package, recipe const& rec, std::span<output_product const> products,
         fs::path const& staging) override
@@ -843,7 +839,7 @@ public:
         for (auto const& [library, unused] : package.slices.front().output.libraries) {
             std::string const name = framework_name(package.library, library);
             std::vector<std::string> argv{"/usr/bin/xcrun", "xcodebuild", "-create-xcframework"};
-            std::vector<std::string> headers_argv = argv;  // of a dynamic library (otok-toml.md 4.10)
+            std::vector<std::string> headers_argv = argv;  // the headers apart (otok-toml.md 4.10)
             auto const module = modules.find(library);
             std::set<std::string> undefined;  // of every platform, for the required-reason API check (otok-toml.md 4.4)
             std::set<std::string> defined, weak;  // of every platform, for the checks of otok-toml.md 4.5
@@ -953,13 +949,11 @@ public:
                 } else if (auto ok = write_file_atomic(map_dir / "module.modulemap", detail::module_map(module_name, header_list, textual, !defines.empty())); !ok) {
                     return done(ok);
                 }
-                if (dynamic) {
-                    auto stub = headers_archive(dir, name, slices, x);
-                    if (!stub) return done(fail("the archive carrying the headers of '" + library + "' for " + platform + ": " + stub.error().message));
-                    headers_argv.insert(headers_argv.end(), {"-library", path_to_utf8(*stub), "-headers", path_to_utf8(headers)});
-                } else {
-                    argv.insert(argv.end(), {"-headers", path_to_utf8(headers)});
-                }
+                // the headers apart, of a static library too: a product of a dynamic library holds the headers of the
+                // static libraries inside it without their code (otok-toml.md 4.10, 5)
+                auto stub = headers_archive(dir, name, slices, x);
+                if (!stub) return done(fail("the archive carrying the headers of '" + library + "' for " + platform + ": " + stub.error().message));
+                headers_argv.insert(headers_argv.end(), {"-library", path_to_utf8(*stub), "-headers", path_to_utf8(headers)});
             }
             argv.insert(argv.end(), {"-output", path_to_utf8(staging / (name + ".xcframework"))});
             if (auto ok = run_logged(argv, x.env, work / "xcodebuild.log"); !ok) return done(fail("the XCFramework of '" + library + "': " + ok.error().message));
@@ -1068,7 +1062,7 @@ public:
         swift.tools_version = "5.9";  // the first to know .visionOS
         std::map<std::string, std::string> owners;  // "library <binary target>", "product <name>", "module <name>" → library
         std::map<std::string, std::string> header_owners;  // header path in Headers/ → its XCFramework
-        std::set<std::string> header_targets;              // the dynamic libraries with an XCFramework of their headers
+        std::set<std::string> header_targets;              // the libraries with an XCFramework of their headers
         for (output_package const& p : packages) {
             if (auto it = p.rec->target_settings.find("apple"); it != p.rec->target_settings.end()) {
                 if (auto const* s = std::any_cast<recipe_settings>(&it->second); s && s->swift_tools_version) {
@@ -1082,7 +1076,7 @@ public:
                 }
                 fs::path const framework = p.dir / (name + ".xcframework");
                 swift.binary_targets.emplace_back(name, slashed(framework));
-                // the headers of a dynamic library: an XCFramework of their own (otok-toml.md 4.10)
+                // the headers of a library: an XCFramework of their own (otok-toml.md 4.10)
                 std::vector<fs::path> carrying{framework};
                 std::error_code ec;
                 if (fs::path const headers = p.dir / (name + "_headers.xcframework"); fs::is_directory(dir / headers, ec)) {
@@ -1154,7 +1148,6 @@ public:
             if (p.linkage != "dynamic") statics.push_back(p);
         }
         if (auto ok = check_symbol_overlaps(dir, statics); !ok) return ok;
-        mixed_linkage(packages, warnings);
         // the source targets: a name is a binary target's, a shim's or a wrapper's (shared by the products
         // of one recipe)
         std::map<std::string, std::string> source_owners;   // target name → what it is
@@ -1239,6 +1232,11 @@ public:
                     std::string const name = framework_name(l.package, l.name);
                     targets.push_back(name);
                     if (header_targets.contains(name)) targets.push_back(name + "_headers");
+                }
+                // inside a dynamic library: its headers only (otok-toml.md 4.10, 5)
+                for (library_ref const& l : o.hidden_libraries) {
+                    std::string const name = framework_name(l.package, l.name) + "_headers";
+                    if (header_targets.contains(framework_name(l.package, l.name)) && std::ranges::find(targets, name) == targets.end()) targets.push_back(name);
                 }
                 for (library_ref const& l : o.libraries) {
                     for (std::string const& shim : shims_of[l]) {
@@ -1356,12 +1354,12 @@ private:
         return {};
     }
 
-    // The archive of the XCFramework carrying the headers of a dynamic library for one platform (otok-toml.md 4.10): an
-    // object of each architecture defining nothing, so that `-all_load` meets no symbol twice.
+    // The archive of the XCFramework carrying the headers of a library for one platform (otok-toml.md 4.10): an object of
+    // each architecture defining nothing, so that `-all_load` meets no symbol twice.
     result<fs::path> headers_archive(fs::path const& dir, std::string const& name, std::vector<built_slice const*> const& slices, xcode_found const& x) const
     {
         fs::path const source = dir / "otok_headers.c";
-        if (auto ok = write_file_atomic(source, "/* Generated by otok: defines nothing; its archive carries the headers of a dynamic library. */\n"); !ok) {
+        if (auto ok = write_file_atomic(source, "/* Generated by otok: defines nothing; its archive carries the headers of a library. */\n"); !ok) {
             return std::unexpected{ok.error()};
         }
         env_vars env = x.env;
@@ -1926,6 +1924,10 @@ std::string detail::cmake_config(cmake_package const& p)
     for (auto const& [name, path] : p.libraries) {
         text += "add_library(otok::" + name + (p.shared.contains(name) ? " SHARED" : " STATIC") + " IMPORTED)\n"
                 "set_target_properties(otok::" + name + " PROPERTIES IMPORTED_LOCATION " + cmake_path(path) + ")\n";
+    }
+    // a library's headers are an XCFramework of their own (otok-toml.md 4.10): its target brings them
+    for (auto const& [name, headers] : p.headers_of) {
+        text += "set_property(TARGET otok::" + name + " PROPERTY INTERFACE_LINK_LIBRARIES " + cmake_string("otok::" + headers) + ")\n";
     }
     if (!p.products.empty()) text += "\n# the products\n";
     for (cmake_product const& prod : p.products) {

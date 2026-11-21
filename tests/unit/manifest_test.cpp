@@ -303,7 +303,13 @@ TEST(manifest, local_source_overrides)
 TEST(manifest, profiles_may_only_override)
 {
     EXPECT_TRUE(parse_with_header("[profile.ci]\ndeps.nope = { options = { x = true } }\n")
-        .reports("profile 'ci' refers to library 'nope', which has no [deps.nope] entry"));
+        .reports("profile 'ci' refers to library 'nope', which has no [deps.nope] entry: only 'linkage' may be set for such a library"));
+    EXPECT_TRUE(parse_with_header("[profile.ci]\ndeps.nope = { linkage = \"static\", cflags = [\"-O1\"] }\n")
+        .reports("profile 'ci' refers to library 'nope', which has no [deps.nope] entry: only 'linkage' may be set for such a library"));
+    // the linkage of a library of the graph the project does not name (docs/PLAN.md decision 136)
+    auto const linkage_only = parse_with_header("[profile.ci]\ndeps.nope = { linkage = \"static\" }\n");
+    ASSERT_TRUE(linkage_only.m.has_value()) << messages(linkage_only.diags);
+    EXPECT_EQ(chosen_linkage_of(*linkage_only.m, &linkage_only.m->profiles[0], "nope"), "static");
     EXPECT_TRUE(parse_with_header("[deps.a]\nrecipe = { path = \"r\" }\n[profile.ci]\ndeps.a = { version = \"1\" }\n")
         .reports("unknown key 'version' in profile.ci.deps.a"));
     EXPECT_TRUE(parse_with_header("[profile.ci]\npolicy = {}\n").reports("unknown key 'policy' in profile.ci"));

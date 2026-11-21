@@ -586,6 +586,15 @@ TEST_F(commands, why)
     EXPECT_EQ(err.str(), "error: 'zlib' is not a dependency of this project\n");
 }
 
+// a profile's linkage of a library without a [deps] entry needs it in a graph (otok-toml.md 8, docs/PLAN.md decision 136)
+TEST_F(commands, profile_linkage_of_a_library_in_no_graph)
+{
+    project.write("otok.toml", manifest_toml + "[profile.mine]\ndeps.zlib = { linkage = \"static\" }\n");
+    EXPECT_EQ(run_unbuilt({"install"}), 1);
+    EXPECT_NE(err.str().find("error: profile 'mine' sets the linkage of 'zlib', which no target graph of this project has"), std::string::npos)
+        << err.str();
+}
+
 TEST_F(commands, update)
 {
     ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();

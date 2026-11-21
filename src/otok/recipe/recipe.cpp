@@ -1023,6 +1023,14 @@ void recipe_reader::dependencies(toml_table& root, std::string_view key, bool to
                 dep.linkage = std::move(*linkage);
             }
         }
+        if (auto exported = d->boolean("export")) {
+            if (tool) {
+                d->error(d->position("export"), d->describe("export") + " is not for a tool dependency: tools are static");
+                ok = false;
+            } else {
+                dep.export_symbols = *exported;
+            }
+        }
         if (d->contains("when")) {
             dep.when = when(*d, r, tool ? tests::options : tests::anything);
             if (!dep.when) ok = false;

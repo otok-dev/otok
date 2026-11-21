@@ -23,6 +23,7 @@
 
 #include "otok/builder/toolchains.hpp"
 #include "otok/commands/commands.hpp"
+#include "otok/core/binary.hpp"
 #include "otok/core/environment.hpp"
 #include "otok/core/fs.hpp"
 #include "otok/core/process.hpp"
@@ -278,6 +279,11 @@ TEST(host_target, gives_builds_nothing_of_the_user)
     EXPECT_TRUE(target->system_library("libpng16.so.16", spec));  // PE imports are not read
 #else
     EXPECT_NE(cmake.find("set(CMAKE_IGNORE_PREFIX_PATH \"/usr/local;/opt/local;/home/linuxbrew/.linuxbrew\")\n"), std::string::npos) << cmake;
+    // position-independent code in every slice, static ones too (docs/PLAN.md decision 136)
+    EXPECT_NE(cmake.find("set(CMAKE_POSITION_INDEPENDENT_CODE ON)\n"), std::string::npos) << cmake;
+    EXPECT_EQ(profile->toolchain.cflags.front(), "-fPIC");
+    EXPECT_EQ(profile->toolchain.cxxflags.front(), "-fPIC");
+    EXPECT_NE(built.at("CFLAGS").find("-fPIC"), std::string::npos);
     // the compilers' directory first, then the system's
     std::string const& path = built.at("PATH");
     EXPECT_TRUE(path.starts_with(path_to_utf8(path_from_utf8(profile->toolchain.cc).parent_path()) + ":")) << path;
@@ -871,6 +877,42 @@ TEST(host_target, installs_dynamic_libraries_in_both_configurations)
 
     ASSERT_EQ(p.run({"install"}), 0) << p.err.str();
     EXPECT_NE(p.out.str().find("slices: 4 (4 from the cache)\n"), std::string::npos) << p.out.str();
+}
+
+// A static library inside a dynamic one is hidden in it, unless the recipe exports it (otok-toml.md 5.2, docs/PLAN.md
+// decision 136): tiny-c dynamic, tiny-d static.
+TEST(host_target, hides_static_libraries_inside_dynamic_ones)
+{
+    host_project p{"dynamic"};
+    if (std::string const missing = p.missing_tools(); !missing.empty()) GTEST_SKIP() << missing;
+    p.write("otok.toml", p.manifest() + "\n[profile.inside]\ndeps.tiny-d = { linkage = \"static\" }\n");
+#ifdef _WIN32
+    std::filesystem::path const tiny_c = p.output("tiny-c/" + output_dir("bin", "release") + "/tiny_c.dll");
+#else
+    std::filesystem::path const tiny_c = p.output("tiny-c/" + output_dir("lib", "release") + "/libtiny_c.so.1.0");
+#endif
+
+    ASSERT_EQ(p.run({"install", "--profile", "inside"}), 0) << p.err.str() << p.out.str();
+    EXPECT_EQ(p.err.str().find("exports symbols of the static libraries"), std::string::npos) << p.err.str();
+    // tiny-d is in [deps] too, chosen static: its code twice, warned of
+    EXPECT_NE(p.err.str().find("the consumer gets the code of the static library 'tiny-d' twice or more"), std::string::npos) << p.err.str();
+    std::vector<std::string> exports = exported_symbols_of(tiny_c);
+    EXPECT_NE(std::ranges::find(exports, "tiny_c"), exports.end()) << tiny_c;
+    EXPECT_EQ(std::ranges::find(exports, "tiny_d"), exports.end()) << tiny_c;
+    auto code = p.run_consumer("#include <tiny_c.h>\n\nint main(void) { return tiny_c(); }\n", {"tiny-c"});
+    ASSERT_TRUE(code) << code.error().message;
+    EXPECT_EQ(*code, 11);
+
+#ifndef _WIN32
+    // exported on purpose: kept (a DLL exports only what it names, whatever the recipe says)
+    std::string recipe = read_file(p.project_dir() / "recipes" / "tiny-c" / "recipe.toml").value_or("");
+    std::string const line = "default-recipe = \"apotocki/tiny-d\"\n";
+    recipe.insert(recipe.find(line) + line.size(), "export = true\n");
+    p.write("recipes/tiny-c/recipe.toml", recipe);
+    ASSERT_EQ(p.run({"install", "--profile", "inside"}), 0) << p.err.str() << p.out.str();
+    exports = exported_symbols_of(tiny_c);
+    EXPECT_NE(std::ranges::find(exports, "tiny_d"), exports.end()) << tiny_c;
+#endif
 }
 
 namespace {

@@ -349,6 +349,7 @@ A library this recipe links against, built for the same slices.
 | `prerelease` | boolean | Default `false`; as in `otok-toml.md` 6. |
 | `requires-options` | table: option → value | Values this recipe needs from the dependency; merged as in 8.1; no `file` option (8.3). |
 | `linkage` | `"static"` or `"dynamic"` | The dependency's linkage when the project chooses none for it in its `[deps.<library>]` (`otok-toml.md` 5): a recipe whose own library is one DLL with its dependencies inside (Cairo with Pixman and FreeType) asks for `"static"`, the project may still choose otherwise. Dependents asking for different ones fail resolution unless the project chooses. Not in `[tool-deps]`: tools are static. |
+| `export` | boolean | Default `false`. `true`: when this recipe's library is dynamic and the dependency static, the dependency's symbols stay exported from it (`otok-toml.md` 5.2), for a library that offers them as part of its own interface; neither hidden nor checked. Without it they are hidden even where the build exports them on purpose, silently: `--exclude-libs` holds over a version script and `-load_hidden` over an exported symbols list, neither linker warns, and the check of exports finds nothing, the symbols being hidden as asked. Not in `[tool-deps]`. |
 | `when` | condition (9.1) | Without `when` the dependency is unconditional. |
 | `toolchains` | array of program names (3.1) | Programs of this dependency the build runs: the recipe and version the dependency got, built for the build machine as well (13.2). Not in `[tool-deps]`. |
 

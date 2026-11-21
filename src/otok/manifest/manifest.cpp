@@ -892,8 +892,18 @@ void manifest_reader::cross_check(manifest& m)
     for (profile const& p : m.profiles) {
         for (auto const& [library, overrides] : p.deps) {
             if (!m.find_dep(library)) {
-                diags_.error(overrides.where, "profile " + in_quotes(p.name) + " refers to library " + in_quotes(library)
-                    + ", which has no [deps." + library + "] entry");
+                // a library of the graph the project does not name: its linkage only (otok-toml.md 8, docs/PLAN.md decision 136),
+                // found in a graph after resolution
+                bool const other = !overrides.options.empty() || overrides.platforms || !overrides.flags.cflags.empty()
+                    || !overrides.flags.cxxflags.empty() || !overrides.flags.ldflags.empty();
+                if (other || !overrides.linkage) {
+                    diags_.error(overrides.where, "profile " + in_quotes(p.name) + " refers to library " + in_quotes(library)
+                        + ", which has no [deps." + library + "] entry: only 'linkage' may be set for such a library");
+                } else {
+                    dependency dep;
+                    dep.library = library;
+                    check_linkage(dep, *overrides.linkage, std::nullopt, overrides.where, "profile." + p.name + ".deps." + library);
+                }
             } else {
                 if (overrides.platforms) check_subset(*overrides.platforms, overrides.where, "profile." + p.name + ".deps." + library);
                 if (overrides.linkage) {

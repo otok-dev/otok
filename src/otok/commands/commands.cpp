@@ -1003,6 +1003,13 @@ bool build_project(parsed_command const& cmd, project& p, lock_file const& lock,
         }
     }
     ctx.out << "slices: " << slices << " (" << cached << " from the cache)\n";
+    // the static libraries a dynamic one should hide (otok-toml.md 5.2): an error of otok publish, whose installs are nested
+    std::vector<std::string> const exported = hidden_export_problems(p.built(), p.configuration, *built);
+    for (std::string const& e : exported) {
+        if (ctx.nested) diags.error({}, e);
+        else ctx.err << "warning: " << e << "\n";
+    }
+    if (ctx.nested && !exported.empty()) return false;
 
     std::ostream nothing{nullptr};  // an install for another command: the packages of its temporary project are its own business
     // ... but the display it shares shows that it is under way: packaging the libraries of a large recipe for every
@@ -1105,6 +1112,16 @@ int install_pipeline(parsed_command const& cmd, command_context& ctx, bool use_l
     for (std::string const& library : unlocked) {
         if (!has_library(p->full, library)) diags.error({}, in_quotes(library) + " is not a dependency of this project");
     }
+    // a profile's linkage of a library without a [deps] entry needs the library in a target graph (otok-toml.md 8)
+    for (profile const& pr : p->m.profiles) {
+        for (auto const& [library, overrides] : pr.deps) {
+            if (p->m.find_dep(library)) continue;
+            if (std::ranges::none_of(p->full.packages, [&](resolved_package const& pkg) { return pkg.library == library; })) {
+                diags.error(overrides.where, "profile " + in_quotes(pr.name) + " sets the linkage of " + in_quotes(library)
+                    + ", which no target graph of this project has");
+            }
+        }
+    }
     check_advisories(*p, cmd, diags);
     lock_file const* const previous = use_lock && p->lock ? &*p->lock : nullptr;
     auto fresh = make_lock(p->full, p->m, ctx.project_dir, previous, unlocked);
@@ -1192,6 +1209,15 @@ int install_pipeline(parsed_command const& cmd, command_context& ctx, bool use_l
             else ctx.out << "note: not building for '" << ts.target << "': " << why->second << "\n";
         }
         if (none_built()) diags.error({}, none);
+        // the libraries whose recipes cannot build the linkage the target tables prefer (otok-toml.md 5)
+        for (resolved_package const& pkg : p->r.packages) {
+            if (p->configuration >= pkg.configurations.size()) continue;
+            package_configuration const& pc = pkg.configurations[p->configuration];
+            std::set<std::string> said;
+            for (auto const& [platform, why] : pc.linkage_fallback) {
+                if (said.insert(why).second) ctx.out << "note: " << pkg.id << ": " << pc.linkage.at(platform) << ", " << why << "\n";
+            }
+        }
     }
     bool const ok = inputs && (everything
         || (!none_built() && build_project(cmd, *p, *fresh, std::move(*inputs), targets, std::move(*toolchains), skipped, ctx, diags)));
@@ -1453,10 +1479,17 @@ int metadata(parsed_command const& cmd, command_context& ctx)
             o["dir"] = absolute_path(ctx.project_dir / path_from_utf8(ts.output) / package_output_of(*info, pkg.library));
             // the resolution's, which counts the dependents' requests (otok-toml.md 5), on a platform of this target
             std::string linkage = linkage_of(p->m, pr, pkg.library, *info);
+            nlohmann::json fallback(nullptr);
             for (std::string const& pl : pc.platforms) {
-                if (auto it = pc.linkage.find(pl); info->find_platform(pl) && it != pc.linkage.end()) { linkage = it->second; break; }
+                auto const it = pc.linkage.find(pl);
+                if (!info->find_platform(pl) || it == pc.linkage.end()) continue;
+                linkage = it->second;
+                if (auto f = pc.linkage_fallback.find(pl); f != pc.linkage_fallback.end()) fallback = f->second;
+                break;
             }
             o["linkage"] = std::move(linkage);
+            // why it is not the linkage the target table prefers (docs/PLAN.md decision 136)
+            o["linkage-fallback"] = std::move(fallback);
             auto const& state = output_states[ts.target];
             auto const key = state.find(pkg.library);
             o["package-key"] = key == state.end() ? nlohmann::json(nullptr) : nlohmann::json(key->second);

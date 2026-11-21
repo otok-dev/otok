@@ -53,4 +53,15 @@ std::uint64_t elf_load_alignment_of(std::filesystem::path const& file);
 // import entries of an archive (a static or import library), sorted and without repeats; empty when it holds none.
 std::vector<unsigned> coff_machines_of(std::filesystem::path const& file);
 
+// The symbols a static archive defines, from its symbol index (otok-toml.md 5.2): the first `/` member of GNU and COFF
+// archives (or `/SYM64/`), `__.SYMDEF` (`SORTED`, `_64`) of BSD and Apple ones; sorted, without repeats. Empty for an
+// archive without an index and for other files.
+std::vector<std::string> archive_symbols_of(std::filesystem::path const& file);
+
+// The symbols a dynamic library exports with a strong definition (otok-toml.md 5.2): ELF's dynamic symbols defined, global
+// and of default or protected visibility; the export trie of Mach-O without weak definitions (the first architecture of a
+// universal file); the names of PE's export table. Weak definitions are left out: the inline functions and templates of
+// C++ are weak in the library and in an archive alike. Sorted, without repeats; empty for other files.
+std::vector<std::string> exported_symbols_of(std::filesystem::path const& file);
+
 }

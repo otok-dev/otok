@@ -167,6 +167,94 @@ TEST(binary, reads_the_load_alignment_of_shared_objects)
     EXPECT_EQ(elf_load_alignment_of(dir.path() / "text.txt"), 0u);
 }
 
+namespace {
+
+// `value` as `size` little-endian (or big-endian) bytes
+std::string bytes_of(std::uint64_t value, int size, bool little = true)
+{
+    std::string out(static_cast<std::size_t>(size), '\0');
+    for (int i = 0; i < size; ++i) out[static_cast<std::size_t>(little ? i : size - 1 - i)] = static_cast<char>(value >> (8 * i) & 0xff);
+    return out;
+}
+
+std::string archive_member(std::string const& name, std::string const& data)
+{
+    std::string size = std::to_string(data.size());
+    std::string header = name + std::string(16 - name.size(), ' ') + std::string(32, ' ') + size + std::string(10 - size.size(), ' ') + "`\n";
+    return header + data + (data.size() % 2 ? "\n" : "");
+}
+
+}
+
+// docs/PLAN.md decision 136: what a dynamic library exports of the static libraries inside it
+TEST(binary, reads_the_symbol_index_of_archives)
+{
+    test::temp_dir dir;
+    // GNU and COFF: "/" with a big-endian count, the members' offsets, the names
+    dir.write("libgnu.a", "!<arch>\n" + archive_member("/", bytes_of(2, 4, false) + bytes_of(0, 4, false) + bytes_of(0, 4, false)
+                                                                + std::string{"foo\0bar\0", 8}) + archive_member("a.o/", "xx"));
+    // 64-bit GNU: "/SYM64/" with 8-byte numbers
+    dir.write("libgnu64.a", "!<arch>\n" + archive_member("/SYM64/", bytes_of(1, 8, false) + bytes_of(0, 8, false) + std::string{"wide\0", 5}));
+    // BSD (Apple): "#1/20", the name after the header, then the ranlib entries' size, entries (string, member), the strings' size, the strings
+    std::string const name{"__.SYMDEF SORTED\0\0\0\0", 20};
+    std::string const ranlib = bytes_of(16, 4) + bytes_of(0, 4) + bytes_of(0, 4) + bytes_of(5, 4) + bytes_of(0, 4) + bytes_of(12, 4)
+        + std::string{"_foo\0_bar\0\0\0", 12};
+    dir.write("libbsd.a", "!<arch>\n" + archive_member("#1/20", name + ranlib) + archive_member("#1/4", std::string{"a.o\0", 4} + "xx"));
+    dir.write("libnone.a", "!<arch>\n" + archive_member("a.o/", "xx"));
+    dir.write("text.txt", "hello");
+    EXPECT_EQ(archive_symbols_of(dir.path() / "libgnu.a"), (std::vector<std::string>{"bar", "foo"}));
+    EXPECT_EQ(archive_symbols_of(dir.path() / "libgnu64.a"), std::vector<std::string>{"wide"});
+    EXPECT_EQ(archive_symbols_of(dir.path() / "libbsd.a"), (std::vector<std::string>{"_bar", "_foo"}));
+    EXPECT_TRUE(archive_symbols_of(dir.path() / "libnone.a").empty());
+    EXPECT_TRUE(archive_symbols_of(dir.path() / "text.txt").empty());
+}
+
+TEST(binary, reads_the_strong_exports_of_dynamic_libraries)
+{
+    test::temp_dir dir;
+
+    // Mach-O 64: one LC_DYLD_EXPORTS_TRIE (dataoff, datasize) and the trie at 64: the root with the edges "_a" and "_w",
+    // the node of _a terminal (flags 0), that of _w a weak definition (flags 0x04), left out
+    std::string const trie = std::string{"\x00\x02_a\x00\x0a_w\x00\x0e", 10} + std::string{"\x02\x00\x00\x00", 4} + std::string{"\x02\x04\x00\x00", 4};
+    std::string const macho = image(64, {{0, std::string{"\xcf\xfa\xed\xfe", 4}}, {12, bytes_of(6, 4)}, {16, bytes_of(1, 4)},
+                                            {32, bytes_of(0x80000033, 4) + bytes_of(16, 4) + bytes_of(64, 4) + bytes_of(trie.size(), 4)}}) + trie;
+    dir.write("libm.dylib", macho);
+    EXPECT_EQ(exported_symbols_of(dir.path() / "libm.dylib"), std::vector<std::string>{"_a"});
+    // universal: the first architecture
+    std::string const fat = image(4096, {{0, std::string{"\xca\xfe\xba\xbe", 4}}, {4, bytes_of(1, 4, false)}, {16, bytes_of(4096, 4, false)}}) + macho;
+    dir.write("libfat.dylib", fat);
+    EXPECT_EQ(exported_symbols_of(dir.path() / "libfat.dylib"), std::vector<std::string>{"_a"});
+
+    // ELF64: the strings at 64, .dynsym at 96 (entries of 24 bytes: name, info, other, shndx), the section headers at 216
+    // (null, .dynsym with sh_link 2, .dynstr); only "exp" is defined, global and visible
+    std::string const strings{"\0exp\0weak\0undef\0hidden\0", 23};
+    auto const symbol = [](std::uint32_t name, unsigned char info, unsigned char other, std::uint16_t shndx) {
+        return bytes_of(name, 4) + std::string{static_cast<char>(info), static_cast<char>(other)} + bytes_of(shndx, 2) + std::string(16, '\0');
+    };
+    std::string const dynsym = std::string(24, '\0') + symbol(1, 0x12, 0, 5) + symbol(5, 0x22, 0, 5) + symbol(10, 0x12, 0, 0) + symbol(16, 0x12, 2, 5);
+    auto const section = [](std::uint32_t type, std::uint64_t offset, std::uint64_t size, std::uint32_t link) {
+        return bytes_of(0, 4) + bytes_of(type, 4) + std::string(16, '\0') + bytes_of(offset, 8) + bytes_of(size, 8) + bytes_of(link, 4) + std::string(20, '\0');
+    };
+    std::string elf = image(64, {{0, std::string{"\x7f" "ELF\x02\x01", 6}}, {16, std::string{"\x03\x00\x3e\x00", 4}}, {0x28, bytes_of(216, 8)},
+                                    {0x3a, bytes_of(64, 2)}, {0x3c, bytes_of(3, 2)}});
+    elf += strings + std::string(96 - 64 - strings.size(), '\0') + dynsym;
+    elf += std::string(64, '\0') + section(11, 96, dynsym.size(), 2) + section(3, 64, strings.size(), 0);
+    dir.write("libe.so", elf);
+    EXPECT_EQ(exported_symbols_of(dir.path() / "libe.so"), std::vector<std::string>{"exp"});
+
+    // PE32+: e_lfanew 0x40, one section (RVA 0x1000 at file 0x200), the export directory at its start with two names
+    std::string pe = image(0x400, {{0, "MZ"}, {0x3c, bytes_of(0x40, 4)}, {0x40, std::string{"PE\0\0", 4} + bytes_of(0x8664, 2) + bytes_of(1, 2)},
+                                      {0x40 + 20, bytes_of(240, 2)}, {0x58, bytes_of(0x20b, 2)}, {0x58 + 112, bytes_of(0x1000, 4) + bytes_of(0x40, 4)},
+                                      {0x58 + 240 + 8, bytes_of(0x200, 4) + bytes_of(0x1000, 4) + bytes_of(0x200, 4) + bytes_of(0x200, 4)},
+                                      {0x200 + 24, bytes_of(2, 4)}, {0x200 + 32, bytes_of(0x1028, 4)},
+                                      {0x228, bytes_of(0x1030, 4) + bytes_of(0x1036, 4)}, {0x230, std::string{"alpha\0beta\0", 11}}});
+    dir.write("z.dll", pe);
+    EXPECT_EQ(exported_symbols_of(dir.path() / "z.dll"), (std::vector<std::string>{"alpha", "beta"}));
+
+    dir.write("text.txt", "hello");
+    EXPECT_TRUE(exported_symbols_of(dir.path() / "text.txt").empty());
+}
+
 TEST(binary, reads_libraries_beyond_max_path)
 {
     // the libraries of a package entry, deep below a cache on Windows (the Android target reads the soname of each)

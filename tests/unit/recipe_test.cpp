@@ -470,6 +470,19 @@ TEST(recipe, reads_the_linkage_of_a_dependency)
                     .reports("'linkage' in tool-deps.zlib is not for a tool dependency: tools are static"));
 }
 
+// a static dependency's symbols exported from the recipe's dynamic library (otok-toml.md 5.2, docs/PLAN.md decision 136)
+TEST(recipe, reads_whether_a_dependency_is_exported)
+{
+    auto ok = parse_with("[deps.zlib]\nversion = \"1\"\ndefault-recipe = \"p/zlib\"\nexport = true\n");
+    ASSERT_TRUE(ok.r.has_value()) << messages(ok.diags);
+    EXPECT_TRUE(ok.r->dependencies[0].export_symbols);
+    auto plain = parse_with("[deps.zlib]\nversion = \"1\"\ndefault-recipe = \"p/zlib\"\n");
+    ASSERT_TRUE(plain.r.has_value()) << messages(plain.diags);
+    EXPECT_FALSE(plain.r->dependencies[0].export_symbols);
+    EXPECT_TRUE(parse_with("[tool-deps.zlib]\nversion = \"1\"\ndefault-recipe = \"p/zlib\"\nexport = true\n")
+                    .reports("'export' in tool-deps.zlib is not for a tool dependency: tools are static"));
+}
+
 TEST(recipe, checks_products)
 {
     auto p = parse(head_text + source_text + platforms_text

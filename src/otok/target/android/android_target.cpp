@@ -344,6 +344,16 @@ public:
         return {};
     }
 
+    // lld of the NDK hides the archives by their file names, never a path (otok-toml.md 5.2)
+    std::vector<std::string> hidden_archive_flags(std::vector<fs::path> const& archives, slice_spec const& slice) const override
+    {
+        (void)slice;
+        std::string names;
+        for (fs::path const& a : archives) names += (names.empty() ? "" : ":") + path_to_utf8(a.filename());
+        if (names.empty()) return {};
+        return {"-Wl,--exclude-libs," + names};
+    }
+
     // include/, lib/<abi>/ and debug/lib/<abi>/ (otok-toml.md 4.7)
     result<void> make_package(built_package const& package, recipe const& rec, std::span<output_product const> products,
         fs::path const& staging) override

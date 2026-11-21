@@ -52,8 +52,11 @@ struct package_configuration
     merged_options options;
     std::map<std::string, std::vector<option_request>, std::less<>> requests;  // who asked for which value
     // platform → "static" or "dynamic" (otok-toml.md 5): the project's choice, its dependents' request or the target
-    // tables'; empty in the tool resolution, whose packages are static
+    // tables' preference, else what the recipe builds; empty in the tool resolution, whose packages are static
     std::map<std::string, std::string, std::less<>> linkage;
+    // platform → why `linkage` is not the target tables' preference there ("its recipe builds no dynamic library for
+    // 'apple'", docs/PLAN.md decision 136); only where the recipe could not build the preference
+    std::map<std::string, std::string, std::less<>> linkage_fallback;
 };
 
 // A graph (otok-lock.md 2): a target and an environment of a target table of the project, or the target that builds a

@@ -145,6 +145,9 @@ struct output_product
     std::vector<std::string> defines;       // those whose `when` holds: `NAME` or `NAME=value`
     std::vector<library_ref> header_products{};  // products of headers only it holds: { package, product name }
     std::vector<std::string> link{};        // its own `link.libraries` whose `when` holds on the target (recipe-toml.md 11)
+    // static libraries of dependencies inside a dynamic library it holds (its own or a dependency's): it holds their headers,
+    // not their code (otok-toml.md 5, docs/PLAN.md decision 136); never also in `libraries`
+    std::vector<library_ref> hidden_libraries{};
 };
 
 // An option value as wrappers see it (recipe-toml.md 8.2): `OTOK_OPTION_TLS_OPENSSL`, a condition of
@@ -242,6 +245,16 @@ public:
         (void)loaded;
         (void)slice;
         return true;
+    }
+
+    // The link flags of a dynamic slice hiding the symbols of the static archives inside it (otok-toml.md 5.2, docs/PLAN.md
+    // decision 136), put into `slice.toolchain.ldflags`: `--exclude-libs` with their names, ld64's `-load_hidden` with their
+    // paths. None by default: a DLL exports only what it names.
+    virtual std::vector<std::string> hidden_archive_flags(std::vector<std::filesystem::path> const& archives, slice_spec const& slice) const
+    {
+        (void)archives;
+        (void)slice;
+        return {};
     }
 
     // The output generator (DESIGN 9.2, cache-key.md 4). Lays out the package entry of `package` (its

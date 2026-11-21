@@ -433,7 +433,11 @@ TEST(apple_target, declares_frameworks_and_their_headers)
     pd.target_settings["apple"] = manifest;
     std::vector<output_package> packages(2);
     packages[0] = {"a", &rec_a, {"util"}, {{&pa, {{"a", "util"}}, {}}}, {}, {}, "Packages/a"};
-    packages[1] = {"d", &rec_d, {"core"}, {{&pd, {{"d", "core"}, {"a", "util"}}, {}}}, {}, {}, "Packages/d", {}, false, "dynamic"};
+    // a's util is static inside d: D holds its headers only (otok-toml.md 5, docs/PLAN.md decision 136)
+    packages[1] = {"d", &rec_d, {"core"}, {{&pd, {{"d", "core"}}, {}, {}, {}, {{"a", "util"}}}}, {}, {}, "Packages/d", {}, false, "dynamic"};
+    dir.write("Packages/a/a_util.xcframework/ios-arm64/liba_util.a", "");
+    dir.write("Packages/a/a_util_headers.xcframework/ios-arm64/Headers/a/util.h", "");
+    dir.write("Packages/a/a_util_headers.xcframework/ios-arm64/liba_util_headers.a", "");
     dir.write("Packages/d/d_core.xcframework/ios-arm64/d_core.framework/Info.plist", "");
     dir.write("Packages/d/d_core.xcframework/macos-arm64_x86_64/d_core.framework/Versions/A/Resources/Info.plist", "");
     dir.write("Packages/d/d_core_headers.xcframework/ios-arm64/Headers/d/core.h", "");
@@ -449,19 +453,22 @@ TEST(apple_target, declares_frameworks_and_their_headers)
     auto ok = target->finish_output(dir.path(), packages, {}, warnings);
     ASSERT_TRUE(ok) << ok.error().message;
     std::string const swift = read_file(dir.path() / "Package.swift").value_or("?");
-    EXPECT_NE(swift.find(".library(name: \"D\", targets: [\"d_core\", \"d_core_headers\", \"a_util\"])"), std::string::npos) << swift;
+    EXPECT_NE(swift.find(".library(name: \"D\", targets: [\"d_core\", \"d_core_headers\", \"a_util_headers\"])"), std::string::npos) << swift;
+    EXPECT_NE(swift.find(".library(name: \"A\", targets: [\"a_util\", \"a_util_headers\"])"), std::string::npos) << swift;
     EXPECT_NE(swift.find(".binaryTarget(name: \"d_core_headers\", path: \"Packages/d/d_core_headers.xcframework\")"), std::string::npos) << swift;
+    EXPECT_NE(swift.find(".binaryTarget(name: \"a_util_headers\", path: \"Packages/a/a_util_headers.xcframework\")"), std::string::npos) << swift;
     EXPECT_EQ(swift.find("D_otok"), std::string::npos) << swift;  // the manifest is in the frameworks
-    EXPECT_EQ(warnings, std::vector<std::string>{"the dynamic library 'd' holds a copy of the static library 'a_util' of 'a', which its products hold too: "
-                                                 "an app linking them has its code twice; 'linkage = \"dynamic\"' in [deps.a] avoids it"});
+    EXPECT_TRUE(warnings.empty()) << warnings.front();  // the copies are the core's to count (check_static_copies)
 
     std::string const cmake = read_file(dir.path() / "otok-config.cmake").value_or("?");
     EXPECT_NE(cmake.find("add_library(otok::d_core SHARED IMPORTED)\n"), std::string::npos) << cmake;
     EXPECT_NE(cmake.find("add_library(otok::d_core_headers STATIC IMPORTED)\n"
                          "set_target_properties(otok::d_core_headers PROPERTIES IMPORTED_LOCATION \"${_otok_dir}/Packages/d/d_core_headers.xcframework\")\n"),
         std::string::npos) << cmake;
-    EXPECT_NE(cmake.find("set_property(TARGET otok::D PROPERTY INTERFACE_LINK_LIBRARIES \"otok::d_core\" \"otok::d_core_headers\" \"otok::a_util\")\n"),
+    EXPECT_NE(cmake.find("set_property(TARGET otok::D PROPERTY INTERFACE_LINK_LIBRARIES \"otok::a_util_headers\" \"otok::d_core\" \"otok::d_core_headers\")\n"),
         std::string::npos) << cmake;
+    // a target naming the library alone gets its headers
+    EXPECT_NE(cmake.find("set_property(TARGET otok::a_util PROPERTY INTERFACE_LINK_LIBRARIES \"otok::a_util_headers\")\n"), std::string::npos) << cmake;
     EXPECT_NE(cmake.find("set(Otok_PRIVACY_MANIFESTS)\n"), std::string::npos) << cmake;
     // the frameworks of the platform built for, which the other generators copy into a bundle (docs/PLAN.md decision 133)
     EXPECT_NE(cmake.find("# the frameworks of the platform built for\n"
@@ -1177,8 +1184,11 @@ TEST(apple_target, installs_every_platform)
     EXPECT_TRUE(std::filesystem::exists(otok_dir / "Packages" / "tiny-a" / "tiny-a_tiny_a.xcframework" / "Info.plist"));
     std::string const swift = read_file(otok_dir / "Package.swift").value_or("?");
     // TinyB holds tiny_a, so it holds the shim of TinyA with its link settings
-    EXPECT_NE(swift.find(".library(name: \"TinyB\", targets: [\"tiny-b_tiny_b\", \"tiny-a_tiny_a\", \"TinyA_otok\"])"), std::string::npos) << swift;
-    EXPECT_NE(swift.find(".library(name: \"TinyA\", targets: [\"tiny-a_tiny_a\", \"TinyA_otok\", \"TinyASwift\"])"), std::string::npos) << swift;
+    // (the headers of each library in an XCFramework of their own, docs/PLAN.md decision 136)
+    EXPECT_NE(swift.find(".library(name: \"TinyB\", targets: [\"tiny-b_tiny_b\", \"tiny-b_tiny_b_headers\", \"tiny-a_tiny_a\", \"tiny-a_tiny_a_headers\", "
+                         "\"TinyA_otok\"])"), std::string::npos) << swift;
+    EXPECT_NE(swift.find(".library(name: \"TinyA\", targets: [\"tiny-a_tiny_a\", \"tiny-a_tiny_a_headers\", \"TinyA_otok\", \"TinyASwift\"])"),
+        std::string::npos) << swift;
     EXPECT_NE(swift.find(".binaryTarget(name: \"tiny-a_tiny_a\", path: \"Packages/tiny-a/tiny-a_tiny_a.xcframework\")"), std::string::npos) << swift;
     EXPECT_NE(swift.find("        .target(\n            name: \"TinyA_otok\",\n            path: \"Packages/tiny-a/shims/TinyA\",\n"
                          "            resources: [.copy(\"PrivacyInfo.xcprivacy\")],\n"
@@ -1188,7 +1198,7 @@ TEST(apple_target, installs_every_platform)
         std::string::npos)
         << swift;
     EXPECT_EQ(err.str().find("whose SDK does not have it"), std::string::npos) << err.str();
-    EXPECT_NE(swift.find("        .target(\n            name: \"TinyASwift\",\n            dependencies: [\"tiny-a_tiny_a\", \"TinyA_otok\"],\n"
+    EXPECT_NE(swift.find("        .target(\n            name: \"TinyASwift\",\n            dependencies: [\"tiny-a_tiny_a\", \"tiny-a_tiny_a_headers\", \"TinyA_otok\"],\n"
                          "            path: \"Packages/tiny-a/wrappers/TinyASwift\",\n            resources: [.process(\"Resources\")],\n"
                          "            cSettings: [.define(\"OTOK_OPTION_VALUE\", to: \"7\"), .define(\"OTOK_OPTION_FAST\")],\n"
                          "            swiftSettings: [.define(\"OTOK_OPTION_FAST\")]\n        ),\n"),
@@ -1200,8 +1210,16 @@ TEST(apple_target, installs_every_platform)
     EXPECT_NE(read_file(otok_dir / "Acknowledgements.plist").value_or("?").find("<string>tiny-a</string>"), std::string::npos);
     EXPECT_NE(swift.find("platforms: [.iOS(\"16.0\"), .macOS(\"13.0\"), .tvOS(\"16.0\"), .watchOS(\"9.0\"), .visionOS(\"1.0\")]"), std::string::npos)
         << swift;
+    // the headers apart from the archives, which carry none (otok-toml.md 4, docs/PLAN.md decision 136)
+    for (char const* xcf : {"tiny-a/tiny-a_tiny_a.xcframework", "tiny-b/tiny-b_tiny_b.xcframework"}) {
+        for (auto const& e : std::filesystem::recursive_directory_iterator{otok_dir / "Packages" / path_from_utf8(xcf)}) {
+            EXPECT_NE(e.path().filename(), "Headers") << e.path();
+        }
+    }
+    EXPECT_NE(swift.find(".binaryTarget(name: \"tiny-b_tiny_b_headers\", path: \"Packages/tiny-b/tiny-b_tiny_b_headers.xcframework\")"), std::string::npos)
+        << swift;
     std::size_t maps = 0;
-    for (auto const& e : std::filesystem::recursive_directory_iterator{otok_dir / "Packages" / "tiny-b" / "tiny-b_tiny_b.xcframework"}) {
+    for (auto const& e : std::filesystem::recursive_directory_iterator{otok_dir / "Packages" / "tiny-b" / "tiny-b_tiny_b_headers.xcframework"}) {
         if (e.path().filename() == "module.modulemap") {
             ++maps;
             EXPECT_EQ(e.path().parent_path().filename(), "TinyB");
@@ -1213,7 +1231,7 @@ TEST(apple_target, installs_every_platform)
     // platforms with two keep a copy per architecture (otok-toml.md 4)
     maps = 0;
     std::size_t dispatched = 0;
-    for (auto const& e : std::filesystem::recursive_directory_iterator{otok_dir / "Packages" / "tiny-a" / "tiny-a_tiny_a.xcframework"}) {
+    for (auto const& e : std::filesystem::recursive_directory_iterator{otok_dir / "Packages" / "tiny-a" / "tiny-a_tiny_a_headers.xcframework"}) {
         if (e.path().filename() != "module.modulemap") continue;
         ++maps;
         std::filesystem::path const headers = e.path().parent_path().parent_path();
@@ -1291,7 +1309,7 @@ TEST(apple_target, installs_every_platform)
         "cmake-iossim.log"))
         << read_file(base / "cmake-iossim.log").value_or("");
     ASSERT_TRUE(cmake({"--build", path_to_utf8(base / "cmake-iossim"), "--verbose"}, "cmake-iossim.log")) << read_file(base / "cmake-iossim.log").value_or("");
-    EXPECT_NE(read_file(base / "cmake-iossim.log").value_or("?").find("tiny-a_tiny_a.xcframework/ios-arm64_x86_64-simulator/Headers"), std::string::npos);
+    EXPECT_NE(read_file(base / "cmake-iossim.log").value_or("?").find("tiny-a_tiny_a_headers.xcframework/ios-arm64_x86_64-simulator/Headers"), std::string::npos);
 
     // the same project written for another package manager, through the provider (otok-toml.md 4.12): find_package of a
     // module, past CMAKE_FIND_ROOT_PATH of the simulator's SDK

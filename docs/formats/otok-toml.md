@@ -135,9 +135,12 @@ The output is one SwiftPM package: `<output>/Package.swift` and, per library,
   architecture in `Headers/otok-arch/<arch>/<path>`, and `<path>` becomes a generated header that
   includes the copy of the architecture being compiled (`#error` for another one). A header that only
   some slices have fails packaging, which names it.
-- The XCFramework of the library a product names in `headers` (`recipe-toml.md` 11) carries the headers
-  and a module map in `Headers/<module>/module.modulemap`, in a directory of its own because Xcode merges
-  the headers of all XCFrameworks into one directory. The module map is the one `build` returned, or a
+- The library a product names in `headers` (`recipe-toml.md` 11) has its headers in a second XCFramework,
+  `<library>_<output name>_headers.xcframework`, around an archive of one object that defines nothing, while the
+  XCFramework of its archive has no `Headers/`: a product holding a static library inside a dynamic one takes its headers
+  without its code (5), and only one XCFramework carries the module. Both are binary targets, and the products holding
+  the library hold both. The headers XCFramework holds a module map in `Headers/<module>/module.modulemap`, in a
+  directory of its own because Xcode merges the headers of all XCFrameworks into one directory. The module map is the one `build` returned, or a
   generated `module <module> { header "../…" … export * }` listing every header (the per-architecture copies as
   `textual header`); `<module>` is the product's `apple.module`, or its name. One header path in the
   XCFrameworks of two libraries is an error, since Xcode merges them.
@@ -170,7 +173,8 @@ The output is one SwiftPM package: `<output>/Package.swift` and, per library,
   The products hold it.
 - `Package.swift` declares a `binaryTarget` per library output name and a `library` product per `[[product]]` whose `when` holds. A product's targets are its
   libraries, those of the products it `depends` on, and every library of the recipe's dependencies
-  (transitively), with the shims above: a binary target cannot declare dependencies, and SwiftPM links a target once however
+  (transitively) but the code of the static libraries a dynamic one holds a copy of (5), whose headers it holds (4.10),
+  with the shims above: a binary target cannot declare dependencies, and SwiftPM links a target once however
   many products hold it. Product names, module names and the names of all targets (binary targets,
   shims, wrappers) must be unique in the package; a clash names both recipes.
 - The files `build` returned as `data` (`build-lua-api.md` 8) are in `Packages/<library>/data/`, as they are,
@@ -199,9 +203,10 @@ target_link_libraries(app PRIVATE otok::OpenSSL)
   `include(Otok/otok-config.cmake)`. Paths are relative to the file, so the output may be moved.
 - Each XCFramework is an imported static library `otok::<library>_<output name>` whose `IMPORTED_LOCATION` is the
   XCFramework: CMake picks the slice of `CMAKE_SYSTEM_NAME` and `CMAKE_OSX_SYSROOT` (a simulator SDK) and adds
-  its `Headers/` to the include path.
+  its `Headers/` to the include path. The XCFramework of a library's headers is `otok::<library>_<output name>_headers`,
+  which the library's target links, so a target naming the library alone gets them too.
 - A dynamic library (4.10) is an imported shared library `otok::<library>_<output name>` on its XCFramework of
-  frameworks, with the static `otok::<library>_<output name>_headers` on the XCFramework of its headers. The file
+  frameworks. The file
   defines `otok_embed_frameworks(<target>)`: with the Xcode generator it embeds the frameworks in the target's bundle
   (`XCODE_EMBED_FRAMEWORKS`, signed on copy) and adds the run paths of 4.10. With the others it takes the frameworks of
   the platform built for (the slice the file chose): a target that is a bundle (`MACOSX_BUNDLE`, which CMake sets by
@@ -550,9 +555,8 @@ App Store takes in an app:
   `CFBundleVersion` the recipe's revision; `CFBundleSupportedPlatforms` the SDK's platform (`iPhoneOS`,
   `iPhoneSimulator`, `MacOSX`, …); `MinimumOSVersion` the deployment version, `LSMinimumSystemVersion` on macOS, and
   neither on Mac Catalyst, whose deployment is an iOS version.
-- A library carrying headers (`recipe-toml.md` 11) has them in a second XCFramework,
-  `<library>_<output name>_headers.xcframework`, laid out as a static library's (4: `Headers/`, the module map,
-  `otok-arch/`) around an archive of one object that defines nothing: a framework's headers are reached as
+- A library carrying headers (`recipe-toml.md` 11) has them in `<library>_<output name>_headers.xcframework`, as a
+  static library has (4: `Headers/`, the module map, `otok-arch/`): a framework's headers are reached as
   `<Framework/path>` only, and the `#include <openssl/ssl.h>` of C and C++ code would not find them. Both
   XCFrameworks are binary targets of the products holding the library.
 - A product's `apple.privacy-manifest` is `PrivacyInfo.xcprivacy` of the frameworks of its libraries (in `Resources/`
@@ -560,8 +564,8 @@ App Store takes in an app:
   manifests holding one dynamic library are an error.
 - The checks of 4.4 and of the private system libraries (4.5) apply as to static libraries; 4.4 reads the manifests
   of a dynamic library's products from its frameworks, where they are, not from the shims. The overlap of symbols
-  (4.5) does not: every dynamic library is an image of its own. A product of a dynamic library holding a static library
-  of another recipe is warned of (5).
+  (4.5) does not: every dynamic library is an image of its own. A static library a dynamic one holds a copy of is
+  reported when the app gets its code twice (5), and its symbols are hidden in the framework (5.2).
 - Xcode embeds the frameworks of the products an app links (Embed & Sign). The app's run path holds
   `@executable_path/Frameworks` (`@executable_path/../Frameworks` on macOS): Xcode's templates set it; a project made
   otherwise (xcodegen for several platforms) may need `LD_RUNPATH_SEARCH_PATHS` for macOS. SwiftPM from the command
@@ -611,7 +615,9 @@ otok_copy_runtime_dlls(app)
   library. A static library links after it the libraries the products holding it list after it (linkers that read an
   archive once need the order) and the system libraries of those products.
 - Each product whose `when` holds is an interface target `otok::<product>` holding what it holds on Apple: its libraries,
-  those of the products it `depends` on and of the recipe's dependencies; the products of headers only it holds, with
+  those of the products it `depends` on and of the recipe's dependencies (of a static library inside a dynamic one, the
+  `include/` of its package and the defines of the products whose headers it carries, not its target, 5); the products
+  of headers only it holds, with
   their `include/` and system libraries; and, as `INTERFACE_COMPILE_DEFINITIONS`, the `defines` of itself, of the products
   whose headers its libraries carry and of the products of headers only it holds. A system library of `link` is
   `<name>.lib` on Windows, `-l<name>` elsewhere. `link.runtime = "c++"` adds `-lstdc++` on Linux to a static library, for
@@ -773,9 +779,37 @@ in their debug builds. Tool dependencies are always built `release`: they run du
 target, and profiles may change both (8). Between the two, a library the project chooses no linkage for
 takes the one its dependents' recipes ask for (`recipe-toml.md` 9, `[deps.<library>] linkage`); dependents
 asking for different ones are an error naming them, which `[deps.<library>] linkage` settles. In order: the
-profile's `[deps]`, `[deps]`, the dependents' recipes, the profile's target table, the target table, the target. The recipe must list the linkage in `[recipe] linkage`
-(`recipe-toml.md` 3); otherwise resolution fails. `[apple]` packages dynamic libraries as frameworks (4.10). Tool
-dependencies are always static.
+profile's `[deps]`, `[deps]`, the dependents' recipes, the profile's target table, the target table, the target.
+`[apple]` packages dynamic libraries as frameworks (4.10). Tool dependencies are always static.
+
+The first three choose the linkage of one library: the recipe must list it in `[recipe] linkage` (`recipe-toml.md`
+3), otherwise resolution fails naming who asked for it. The last three are a preference for every library of the
+target without a choice of its own, in `[deps]` or not: a recipe that cannot build it builds the linkage it can, and
+`otok install` notes it (`note: openssl: static, its recipe builds no dynamic library for 'apple'`). The preference is applied
+to the version chosen and never chooses one: an older version whose recipe could build it is not preferred. A library
+static by this fallback is told apart from one static by a choice where its copies are counted (below).
+
+A dynamic library holds a copy of every static library it links: its static dependencies, and theirs through static
+ones, up to the next dynamic one. Its products hold their headers but not their code (4, 4.10, 4.11): the dynamic
+library's own headers may include theirs, the code is inside the dynamic library, where their symbols are hidden (5.2).
+A consumer calling one of them itself names it in `[deps]`; without that its calls stay undefined when it links, not
+resolved to a second copy. Each
+place the code of a static library reaches the consumer is a copy: every dynamic library holding one, and the products
+of the project's `[deps]` that hold the static library otherwise (its own products when it is in `[deps]` itself). With
+two copies or more, one of them inside a dynamic library, the consumer has the code and the global state of the library
+twice, and an object of one copy handed to the other breaks (the `SSL_CTX` curl's callback gives the app, of the
+OpenSSL inside curl, used by the app's own OpenSSL); hiding the symbols does not help. `otok install` reports every
+such library of an output: an error when the library is static by the fallback above, which nobody asked for; a
+warning when it is static by a choice (`[deps]`, its profile's, or a dependent's recipe, as Cairo's DLL asks for
+Pixman and FreeType). The error names the ways out: `[deps.<library>] linkage = "static"`, taking the copies (and then
+the warning), or `linkage = "static"` for the dynamic libraries holding it, in `[deps.<holder>]` or in a profile's
+`deps.<holder>` (8), which takes libraries of the graph not in `[deps]` for `linkage`; and, when the library is in
+`[deps]` only for its version or flags, leaving it out of `[deps]`.
+
+The linkage is not in `otok.lock` (`otok-lock.md`): it follows from the manifest and the recipes. A new revision of a
+recipe that builds the preferred linkage changes the library's: after `otok update` a static OpenSSL inside a dynamic
+curl becomes a framework of its own, and the note is gone. This is accepted: the output changes with the recipe, as
+it does for any revision.
 
 Static libraries shared by several products are not duplicated in one image: an archive holds only its
 own library's objects (a dependency's symbols stay undefined in it), and SwiftPM links each binary
@@ -783,9 +817,8 @@ target once however many products hold it (4). They are duplicated when the cons
 several dynamic images of its own (two of its frameworks or dynamic SwiftPM products, or an app and an
 extension each embedding one): every image gets its own copy of the code and of its global state, and
 Objective-C classes are reported as implemented in both. Xcode warns of it; otok cannot see how the
-consumer's images are made, and the remedy is dynamic libraries for `[apple]` (4.10). A dynamic library built against
-a static one holds a copy of it, and a product holds the libraries of its dependencies, so an app linking both has
-the static library twice: `otok install` warns of every such pair (4.10).
+consumer's images are made, and the remedy is dynamic libraries for `[apple]` (4.10). The copies otok does make, inside
+its own dynamic libraries, are counted above.
 
 The configuration and the linkage are part of the slice key (`cache-key.md` 3). There is no `[build]`
 table.
@@ -824,6 +857,39 @@ resolution fails, naming them. With a standard, given or chosen:
 - it is part of the slice key (`cache-key.md` 3).
 
 `-std=` in `cxxflags` and `cflags` (and MSVC's `/std:`) is an error: the standard is the key.
+
+### 5.2 The symbols of static libraries inside dynamic ones
+
+A static library linked into a dynamic one exports all its global symbols from it unless the link hides them: a
+dynamic curl would export the whole of libcrypto, and with another OpenSSL in the process calls could reach either.
+The static libraries a dynamic slice holds a copy of (5) are hidden in it, unless its recipe exports one
+(`recipe-toml.md` 9, `export`):
+
+- Linux and Android: `-Wl,--exclude-libs,<archives>` with the file names of their archives (`libssl.a:libcrypto.a`;
+  GNU ld and lld match the name, not a path, wherever the option stands on the line, and it holds over a version
+  script of the build), never `ALL`, which would hide the library's own symbols where its build links an archive of
+  its own into it;
+- Apple: `-Wl,-load_hidden,<archive>` per archive, by its absolute path: ld64 then loads the archive as usual (only
+  the members needed) with its symbols hidden, also when the build names the same file afterwards in another
+  spelling (`-L… -l…`, a relative path). Not `-unexported_symbols_list`, which ld64 refuses beside a build's own
+  `-exported_symbols_list`;
+- Windows: no flag; a DLL exports only what `__declspec(dllexport)` or a `.def` file names. A static library built
+  with `dllexport` (its `*_STATIC` define missing) is still exported from the DLL linking it, which the check below
+  finds.
+
+The flags are put into the dynamic slice's link flags (`slice.toolchain.ldflags`, `build-lua-api.md` 3.1), which
+every helper passes to its links (on a program they hide nothing that matters), and so into the slice key
+(`cache-key.md` 3). They must come before the build's own reference to the archives, as every build system puts
+`LDFLAGS` before the libraries: ld64 hides an archive only when `-load_hidden` loads it first. A recipe linking with
+its own commands (`otok.run` of nmake, OpenSSL's `Configure`, GN) passes `slice.toolchain.ldflags` to them itself,
+before its libraries.
+
+After the build the builder compares what each dynamic library exports with the symbols its hidden libraries define,
+on every target: one found is a warning of `otok install` and an error of `otok publish`, naming the library and a few
+symbols. Weak definitions are not compared: the inline functions and template instances of C++ are weak both in a
+library's own objects and in the archives it links, and the library rightly exports its own. The symbols an archive defines come from its symbol index (`/` of COFF and GNU archives, `__.SYMDEF` of
+Apple's), the exports from the export trie of Mach-O, the dynamic symbol table of ELF and the export table of PE,
+read by otok (`core/binary`) without a tool of the toolchain.
 
 ## 6. `[deps.<library>]`
 
@@ -1045,7 +1111,9 @@ applies. A profile may contain:
 A profile cannot add or remove dependencies, change a `recipe`, `version`, `prerelease` or `source`,
 or change `[policy]` or `[fetch]`: the set of inputs to fetch stays the same in every profile, so one
 `otok.lock` serves all of them (`otok-lock.md`). A `deps.<library>` key for a library without a
-`[deps.<library>]` entry is an error.
+`[deps.<library>]` entry may set `linkage` only, for a library of the graph the project does not name (a dynamic
+library holding a static copy, 5); after resolution, a library in none of the target graphs is an error. Any other
+key of such an entry is an error.
 
 Merging onto the base manifest: tables merge key by key; arrays and scalar values replace;
 `options` merge option by option (a profile's value replaces the base value of that option, including
@@ -1147,8 +1215,7 @@ Reported before resolution, all at once rather than one per run:
 - flags that choose the slice (4.3);
 - `cmake` of `[deps.<library>]` neither `false` nor a table of the form of `recipe-toml.md` 11.4 (its syntax rules), or in
   `[tool-deps]` (6);
-- `configurations` empty, with a value twice, or with more than one value for `[apple]`; `linkage`
-  other than `"static"` for `[apple]`;
+- `configurations` empty, with a value twice, or with more than one value for `[apple]`;
 - `build-on` missing where the target needs it, empty, with a value twice, or naming an environment the target
   does not have or `*` with another compiler than `ndk` (4.9); `tool-build-on` with two environments of one system or
   one of another target (3).
@@ -1161,5 +1228,5 @@ Reported after resolution: `cmake` of `[deps.<library>]` naming a product its re
 
 Reported during resolution: options against recipe schemas, version and platform availability,
 deployment versions, option conflicts between dependents, license policy, a `linkage` the recipe cannot
-build, a recipe id found in two indexes that `[index-of]` does not choose between (6.4), a delivered tool whose recipe
+build chosen for its library (a preference of a target table falls back, 5), a recipe id found in two indexes that `[index-of]` does not choose between (6.4), a delivered tool whose recipe
 builds no programs or not one the project names (7.1).

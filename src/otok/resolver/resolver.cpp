@@ -217,14 +217,24 @@ struct graph_spec
     }
 };
 
-// The linkage of `n` in graph `g` and configuration `c` for platform `p` (otok-toml.md 5) and who asked for it ("" for
-// the project): the project's choice for the library, else its dependents' one request, else the project's target tables.
-// Dependents asking for different ones without a choice of the project are an error.
-std::expected<std::pair<std::string, std::string>, std::string> node_linkage(graph_spec const& spec, node const& n, std::size_t g,
-    std::size_t c, std::string const& p)
+// The linkage asked of a library on a platform (otok-toml.md 5).
+struct linkage_choice
+{
+    std::string linkage;    // "static" or "dynamic"
+    std::string requester;  // the dependent asking for it; "" for the project
+    // the preference of the target tables (theirs, their profile's or the target's), not a choice for the library: a
+    // recipe that cannot build it builds what it can (docs/PLAN.md decision 136)
+    bool preferred = false;
+};
+
+// The linkage of `n` in graph `g` and configuration `c` for platform `p` (otok-toml.md 5): the project's choice for the
+// library, else its dependents' one request, else the preference of the project's target tables. Dependents asking for
+// different ones without a choice of the project are an error.
+std::expected<linkage_choice, std::string> node_linkage(graph_spec const& spec, node const& n, std::size_t g, std::size_t c,
+    std::string const& p)
 {
     if (spec.chosen_linkage) {
-        if (auto chosen = spec.chosen_linkage(c, n.library)) return std::pair{std::move(*chosen), std::string{}};
+        if (auto chosen = spec.chosen_linkage(c, n.library)) return linkage_choice{std::move(*chosen), {}, false};
     }
     node_config const& nc = n.graphs[g].configs[c];
     if (auto it = nc.linkage_requests.find(p); it != nc.linkage_requests.end() && !it->second.empty()) {
@@ -234,9 +244,19 @@ std::expected<std::pair<std::string, std::string>, std::string> node_linkage(gra
             for (auto const& [requester, linkage] : requests) message += "\n  " + requester + ": " + linkage;
             return std::unexpected(message + "\nchoose one in otok.toml: [deps." + n.library + "] linkage = \"...\"");
         }
-        return std::pair{requests.front().second, requests.front().first};
+        return linkage_choice{requests.front().second, requests.front().first, false};
     }
-    return std::pair{spec.linkage(c, n.library, p), std::string{}};
+    return linkage_choice{spec.linkage(c, n.library, p), {}, true};
+}
+
+// The linkage a recipe builds for a choice, and why it is not the preferred one ("" when it is, or when the choice was
+// for the library: the recipe must build that one, check_linkage).
+std::pair<std::string, std::string> built_linkage(linkage_choice const& choice, recipe const& r, std::string const& target)
+{
+    if (!choice.preferred || r.linkage.empty() || std::ranges::find(r.linkage, choice.linkage) != r.linkage.end()) {
+        return {choice.linkage, {}};
+    }
+    return {r.linkage.front(), "its recipe builds no " + choice.linkage + " library for " + in_quotes(target)};
 }
 
 class solver
@@ -682,9 +702,9 @@ private:
                 for (std::string const& p : ng.configs[c].platforms) {
                     auto const linkage = node_linkage(spec_, n, g, c, p);
                     if (!linkage) return label + linkage.error();
-                    if (std::ranges::find(r.linkage, linkage->first) == r.linkage.end()) {
-                        return label + display(n) + " cannot be built as " + linkage->first + " libraries for " + in_quotes(p)
-                            + (linkage->second.empty() ? std::string{} : ", which " + linkage->second + " asks for,") + " (its recipe builds "
+                    if (!linkage->preferred && std::ranges::find(r.linkage, linkage->linkage) == r.linkage.end()) {
+                        return label + display(n) + " cannot be built as " + linkage->linkage + " libraries for " + in_quotes(p)
+                            + (linkage->requester.empty() ? std::string{} : ", which " + linkage->requester + " asks for,") + " (its recipe builds "
                             + joined(r.linkage) + "); set 'linkage' in [deps." + n.library + "]";
                     }
                 }
@@ -858,7 +878,11 @@ resolved_package make_package(node const& n, std::size_t g, graph_spec const& sp
             pc.requests = nc.requests;
             if (!spec.tool && spec.linkage) {
                 for (std::string const& platform : nc.platforms) {
-                    if (auto linkage = node_linkage(spec, n, g, k, platform)) pc.linkage.emplace(platform, std::move(linkage->first));
+                    auto const choice = node_linkage(spec, n, g, k, platform);
+                    if (!choice) continue;
+                    auto [linkage, fallback] = built_linkage(*choice, r, p.target);
+                    pc.linkage.emplace(platform, std::move(linkage));
+                    if (!fallback.empty()) pc.linkage_fallback.emplace(platform, std::move(fallback));
                 }
             }
         }

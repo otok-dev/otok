@@ -42,7 +42,22 @@ struct packaged
     std::vector<cmake_package_spec> cmake{};  // its CMake packages (otok-toml.md 4.12)
     merged_options options{};               // its options, merged (recipe-toml.md 8.1)
     std::vector<std::string> platforms{};    // of the target, those it is built for (otok-toml.md 6)
+    // the copies of static libraries (otok-toml.md 5, docs/PLAN.md decision 136): the project names it in [deps]; why it is
+    // static where the target table prefers dynamic ("" when it is not); a dynamic library: the static libraries inside it
+    bool direct = false;
+    std::string linkage_fallback{};
+    std::vector<std::string> static_inside{};
 };
+
+// The static libraries whose code the consumer of an output gets twice or more (otok-toml.md 5): inside dynamic libraries,
+// and through the products of the project's [deps]. An error for a library static by the target table's fallback, a
+// warning for one static by a choice.
+struct static_copies
+{
+    std::vector<std::string> errors;
+    std::vector<std::string> warnings;
+};
+static_copies check_static_copies(std::span<packaged const* const> packages);
 
 // The package entry of every built target package, one per target its slices belong to; tool
 // packages have none. `configuration` indexes resolution::configurations. `packaging` is told of each package

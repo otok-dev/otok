@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <fstream>
 #include <iterator>
+#include <set>
+#include <utility>
 
 #include "otok/core/fs.hpp"
 
@@ -224,6 +226,238 @@ std::vector<unsigned> coff_machines_of(fs::path const& file)
     std::ranges::sort(machines);
     machines.erase(std::unique(machines.begin(), machines.end()), machines.end());
     return machines;
+}
+
+namespace {
+
+void sort_unique(std::vector<std::string>& names)
+{
+    std::ranges::sort(names);
+    names.erase(std::unique(names.begin(), names.end()), names.end());
+}
+
+// The strings of a symbol index, NUL-terminated one after another in [at, end).
+void index_strings(std::string const& b, std::size_t at, std::size_t end, std::size_t count, std::vector<std::string>& out)
+{
+    end = std::min(end, b.size());
+    for (std::size_t i = 0; i < count && at < end; ++i) {
+        std::size_t const nul = b.find('\0', at);
+        std::size_t const to = nul == std::string::npos || nul > end ? end : nul;
+        if (to > at) out.push_back(b.substr(at, to - at));
+        at = to + 1;
+    }
+}
+
+}
+
+std::vector<std::string> archive_symbols_of(fs::path const& file)
+{
+    std::ifstream in{long_path(file), std::ios::binary};
+    std::string const bytes{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+    std::vector<std::string> out;
+    if (!bytes.starts_with("!<arch>\n")) return out;
+    for (std::size_t at = 8; at + 60 <= bytes.size();) {
+        std::uint64_t size = 0;
+        for (std::size_t i = at + 48; i < at + 58 && bytes[i] >= '0' && bytes[i] <= '9'; ++i) size = size * 10 + static_cast<std::uint64_t>(bytes[i] - '0');
+        std::size_t data = at + 60;
+        std::size_t const end = std::min<std::size_t>(data + static_cast<std::size_t>(size), bytes.size());
+        std::string name = bytes.substr(at, 16);
+        // BSD: the name after the header, its length in "#1/<length>"
+        if (name.starts_with("#1/")) {
+            std::size_t length = 0;
+            for (std::size_t i = 3; i < name.size() && name[i] >= '0' && name[i] <= '9'; ++i) length = length * 10 + static_cast<std::size_t>(name[i] - '0');
+            name = bytes.substr(data, std::min(length, end - data));
+            name = name.substr(0, name.find('\0'));
+            data += length;
+        }
+        if (name.starts_with("/ ") || name.starts_with("/SYM64/")) {
+            // GNU and COFF: a big-endian count, the members' offsets, then the names
+            bool const wide = name.starts_with("/SYM64/");
+            int const word = wide ? 8 : 4;
+            image_reader const r{bytes, false};
+            std::uint64_t const count = r.get(data, word);
+            std::uint64_t const strings = data + static_cast<std::uint64_t>(word) * (count + 1);
+            if (strings <= end) index_strings(bytes, static_cast<std::size_t>(strings), end, static_cast<std::size_t>(count), out);
+            break;  // COFF's second linker member holds the same names
+        }
+        if (name.starts_with("__.SYMDEF")) {
+            // BSD: the size of the ranlib entries, the entries (string offset, member offset), the size of the strings, the strings
+            bool const wide = name.starts_with("__.SYMDEF_64");
+            int const word = wide ? 8 : 4;
+            image_reader const r{bytes, true};
+            std::uint64_t const entries = r.get(data, word);
+            std::uint64_t const strings_size_at = data + static_cast<std::uint64_t>(word) + entries;
+            std::uint64_t const strings = strings_size_at + static_cast<std::uint64_t>(word);
+            std::uint64_t const strings_end = std::min<std::uint64_t>(strings + r.get(strings_size_at, word), end);
+            for (std::uint64_t e = data + static_cast<std::uint64_t>(word); e + 2 * static_cast<std::uint64_t>(word) <= data + static_cast<std::uint64_t>(word) + entries; e += 2 * static_cast<std::uint64_t>(word)) {
+                std::string s = r.string(strings + r.get(e, word), strings_end);
+                if (!s.empty()) out.push_back(std::move(s));
+            }
+            break;
+        }
+        at = at + 60 + static_cast<std::size_t>(size + (size & 1));
+    }
+    sort_unique(out);
+    return out;
+}
+
+namespace {
+
+std::uint64_t uleb128(std::string const& b, std::size_t& at, std::size_t end)
+{
+    std::uint64_t v = 0;
+    int shift = 0;
+    while (at < end && shift < 64) {
+        auto const byte = static_cast<unsigned char>(b[at++]);
+        v |= static_cast<std::uint64_t>(byte & 0x7f) << shift;
+        if (!(byte & 0x80)) break;
+        shift += 7;
+    }
+    return v;
+}
+
+// The export trie of a thin Mach-O image starting at `base` of `b`.
+void macho_exports(std::string const& b, std::size_t base, std::vector<std::string>& out)
+{
+    image_reader const r{b, true};
+    std::uint64_t const magic = r.get(base, 4);
+    bool const wide = magic == 0xfeedfacf;
+    if (!wide && magic != 0xfeedface) return;
+    std::uint64_t const ncmds = r.get(base + 16, 4);
+    std::uint64_t at = base + (wide ? 32 : 28);
+    std::uint64_t trie = 0, trie_size = 0;
+    for (std::uint64_t i = 0; i < ncmds && at + 8 <= b.size(); ++i) {
+        std::uint64_t const cmd = r.get(at, 4);
+        std::uint64_t const size = r.get(at + 4, 4);
+        if (size < 8) break;
+        if (cmd == 0x22 || cmd == 0x80000022) {  // LC_DYLD_INFO(_ONLY): export_off, export_size
+            trie = r.get(at + 40, 4);
+            trie_size = r.get(at + 44, 4);
+        } else if (cmd == 0x80000033) {          // LC_DYLD_EXPORTS_TRIE: dataoff, datasize
+            trie = r.get(at + 8, 4);
+            trie_size = r.get(at + 12, 4);
+        }
+        at += size;
+    }
+    if (trie_size == 0) return;
+    std::size_t const start = base + static_cast<std::size_t>(trie);
+    std::size_t const end = std::min<std::size_t>(start + static_cast<std::size_t>(trie_size), b.size());
+    std::vector<std::pair<std::size_t, std::string>> pending{{start, {}}};
+    std::set<std::size_t> visited;
+    while (!pending.empty()) {
+        auto [node, prefix] = std::move(pending.back());
+        pending.pop_back();
+        if (node >= end || !visited.insert(node).second) continue;
+        std::size_t p = node;
+        std::uint64_t const terminal = uleb128(b, p, end);
+        if (terminal > 0) {
+            std::size_t q = p;
+            std::uint64_t const flags = uleb128(b, q, end);
+            if (!(flags & 0x04)) out.push_back(prefix);  // not EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION
+        }
+        p += static_cast<std::size_t>(terminal);
+        if (p >= end) continue;
+        std::size_t const children = static_cast<unsigned char>(b[p++]);
+        for (std::size_t c = 0; c < children && p < end; ++c) {
+            std::size_t const nul = b.find('\0', p);
+            if (nul == std::string::npos || nul >= end) break;
+            std::string edge = b.substr(p, nul - p);
+            p = nul + 1;
+            std::uint64_t const child = uleb128(b, p, end);
+            pending.emplace_back(start + static_cast<std::size_t>(child), prefix + edge);
+        }
+    }
+}
+
+// The defined, global, visible dynamic symbols of an ELF image.
+void elf_exports(std::string const& b, std::vector<std::string>& out)
+{
+    bool const wide = b[4] == 2;
+    image_reader const r{b, b[5] != 2};
+    int const word = wide ? 8 : 4;
+    std::uint64_t const shoff = r.get(wide ? 0x28 : 0x20, word);
+    std::uint64_t const shentsize = r.get(wide ? 0x3a : 0x2e, 2);
+    std::uint64_t const shnum = r.get(wide ? 0x3c : 0x30, 2);
+    auto const section = [&](std::uint64_t i, std::uint64_t field64, std::uint64_t field32, int size64, int size32) {
+        return r.get(shoff + i * shentsize + (wide ? field64 : field32), wide ? size64 : size32);
+    };
+    for (std::uint64_t i = 0; i < shnum && shentsize > 0; ++i) {
+        if (section(i, 4, 4, 4, 4) != 11) continue;  // SHT_DYNSYM
+        std::uint64_t const offset = section(i, 0x18, 0x10, 8, 4);
+        std::uint64_t const size = section(i, 0x20, 0x14, 8, 4);
+        std::uint64_t const link = section(i, 0x28, 0x18, 4, 4);
+        std::uint64_t const strtab = section(link, 0x18, 0x10, 8, 4);
+        std::uint64_t const strend = strtab + section(link, 0x20, 0x14, 8, 4);
+        std::uint64_t const entry = wide ? 24 : 16;
+        for (std::uint64_t at = offset + entry; at + entry <= offset + size; at += entry) {  // the first entry is null
+            std::uint64_t const name = r.get(at, 4);
+            std::uint64_t const info = r.get(at + (wide ? 4 : 12), 1);
+            std::uint64_t const other = r.get(at + (wide ? 5 : 13), 1);
+            std::uint64_t const shndx = r.get(at + (wide ? 6 : 14), 2);
+            std::uint64_t const bind = info >> 4;
+            std::uint64_t const visibility = other & 3;
+            if (shndx == 0 || bind != 1 || (visibility != 0 && visibility != 3)) continue;  // STB_GLOBAL only: weak ones aside
+            std::string s = r.string(strtab + name, strend);
+            if (!s.empty()) out.push_back(std::move(s));
+        }
+    }
+}
+
+// The names of a PE image's export table.
+void pe_exports(std::string const& b, std::vector<std::string>& out)
+{
+    image_reader const r{b, true};
+    std::uint64_t const pe = r.get(0x3c, 4);
+    if (pe + 24 > b.size() || b.compare(static_cast<std::size_t>(pe), 4, std::string_view{"PE\0\0", 4}) != 0) return;
+    std::uint64_t const sections = r.get(pe + 6, 2);
+    std::uint64_t const optional_size = r.get(pe + 20, 2);
+    std::uint64_t const optional = pe + 24;
+    std::uint64_t const magic = r.get(optional, 2);
+    std::uint64_t const directories = optional + (magic == 0x20b ? 112 : 96);
+    std::uint64_t const export_rva = r.get(directories, 4);
+    if (export_rva == 0) return;
+    std::uint64_t const table = optional + optional_size;
+    auto const offset_of = [&](std::uint64_t rva) -> std::uint64_t {
+        for (std::uint64_t s = 0; s < sections; ++s) {
+            std::uint64_t const at = table + s * 40;
+            std::uint64_t const address = r.get(at + 12, 4);
+            std::uint64_t const length = std::max(r.get(at + 8, 4), r.get(at + 16, 4));
+            if (rva >= address && rva < address + length) return rva - address + r.get(at + 20, 4);
+        }
+        return 0;
+    };
+    std::uint64_t const dir = offset_of(export_rva);
+    if (dir == 0) return;
+    std::uint64_t const count = r.get(dir + 24, 4);
+    std::uint64_t const names = offset_of(r.get(dir + 32, 4));
+    for (std::uint64_t i = 0; i < count && names != 0; ++i) {
+        std::string s = r.string(offset_of(r.get(names + 4 * i, 4)), b.size());
+        if (!s.empty()) out.push_back(std::move(s));
+    }
+}
+
+}
+
+std::vector<std::string> exported_symbols_of(fs::path const& file)
+{
+    std::ifstream in{long_path(file), std::ios::binary};
+    std::string const bytes{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+    std::vector<std::string> out;
+    if (bytes.size() >= 0x40 && bytes.starts_with("\x7f" "ELF")) {
+        elf_exports(bytes, out);
+    } else if (bytes.starts_with("MZ")) {
+        pe_exports(bytes, out);
+    } else {
+        image_reader const big{bytes, false};
+        if (big.get(0, 4) == 0xcafebabe) {
+            // universal: the first architecture (fat_arch: cputype, cpusubtype, offset, size, align, big-endian)
+            if (big.get(4, 4) > 0) macho_exports(bytes, static_cast<std::size_t>(big.get(8 + 8, 4)), out);
+        } else {
+            macho_exports(bytes, 0, out);
+        }
+    }
+    sort_unique(out);
+    return out;
 }
 
 std::uint64_t elf_load_alignment_of(fs::path const& file)

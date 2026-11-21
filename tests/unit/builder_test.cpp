@@ -156,6 +156,7 @@ public:
         for (output_product const& o : products) {
             std::string text = p.library + "." + o.source->name + ":";
             for (library_ref const& l : o.libraries) text += " " + l.package + "/" + l.name;
+            for (library_ref const& l : o.hidden_libraries) text += " (headers of " + l.package + "/" + l.name + ")";
             t_.products.push_back(text);
         }
         if (p.bundle_data) t_.bundled.insert(p.library);
@@ -1462,7 +1463,7 @@ TEST_F(builder_test, writes_the_output)
         if (d.is_directory()) entry = d.path();
     }
     std::string const key = read_file(entry / "key.txt").value_or("?");
-    EXPECT_NE(key.find("packager = 11\n"), std::string::npos) << key;
+    EXPECT_NE(key.find("packager = 12\n"), std::string::npos) << key;
     EXPECT_NE(key.find("slice.native-" + machine_arch() + ".release = "), std::string::npos) << key;
     EXPECT_EQ(sha256_hex(key).substr(0, 32), entry.filename().string());
     std::string const state = read_file(output / ".otok-output.toml").value_or("?");
@@ -1545,6 +1546,96 @@ TEST_F(builder_test, products_hold_the_dependencies_whose_condition_holds)
     project.write("otok.toml", manifest + "[deps.a.options]\nwith-b = true\n");
     ASSERT_EQ(run({"install"}), 0) << err.str();
     EXPECT_EQ(toolchain.products, (std::vector<std::string>{"a.P: a/a b/b"}));
+}
+
+// a static library inside a dynamic one: its products hold its headers, not its code (otok-toml.md 5, docs/PLAN.md decision 136)
+TEST_F(builder_test, products_of_a_dynamic_library_hold_the_headers_of_static_ones_inside)
+{
+    for (std::string const library : {"a", "b"}) {
+        std::string text = read_file(project.path() / "recipes" / library / "recipe.toml").value_or("?");
+        text.insert(text.find("revision = 1\n") + 13, "linkage = [\"static\", \"dynamic\"]\n");
+        project.write("recipes/" + library + "/recipe.toml", text);
+    }
+    project.write("otok.toml", manifest + "[profile.dynamic.native]\nlinkage = \"dynamic\"\n[profile.dynamic]\ndeps.b = { linkage = \"static\" }\n");
+    ASSERT_EQ(run({"install", "--profile", "dynamic"}), 0) << err.str();
+    std::ranges::sort(toolchain.products);
+    EXPECT_EQ(toolchain.products, (std::vector<std::string>{"a.P: a/a (headers of b/b)", "b.P: b/b"}));
+
+    // static, it holds the code (b's package is the same, from the cache)
+    toolchain.products.clear();
+    ASSERT_EQ(run({"install"}), 0) << err.str();
+    EXPECT_EQ(toolchain.products, (std::vector<std::string>{"a.P: a/a b/b"}));
+}
+
+// the copies of a static library inside a dynamic one (otok-toml.md 5, docs/PLAN.md decision 136)
+TEST_F(builder_test, copies_of_static_libraries)
+{
+    std::string text = read_file(project.path() / "recipes" / "a" / "recipe.toml").value_or("?");
+    text.insert(text.find("revision = 1\n") + 13, "linkage = [\"static\", \"dynamic\"]\n");
+    project.write("recipes/a/recipe.toml", text);
+    std::string const copies = "the consumer gets the code of the static library 'b' twice or more, each copy with its own global state: inside 'a', "
+                               "and through the products of [deps] ('b')";
+
+    // b builds static only: the target table's dynamic falls back, and the copies are an error
+    project.write("otok.toml", manifest + "[profile.dynamic.native]\nlinkage = \"dynamic\"\n");
+    EXPECT_EQ(run({"install", "--profile", "dynamic"}), 1);
+    EXPECT_NE(out.str().find("note: b: static, its recipe builds no dynamic library for 'native'\n"), std::string::npos) << out.str();
+    for (std::string const& part : {copies, std::string{"'b' is static as the target table falls back (its recipe builds no dynamic library for 'native'), "
+                                                        "which nobody chose. Choose one: [deps.b] linkage = \"static\" takes the copies; "
+                                                        "linkage = \"static\" for 'a' in [deps.<library>] or a profile's deps.<library> puts none inside them; "
+                                                        "or leave 'b' out of [deps] if it is there only for its version or flags"}}) {
+        EXPECT_NE(err.str().find(part), std::string::npos) << part << "\n" << err.str();
+    }
+
+    // chosen: a warning
+    project.write("otok.toml", manifest + "[profile.dynamic.native]\nlinkage = \"dynamic\"\n[profile.dynamic]\ndeps.b = { linkage = \"static\" }\n");
+    ASSERT_EQ(run({"install", "--profile", "dynamic"}), 0) << err.str();
+    EXPECT_NE(err.str().find("warning: the output 'Otok': " + copies), std::string::npos) << err.str();
+
+}
+
+TEST(static_copies, counts_the_dynamic_libraries_and_the_products_of_deps)
+{
+    product pa{}, pb{}, pc{};
+    pa.name = "A";
+    pb.name = "B";
+    pc.name = "C";
+    auto const package = [](std::string const& library, std::string const& linkage, bool direct, std::vector<output_product> products,
+                             std::vector<std::string> inside = {}, std::string fallback = {}) {
+        packaged p;
+        p.library = library;
+        p.libraries = {library};
+        p.linkage = linkage;
+        p.direct = direct;
+        p.products = std::move(products);
+        p.static_inside = std::move(inside);
+        p.linkage_fallback = std::move(fallback);
+        return p;
+    };
+    // a dynamic holding b; b not in [deps]: one copy
+    packaged a = package("a", "dynamic", true, {{&pa, {{"a", "a"}}, {}, {}, {}, {{"b", "b"}}}}, {"b"});
+    packaged b = package("b", "static", false, {{&pb, {{"b", "b"}}}}, {}, "why");
+    std::vector<packaged const*> packages{&a, &b};
+    auto r = check_static_copies(packages);
+    EXPECT_TRUE(r.errors.empty() && r.warnings.empty());
+
+    // a second dynamic library holding it: two copies, without [deps]
+    packaged c = package("c", "dynamic", true, {{&pc, {{"c", "c"}}, {}, {}, {}, {{"b", "b"}}}}, {"b"});
+    packages.push_back(&c);
+    r = check_static_copies(packages);
+    ASSERT_EQ(r.errors.size(), 1u);
+    EXPECT_NE(r.errors[0].find("twice or more, each copy with its own global state: inside 'a', inside 'c'; 'b' is static as the target table falls back (why)"),
+        std::string::npos) << r.errors[0];
+    EXPECT_EQ(r.errors[0].find("leave 'b' out of [deps]"), std::string::npos) << r.errors[0];
+
+    // b in [deps] and chosen static: a warning, with a's copy and its own products
+    b.direct = true;
+    b.linkage_fallback.clear();
+    packages.pop_back();
+    r = check_static_copies(packages);
+    EXPECT_TRUE(r.errors.empty());
+    EXPECT_EQ(r.warnings, std::vector<std::string>{"the consumer gets the code of the static library 'b' twice or more, each copy with its own global state: "
+                                                   "inside 'a', and through the products of [deps] ('b')"});
 }
 
 TEST_F(builder_test, checks_license_files_after_fetching)
