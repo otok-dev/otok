@@ -5,10 +5,13 @@
 
 #include <algorithm>
 #include <set>
+#include <string_view>
+#include <utility>
 
 #include "otok/core/names.hpp"
 #include "otok/core/paths.hpp"
 #include "otok/recipe/recipe.hpp"
+#include "otok/resolver/options.hpp"
 #include "otok/target/apple/apple_target.hpp"
 
 namespace otok::target::apple {
@@ -19,6 +22,34 @@ namespace {
 bool is_wrapper_name(std::string_view s) noexcept
 {
     return is_product_name(s);
+}
+
+std::string in_quotes(std::string_view s)
+{
+    return "'" + std::string{s} + "'";
+}
+
+// The platforms a framework's `when` names (docs/PLAN.md decision 135): Apple's, and never the device of a platform
+// without its simulator or the reverse, which SwiftPM's `.when(platforms:)` names as one.
+void check_framework_platforms(toml_table& t, condition const& c, bool open_names)
+{
+    static constexpr std::pair<std::string_view, std::string_view> pairs[]{{"ios", "iossim"}, {"tvos", "tvossim"}, {"watchos", "watchossim"}, {"xros", "xrossim"}};
+    for (condition const* at = &c; at; at = at->negated.get()) {
+        if (!at->platform) continue;
+        auto const& names = *at->platform;
+        for (std::string const& p : names) {
+            if (!info().find_platform(p) && !open_names) {
+                t.error(t.position("when"), in_quotes(p) + " in 'platform' in " + t.describe("when") + " is not a platform of the target 'apple'");
+            }
+        }
+        for (auto const& [device, simulator] : pairs) {
+            bool const has_device = std::ranges::find(names, device) != names.end();
+            bool const has_simulator = std::ranges::find(names, simulator) != names.end();
+            if (has_device == has_simulator) continue;
+            t.error(t.position("when"), "'platform' in " + t.describe("when") + " names " + in_quotes(has_device ? device : simulator) + " without "
+                + in_quotes(has_device ? simulator : device) + ": SwiftPM links a framework for the device and the simulator of a platform alike");
+        }
+    }
 }
 
 }
@@ -62,8 +93,18 @@ recipe_settings const* swift_package_settings(recipe const& r)
     return s && s->swift_package ? s : nullptr;
 }
 
-std::any read_product_table(toml_table& table, recipe_file_check const& files)
+std::vector<std::string> framework_platforms(system_framework const& framework, std::map<std::string, option_data, std::less<>> const& options)
 {
+    std::vector<std::string> out;
+    for (platform_info const& p : info().platforms) {
+        if (!framework.when || condition_holds(*framework.when, options, info().name, p.name)) out.push_back(p.name);
+    }
+    return out;
+}
+
+std::any read_product_table(toml_table& table, product_table_context const& context)
+{
+    recipe_file_check const& files = context.files;
     product_settings settings;
     if (auto module = table.string("module")) {
         if (!is_product_name(*module)) {
@@ -71,8 +112,34 @@ std::any read_product_table(toml_table& table, recipe_file_check const& files)
         }
         settings.module = std::move(*module);
     }
-    if (auto frameworks = table.strings("frameworks")) {
-        settings.frameworks = std::move(*frameworks);
+    if (toml::node const* frameworks = table.node("frameworks")) {
+        std::string const shape = table.describe("frameworks") + " must be an array of strings or { framework, when } tables";
+        auto const* array = frameworks->as_array();
+        if (!array) table.error(table.position("frameworks"), shape);
+        for (std::size_t i = 0; array && i < array->size(); ++i) {
+            toml::node const& element = (*array)[i];
+            system_framework entry;
+            if (auto const* s = element.as_string()) {
+                entry.name = s->get();
+                if (entry.name.empty()) table.error(table.position_of(element), table.describe("frameworks") + " has an empty framework name");
+            } else if (auto const* t = element.as_table()) {
+                toml_table ft = table.nested(*t, "frameworks[" + std::to_string(i + 1) + "]");
+                entry.name = ft.string("framework", need::required).value_or("");
+                if (entry.name.empty() && ft.contains("framework")) ft.error(ft.position("framework"), ft.describe("framework") + " is an empty framework name");
+                if (ft.contains("when")) {
+                    entry.when = context.when(ft);
+                    if (entry.when) check_framework_platforms(ft, *entry.when, context.open_names);
+                }
+                ft.finish();
+            } else {
+                table.error(table.position_of(element), shape);
+                continue;
+            }
+            if (std::ranges::find(settings.frameworks, entry.name, &system_framework::name) != settings.frameworks.end()) {
+                table.error(table.position_of(element), "framework " + in_quotes(entry.name) + " is listed twice in " + table.describe("frameworks"));
+            }
+            settings.frameworks.push_back(std::move(entry));
+        }
     }
     if (auto wrappers = table.strings("wrappers")) {
         for (std::string const& w : *wrappers) {

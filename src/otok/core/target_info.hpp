@@ -7,6 +7,7 @@
 #include <any>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -48,6 +49,18 @@ struct target_choice
 // Lets a reader check files of the recipe directory. Without it (parsing text alone) file checks are skipped.
 using recipe_file_check = std::function<bool(std::string_view relative_path, bool directory)>;
 
+struct condition;
+
+// What a reader of a product's target table is given besides the table: the recipe's files; `when`, which reads the
+// `when` of a table nested in it as the recipe reader does (options and `platform`, recipe-toml.md 9.1), nothing after an
+// error; and whether the recipe is open (formats README 1.5), so that a name this otok does not know is no error.
+struct product_table_context
+{
+    recipe_file_check const& files;
+    std::function<std::shared_ptr<condition const>(toml_table& table)> when;
+    bool open_names = false;
+};
+
 struct target_info
 {
     std::string name;                         // "apple": the target's table in otok.toml and recipe.toml
@@ -81,7 +94,7 @@ struct target_info
     // table of a product. They report problems through the table and call finish() themselves;
     // the core keeps what they return without looking inside.
     std::function<std::any(toml_table& table, recipe_file_check const& files)> read_recipe_table;
-    std::function<std::any(toml_table& table, recipe_file_check const& files)> read_product_table;
+    std::function<std::any(toml_table& table, product_table_context const& context)> read_product_table;
     // Whether a recipe's `[<name>]` table, as read_recipe_table returned it, makes the recipe deliver its
     // patched source instead of a build (recipe-toml.md 12.1): it has no build.lua, nothing is built, and the
     // target's make_package lays out the source. Absent: the target delivers no sources.

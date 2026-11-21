@@ -658,6 +658,76 @@ TEST(recipe, checks_the_link_of_a_product)
     EXPECT_TRUE(with_link("{ frameworks = [\"Security\"] }").reports("unknown key 'frameworks' in product[1].link"));
 }
 
+// recipe-toml.md 11: system frameworks with conditions of options and the platform (docs/PLAN.md decision 135)
+TEST(recipe, reads_the_frameworks_of_a_product)
+{
+    std::string const option = "[options.sectrust]\ntype = \"bool\"\ndefault = false\ndoc = \"x\"\n";
+    auto ok = parse(head_text + source_text + platforms_text + option
+        + "[[product]]\nname = \"P\"\nlibraries = [\"p\"]\napple = { frameworks = [\"CoreFoundation\", "
+          "{ framework = \"SystemConfiguration\", when = { not = { platform = [\"watchos\", \"watchossim\"] } } }, "
+          "{ framework = \"Security\", when = { option = \"sectrust\" } }, { framework = \"CoreServices\" }] }\n");
+    ASSERT_TRUE(ok.r.has_value()) << messages(ok.diags);
+    auto const& apple = std::any_cast<target::apple::product_settings const&>(ok.r->products[0].target_settings.at("apple"));
+    ASSERT_EQ(apple.frameworks.size(), 4u);
+    EXPECT_EQ(apple.frameworks[0].name, "CoreFoundation");
+    EXPECT_EQ(apple.frameworks[0].when, nullptr);
+    EXPECT_EQ(apple.frameworks[1].name, "SystemConfiguration");
+    ASSERT_NE(apple.frameworks[1].when, nullptr);
+    ASSERT_NE(apple.frameworks[1].when->negated, nullptr);
+    EXPECT_EQ(apple.frameworks[1].when->negated->platform, (std::vector<std::string>{"watchos", "watchossim"}));
+    EXPECT_EQ(apple.frameworks[3].name, "CoreServices");
+    EXPECT_EQ(apple.frameworks[3].when, nullptr);
+
+    // the platforms each is linked on, with the options of its package
+    merged_options const off{{"sectrust", option_data{false}}}, on{{"sectrust", option_data{true}}};
+    std::vector<std::string> all;
+    for (platform_info const& p : target::apple::info().platforms) all.push_back(p.name);
+    std::vector<std::string> no_watch = all;
+    std::erase_if(no_watch, [](std::string const& p) { return p.starts_with("watchos"); });
+    EXPECT_EQ(target::apple::framework_platforms(apple.frameworks[0], off), all);
+    EXPECT_EQ(target::apple::framework_platforms(apple.frameworks[1], off), no_watch);
+    EXPECT_EQ(target::apple::framework_platforms(apple.frameworks[2], off), std::vector<std::string>{});
+    EXPECT_EQ(target::apple::framework_platforms(apple.frameworks[2], on), all);
+}
+
+TEST(recipe, checks_the_frameworks_of_a_product)
+{
+    std::string const option = "[options.sectrust]\ntype = \"bool\"\ndefault = false\ndoc = \"x\"\n";
+    auto const with = [&](std::string const& frameworks) {
+        return parse(head_text + source_text + platforms_text + option + "[[product]]\nname = \"P\"\nlibraries = [\"p\"]\napple = { frameworks = " + frameworks + " }\n");
+    };
+    EXPECT_TRUE(with("\"Security\"").reports("'frameworks' in product[1].apple must be an array of strings or { framework, when } tables"));
+    EXPECT_TRUE(with("[5]").reports("must be an array of strings or { framework, when } tables"));
+    EXPECT_TRUE(with("[\"\"]").reports("'frameworks' in product[1].apple has an empty framework name"));
+    EXPECT_TRUE(with("[\"Security\", { framework = \"Security\", when = { option = \"sectrust\" } }]")
+                    .reports("framework 'Security' is listed twice in 'frameworks' in product[1].apple"));
+    EXPECT_TRUE(with("[{ when = { option = \"sectrust\" } }]").reports("missing required key 'framework'"));
+    EXPECT_TRUE(with("[{ framework = \"\" }]").reports("'framework' in product[1].apple.frameworks[1] is an empty framework name"));
+    EXPECT_TRUE(with("[{ framework = \"Security\", extra = 1 }]").reports("unknown key 'extra'"));
+    // options and the platform only
+    EXPECT_TRUE(with("[{ framework = \"Security\", when = { os = [\"apple\"] } }]").reports("may only test options and 'platform' here"));
+    EXPECT_TRUE(with("[{ framework = \"Security\", when = { arch = [\"arm64\"] } }]").reports("may only test options and 'platform' here"));
+    EXPECT_TRUE(with("[{ framework = \"Security\", when = { host = [\"macos-arm64\"] } }]").reports("only the 'when' of a [[resource]] may test the build machine"));
+    EXPECT_TRUE(with("[{ framework = \"Security\", when = { option = \"nope\" } }]").reports("which is not an option of this recipe"));
+    EXPECT_TRUE(with("[{ framework = \"Security\", when = {} }]").reports("must test at least one of 'option', 'platform' or 'not'"));
+    EXPECT_TRUE(with("[{ framework = \"Security\", when = { platform = [\"ipados\"] } }]").reports("unknown platform 'ipados'"));
+    // never the device without its simulator: SwiftPM names them as one
+    EXPECT_TRUE(with("[{ framework = \"Security\", when = { platform = [\"ios\"] } }]")
+                    .reports("'platform' in 'when' in product[1].apple.frameworks[1] names 'ios' without 'iossim': SwiftPM links a framework for the device "
+                             "and the simulator of a platform alike"));
+    EXPECT_TRUE(with("[{ framework = \"Security\", when = { not = { platform = [\"macosx\", \"watchossim\"] } } }]").reports("names 'watchossim' without 'watchos'"));
+    EXPECT_TRUE(with("[{ framework = \"Security\", when = { platform = [\"macosx\", \"catalyst\", \"xros\", \"xrossim\"] } }]").diags.items().empty());
+
+    // a platform of another target
+    target_info const* const targets[] = {&target::apple::info(), &test::native_info()};
+    diagnostics d;
+    auto r = parse_recipe(head_text + source_text + platforms_text + "[[product]]\nname = \"P\"\nlibraries = [\"p\"]\n"
+        "apple = { frameworks = [{ framework = \"Security\", when = { platform = [\"native\", \"macosx\"] } }] }\n", "recipe.toml", targets, {}, d);
+    EXPECT_FALSE(r.has_value());
+    EXPECT_NE(messages(d).find("'native' in 'platform' in 'when' in product[1].apple.frameworks[1] is not a platform of the target 'apple'"), std::string::npos)
+        << messages(d);
+}
+
 TEST(recipe, checks_products_of_headers_only)
 {
     auto const with_product = [](std::string const& body) { return parse(head_text + source_text + platforms_text + "[[product]]\nname = \"P\"\n" + body); };

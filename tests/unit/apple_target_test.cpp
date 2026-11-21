@@ -563,6 +563,74 @@ TEST(apple_target, names_xcframeworks_after_their_recipes)
     EXPECT_TRUE(warnings.empty());
 }
 
+// System frameworks of some platforms only (docs/PLAN.md decision 135): `.when(platforms:)` in Package.swift, the slices
+// in otok-config.cmake, and the check of the SDKs.
+TEST(apple_target, links_frameworks_per_platform)
+{
+    using namespace target::apple;
+    std::vector<std::string> all;
+    for (platform_info const& p : info().platforms) all.push_back(p.name);
+    EXPECT_EQ(linked_framework("Security", {}), "");
+    EXPECT_EQ(linked_framework("Security", all), ".linkedFramework(\"Security\")");
+    EXPECT_EQ(linked_framework("SystemConfiguration", {"ios", "iossim", "macosx", "catalyst", "tvos", "tvossim", "xros", "xrossim"}),
+        ".linkedFramework(\"SystemConfiguration\", .when(platforms: [.iOS, .macOS, .macCatalyst, .tvOS, .visionOS]))");
+    EXPECT_EQ(cmake_slices_of({"macosx", "catalyst", "iossim", "watchos", "xrossim"}),
+        (std::vector<std::string>{"macos", "ios-maccatalyst", "ios-simulator", "watchos", "xros-simulator"}));
+
+    test::temp_dir dir;
+    recipe rec;
+    product curl;
+    curl.name = "Curl";
+    curl.libraries = {"curl"};
+    curl.headers = "curl";
+    condition watch, not_watch, sectrust;
+    watch.platform = std::vector<std::string>{"watchos", "watchossim"};
+    not_watch.negated = std::make_shared<condition const>(watch);
+    sectrust.option = "sectrust";
+    product_settings s;
+    s.frameworks = {{"CoreFoundation"}, {"SystemConfiguration", std::make_shared<condition const>(not_watch)},
+        {"Security", std::make_shared<condition const>(sectrust)}};
+    curl.target_settings["apple"] = s;
+    std::vector<output_package> packages(1);
+    packages[0] = {"curl", &rec, {"curl"}, {{&curl, {{"curl", "curl"}}, {}}}, {}, {}, "Packages/curl"};
+    packages[0].options = {{"sectrust", option_data{false}}};
+    auto target = make_build_target("", {});
+    std::vector<std::string> warnings;
+
+    auto ok = target->finish_output(dir.path(), packages, {}, warnings);
+    ASSERT_TRUE(ok) << ok.error().message;
+    std::string swift = read_file(dir.path() / "Package.swift").value_or("?");
+    EXPECT_NE(swift.find("            linkerSettings: [.linkedFramework(\"CoreFoundation\"), "
+                         ".linkedFramework(\"SystemConfiguration\", .when(platforms: [.iOS, .macOS, .macCatalyst, .tvOS, .visionOS]))]\n"),
+        std::string::npos) << swift;
+    std::string cmake = read_file(dir.path() / "otok-config.cmake").value_or("?");
+    EXPECT_NE(cmake.find("set_property(TARGET otok::Curl PROPERTY INTERFACE_LINK_LIBRARIES \"otok::curl_curl\" \"-framework CoreFoundation\")\n"
+                         "if(_otok_slice MATCHES \"^(ios|ios-simulator|macos|ios-maccatalyst|tvos|tvos-simulator|xros|xros-simulator)$\")\n"
+                         "  set_property(TARGET otok::Curl APPEND PROPERTY INTERFACE_LINK_LIBRARIES \"-framework SystemConfiguration\")\nendif()\n"),
+        std::string::npos) << cmake;
+
+    // the option on: Security on every platform
+    packages[0].options = {{"sectrust", option_data{true}}};
+    ok = target->finish_output(dir.path(), packages, {}, warnings);
+    ASSERT_TRUE(ok) << ok.error().message;
+    swift = read_file(dir.path() / "Package.swift").value_or("?");
+    EXPECT_NE(swift.find(".linkedFramework(\"Security\")]\n"), std::string::npos) << swift;
+    cmake = read_file(dir.path() / "otok-config.cmake").value_or("?");
+    EXPECT_NE(cmake.find("\"otok::curl_curl\" \"-framework CoreFoundation\" \"-framework Security\")\n"), std::string::npos) << cmake;
+    EXPECT_TRUE(warnings.empty());
+
+    // a framework linked on a platform whose SDK does not have it
+    auto const exists = [](std::string const& platform, std::string const& framework) { return !(platform == "watchos" && framework == "SystemConfiguration"); };
+    std::map<std::string, std::string> const deployment{{"macos", "13.0"}, {"watchos", "9.0"}};
+    EXPECT_TRUE(missing_frameworks(packages, deployment, exists).empty());
+    s.frameworks[1].when = nullptr;
+    curl.target_settings["apple"] = s;
+    EXPECT_EQ(missing_frameworks(packages, deployment, exists),
+        std::vector<std::string>{"the product 'Curl' of 'curl' links the system framework 'SystemConfiguration' on 'watchos', whose SDK does not have it: "
+                                 "a 'when' of its apple.frameworks entry leaves that platform out (recipe-toml.md 11)"});
+    EXPECT_TRUE(missing_frameworks(packages, {{"macos", "13.0"}}, exists).empty());  // no watchOS in the output
+}
+
 TEST(apple_target, declares_the_target_of_bundled_data)
 {
     // bundle-data (otok-toml.md 4, 6): data/ is a target with the data files as resources, held by the products
@@ -1092,9 +1160,12 @@ TEST(apple_target, installs_every_platform)
     EXPECT_NE(swift.find(".binaryTarget(name: \"tiny-a_tiny_a\", path: \"Packages/tiny-a/tiny-a_tiny_a.xcframework\")"), std::string::npos) << swift;
     EXPECT_NE(swift.find("        .target(\n            name: \"TinyA_otok\",\n            path: \"Packages/tiny-a/shims/TinyA\",\n"
                          "            resources: [.copy(\"PrivacyInfo.xcprivacy\")],\n"
-                         "            linkerSettings: [.linkedLibrary(\"z\"), .linkedLibrary(\"c++\"), .linkedFramework(\"CoreFoundation\")]\n        ),\n"),
+                         "            linkerSettings: [.linkedLibrary(\"z\"), .linkedLibrary(\"c++\"), .linkedFramework(\"CoreFoundation\"), "
+                         // the watchOS SDK has no SystemConfiguration (docs/PLAN.md decision 135)
+                         ".linkedFramework(\"SystemConfiguration\", .when(platforms: [.iOS, .macOS, .macCatalyst, .tvOS, .visionOS]))]\n        ),\n"),
         std::string::npos)
         << swift;
+    EXPECT_EQ(err.str().find("whose SDK does not have it"), std::string::npos) << err.str();
     EXPECT_NE(swift.find("        .target(\n            name: \"TinyASwift\",\n            dependencies: [\"tiny-a_tiny_a\", \"TinyA_otok\"],\n"
                          "            path: \"Packages/tiny-a/wrappers/TinyASwift\",\n            resources: [.process(\"Resources\")],\n"
                          "            cSettings: [.define(\"OTOK_OPTION_VALUE\", to: \"7\"), .define(\"OTOK_OPTION_FAST\")],\n"

@@ -177,6 +177,8 @@ struct output_package
     std::string linkage = "static";        // of its slices (otok-toml.md 5)
     std::vector<cmake_package_spec> cmake{};  // its CMake packages (otok-toml.md 4.12)
     std::vector<std::string> cmake_exported{};  // the targets its build exports, for the patterns of `cmake` (cmake-targets.txt)
+    // its options, merged (recipe-toml.md 8.1), for the conditions of the target's own product tables (apple.frameworks)
+    std::map<std::string, option_data, std::less<>> options{};
 };
 
 class build_target

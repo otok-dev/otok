@@ -39,4 +39,4 @@ libraries = ["tiny_a"]
 defines = ["TINY_A_EXTRA=5"]
 # a C library: ws2_32 and the C++ runtime are there for the tests of recipe-toml.md 11
 link = { libraries = ["z", { library = "ws2_32", when = { os = ["windows"] } }], runtime = "c++" }
-apple = { frameworks = ["CoreFoundation"], wrappers = ["TinyASwift"], privacy-manifest = "PrivacyInfo.xcprivacy" }
+apple = { frameworks = ["CoreFoundation", { framework = "SystemConfiguration", when = { not = { platform = ["watchos", "watchossim"] } } }], wrappers = ["TinyASwift"], privacy-manifest = "PrivacyInfo.xcprivacy" }

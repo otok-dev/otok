@@ -430,7 +430,7 @@ the runtime (`metadata.md`), and a consumer linking with a C++ driver gets its o
 | Key | Type | Meaning |
 |---|---|---|
 | `module` | module name | Clang module name for the headers (`COpenSSL`). Default: the product name. |
-| `frameworks` | array of strings | System frameworks consumers link (`Security`). |
+| `frameworks` | array of strings or `{ framework, when }` | System frameworks consumers link (`Security`). `when` takes `option` and `platform` conditions (9.1): `{ framework = "SystemConfiguration", when = { not = { platform = ["watchos", "watchossim"] } } }`, a framework the watchOS SDK does not have. A condition cannot tell the device and the simulator of a platform apart (`ios` and `iossim`, `tvos` and `tvossim`, `watchos` and `watchossim`, `xros` and `xrossim`): SwiftPM's `.when(platforms:)` names them as one. A framework whose `when` holds on a platform of the output and is missing from that SDK is a problem of the output (`otok-toml.md` 4.4): `install` warns of it, `otok publish` refuses the recipe. |
 | `wrappers` | array of directory names in `wrappers/` | SPM source targets compiled in the consumer's build. |
 | `privacy-manifest` | path in the recipe directory, or `"none"` | `PrivacyInfo.xcprivacy` packaged as a resource. `"none"` states that the product neither tracks nor collects data: otok writes that manifest, which declares no required-reason API (the check of `otok-toml.md` 4.4 still applies). Optional for local and git recipes; `otok publish` requires every product to carry one, its own or that of a product it `depends` on, whose shim it holds (`otok-toml.md` 4). |
 
@@ -789,7 +789,8 @@ Before resolution: syntax, unknown keys, types; `api` known; names; version and 
 `revision ≥ 1`; `linkage` non-empty without repeats; one `[source]` form; hashes and SHAs well-formed; option schemas and their defaults;
 `additive` only on `bool`/`list`; no `default` for `file`; `when` refers to existing options of the right type, and tests only options
 on `[tool-deps]`, product `when` and `defines`, only options and `os` on `[toolchains]` (`os` not with `default-recipe`) and
-`link.libraries`, only options and `host` on `[[resource]]`, `host` nowhere else; `link.libraries` names no C++ standard library
+`link.libraries`, only options and `platform` on `apple.frameworks`, naming Apple platforms and never the device of a
+platform without its simulator or the other way round, only options and `host` on `[[resource]]`, `host` nowhere else; `link.libraries` names no C++ standard library
 (`runtime = "c++"` instead, 11); `requires-options` and `[[publish.check]]` set no `file` option; `[vars]` cover
 every supported slice with one type per variable; `build-on` non-empty, without repeats, environments of the targets of
 `supported` and each such target with one, `*` only for `ndk`; `variant` given when `supported` spans several targets;

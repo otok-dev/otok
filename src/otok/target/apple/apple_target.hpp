@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -138,6 +140,8 @@ struct cmake_product
     std::vector<std::string> link;           // "-lz", "-framework CoreFoundation"
     std::vector<std::string> defines;        // `NAME` or `NAME=value`
     bool cxx_runtime = false;                // libc++ (`link.runtime`), for a consumer not linking with a C++ driver
+    // what is linked on some platforms only: "-framework SystemConfiguration" → the slices ("macos", "ios-simulator") (docs/PLAN.md decision 135)
+    std::vector<std::pair<std::string, std::vector<std::string>>> slice_link{};
 };
 
 // otok-config.cmake of the output (otok-toml.md 4, docs/PLAN.md decision 92).
@@ -155,6 +159,19 @@ struct cmake_package
 };
 
 std::string cmake_config(cmake_package const& package);
+
+// The setting of Package.swift linking a system framework on the platforms of otok given (docs/PLAN.md decision 135):
+// `.linkedFramework("X")` on all of them, `.linkedFramework("X", .when(platforms: [.macOS]))` on some, empty on none.
+std::string linked_framework(std::string const& name, std::vector<std::string> const& platforms);
+
+// The platforms of otok as otok-config.cmake names them in `_otok_slice`: "macosx" is "macos", "iossim" "ios-simulator",
+// "catalyst" "ios-maccatalyst".
+std::vector<std::string> cmake_slices_of(std::vector<std::string> const& platforms);
+
+// The frameworks of the products of `packages` linked on a platform whose SDK does not have them (docs/PLAN.md decision 135):
+// for each family of `deployment` ("ios", "catalyst"), `exists(platform, framework)` with its device platform.
+std::vector<std::string> missing_frameworks(std::span<output_package const> packages, std::map<std::string, std::string> const& deployment,
+    std::function<bool(std::string const& platform, std::string const& framework)> const& exists);
 
 // The platform of an XCFramework's library identifier as the file checks it: "ios-arm64_x86_64-simulator" is
 // "ios-simulator", "macos-arm64" "macos"; nothing when it is not one.

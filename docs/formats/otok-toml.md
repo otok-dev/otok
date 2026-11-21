@@ -149,7 +149,10 @@ The output is one SwiftPM package: `<output>/Package.swift` and, per library,
   otherwise packaging fails.
 - A product with `link.libraries` whose `when` holds, `link.runtime`, `apple.frameworks` or `apple.privacy-manifest` gets
   a C source target `<product>_otok` (`Packages/<library>/shims/<product>/`): its `linkerSettings`
-  (`.linkedLibrary`, `.linkedFramework`; `.linkedLibrary("c++")` for `runtime = "c++"`) reach the link of the app, and the privacy manifest, copied as
+  (`.linkedLibrary`, `.linkedFramework`; `.linkedLibrary("c++")` for `runtime = "c++"`) reach the link of the app; a
+  framework whose `when` holds on some platforms only is `.linkedFramework("<name>", .when(platforms: [...]))` with
+  those platforms (`.iOS` for `ios` and `iossim`, `.macOS` for `macosx`, `.macCatalyst` for `catalyst`), one whose
+  `when` holds on none is left out. The privacy manifest, copied as
   `PrivacyInfo.xcprivacy`, is its resource. A product holds the shims of every product whose libraries it
   holds (its own, those of the products it depends on and of its dependencies), so their link settings
   and manifests come along.
@@ -209,7 +212,8 @@ target_link_libraries(app PRIVATE otok::OpenSSL)
   frameworks in its `BUILD_RPATH`, so a program runs from the build tree.
 - Each product whose `when` holds is an interface target `otok::<product>` holding what its SwiftPM product
   holds: the targets of its libraries; the link settings of the products whose libraries it holds and of the
-  products of headers only it holds (`-l<name>` for `link.libraries`, `-framework <name>` for `apple.frameworks`, and for `link.runtime`
+  products of headers only it holds (`-l<name>` for `link.libraries`, `-framework <name>` for `apple.frameworks`, behind
+  `if(_otok_slice MATCHES …)` of the platforms where its `when` holds when that is not all of them, and for `link.runtime`
   `-lc++` behind `$<$<NOT:$<LINK_LANGUAGE:CXX,OBJCXX>>:…>`, since a C++ driver links libc++ itself);
   the `include/` of those products of headers only; and, as `INTERFACE_COMPILE_DEFINITIONS`, the `defines` of
   itself, of the products whose modules its libraries carry and of the products of headers only it holds: what

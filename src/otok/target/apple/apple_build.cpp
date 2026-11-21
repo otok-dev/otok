@@ -301,9 +301,10 @@ void mixed_linkage(std::span<output_package const> packages, std::vector<std::st
     }
 }
 
-void add_unique(std::vector<std::string>& to, std::vector<std::string> const& items)
+template <class T>
+void add_unique(std::vector<T>& to, std::vector<T> const& items)
 {
-    for (std::string const& i : items) {
+    for (T const& i : items) {
         if (std::ranges::find(to, i) == to.end()) to.push_back(i);
     }
 }
@@ -314,7 +315,10 @@ result<detail::cmake_package> cmake_package_of(fs::path const& dir, std::span<ou
     detail::cmake_package c;
     std::map<library_ref, std::vector<std::string>> link_of;        // library → the link settings of the products holding it
     std::map<library_ref, std::vector<std::string>> defines_of;     // library carrying a module → the defines of its product
+    using slice_links = std::vector<std::pair<std::string, std::vector<std::string>>>;  // link settings of some slices only
+    std::map<library_ref, slice_links> slice_link_of;              // library → those of the products holding it
     std::map<library_ref, std::vector<std::string>> header_link;    // { package, product of headers only } → its link settings
+    std::map<library_ref, slice_links> header_slice_link;          // { package, product of headers only } → its own
     std::map<library_ref, std::vector<std::string>> header_defines; // and its defines
     std::set<library_ref> cxx_of;                                   // the libraries of products needing the C++ runtime
     std::set<library_ref> header_cxx;                               // the products of headers only needing it
@@ -369,13 +373,20 @@ result<detail::cmake_package> cmake_package_of(fs::path const& dir, std::span<ou
             std::vector<std::string> link;
             // libc++ of `link.runtime` apart: only a consumer not linking with a C++ driver needs it (docs/PLAN.md decision 125)
             for (std::string const& l : o.link) link.push_back("-l" + l);
-            for (std::string const& f : s ? s->frameworks : std::vector<std::string>{}) link.push_back("-framework " + f);
+            slice_links some;  // frameworks of some platforms only (docs/PLAN.md decision 135)
+            for (system_framework const& f : s ? s->frameworks : std::vector<system_framework>{}) {
+                auto const on = framework_platforms(f, p.options);
+                if (on.size() == info().platforms.size()) link.push_back("-framework " + f.name);
+                else if (!on.empty()) some.emplace_back("-framework " + f.name, detail::cmake_slices_of(on));
+            }
             for (std::string const& l : prod.libraries) add_unique(link_of[{p.library, l}], link);
+            for (std::string const& l : prod.libraries) add_unique(slice_link_of[{p.library, l}], some);
             bool const cxx = prod.runtime == "c++";
             if (cxx) for (std::string const& l : prod.libraries) cxx_of.insert({p.library, l});
             if (cxx && prod.headers_only()) header_cxx.insert({p.library, prod.name});
             if (prod.headers_only()) {
                 header_link[{p.library, prod.name}] = link;
+                header_slice_link[{p.library, prod.name}] = some;
                 header_defines[{p.library, prod.name}] = o.defines;
             }
             if (!prod.headers.empty()) defines_of.emplace(library_ref{p.library, prod.headers}, o.defines);  // the module's, as packaging chose it
@@ -407,6 +418,7 @@ result<detail::cmake_package> cmake_package_of(fs::path const& dir, std::span<ou
                 cp.libraries.push_back(name);
                 if (with_headers.contains(name)) cp.libraries.push_back(name + "_headers");
                 if (auto it = link_of.find(l); it != link_of.end()) add_unique(cp.link, it->second);
+                if (auto it = slice_link_of.find(l); it != slice_link_of.end()) add_unique(cp.slice_link, it->second);
                 if (cxx_of.contains(l)) cp.cxx_runtime = true;
                 if (auto it = defines_of.find(l); it != defines_of.end()) add_unique(cp.defines, it->second);
             }
@@ -415,6 +427,7 @@ result<detail::cmake_package> cmake_package_of(fs::path const& dir, std::span<ou
                 if (d == package_dirs.end()) continue;
                 cp.include_dirs.push_back(slashed(d->second / "shims" / path_from_utf8(h.name) / "include"));
                 if (auto it = header_link.find(h); it != header_link.end()) add_unique(cp.link, it->second);
+                if (auto it = header_slice_link.find(h); it != header_slice_link.end()) add_unique(cp.slice_link, it->second);
                 if (header_cxx.contains(h)) cp.cxx_runtime = true;
                 if (auto it = header_defines.find(h); it != header_defines.end()) add_unique(cp.defines, it->second);
             }
@@ -1172,7 +1185,10 @@ public:
                 shim.path = slashed(p.dir / "shims" / path_from_utf8(prod.name));
                 for (std::string const& l : system_libraries(o)) shim.linker_settings.push_back(".linkedLibrary(" + swift_string(l) + ")");
                 if (s) {
-                    for (std::string const& f : s->frameworks) shim.linker_settings.push_back(".linkedFramework(" + swift_string(f) + ")");
+                    for (system_framework const& f : s->frameworks) {
+                        std::string const setting = detail::linked_framework(f.name, framework_platforms(f, p.options));
+                        if (!setting.empty()) shim.linker_settings.push_back(setting);
+                    }
                     if (manifest_in_shim(prod, p.linkage == "dynamic")) shim.resources.push_back(".copy(\"PrivacyInfo.xcprivacy\")");
                 }
                 for (std::string const& l : prod.libraries) shims_of[{p.library, l}].push_back(shim.name);
@@ -1270,10 +1286,36 @@ public:
         std::vector<std::string> problems;
         for (output_package const& p : packages) check_required_reasons(dir, p, problems);
         check_private_libraries(dir, packages, deployment, problems, warnings);
+        check_frameworks(packages, deployment, problems);
         return problems;
     }
 
 private:
+    // The system frameworks the products link on a platform whose SDK does not have them (docs/PLAN.md decision 135); Mac
+    // Catalyst's are in the macOS SDK and its iOSSupport.
+    void check_frameworks(std::span<output_package const> packages, std::map<std::string, std::string> const& deployment,
+        std::vector<std::string>& problems) const
+    {
+        auto x = xcode();
+        if (!x) return;
+        auto const exists = [&](std::string const& platform, std::string const& framework) {
+            slice_spec spec;
+            spec.platform = platform;
+            spec.arch = info().find_platform(platform)->architectures.front();
+            auto const names = detail::names_of(spec);
+            if (!names) return true;
+            auto sdk = sdk_of(names->sdk, **x);
+            if (!sdk) return true;  // not this check's to report
+            std::error_code ec;
+            fs::path const root{path_from_utf8(sdk->path)};
+            fs::path const name = path_from_utf8(framework + ".framework");
+            return fs::is_directory(root / "System/Library/Frameworks" / name, ec)
+                || (platform == "catalyst" && fs::is_directory(root / "System/iOSSupport/System/Library/Frameworks" / name, ec));
+        };
+        auto found = detail::missing_frameworks(packages, deployment, exists);
+        problems.insert(problems.end(), found.begin(), found.end());
+    }
+
     // The framework of a dynamic library for one platform (otok-toml.md 4.10), whose binary is in `contents` already:
     // Info.plist, the privacy manifest, the links of a versioned one, the signature.
     static result<void> make_framework(fs::path const& framework, fs::path const& contents, std::string const& name, detail::framework_plist const& plist,
@@ -1746,6 +1788,60 @@ std::string cmake_list(std::vector<std::string> const& items, std::string (*quot
 
 }
 
+std::string detail::linked_framework(std::string const& name, std::vector<std::string> const& on)
+{
+    if (on.empty()) return {};
+    std::string const setting = ".linkedFramework(" + swift_string(name);
+    if (on.size() == info().platforms.size()) return setting + ")";
+    // SwiftPM names the device and the simulator of a platform as one, which the recipe reader holds conditions to
+    static std::map<std::string, std::string, std::less<>> const swift{{"ios", ".iOS"}, {"iossim", ".iOS"}, {"macosx", ".macOS"},
+        {"catalyst", ".macCatalyst"}, {"tvos", ".tvOS"}, {"tvossim", ".tvOS"}, {"watchos", ".watchOS"}, {"watchossim", ".watchOS"},
+        {"xros", ".visionOS"}, {"xrossim", ".visionOS"}};
+    std::vector<std::string> names;
+    for (std::string const& p : on) {
+        auto const it = swift.find(p);
+        if (it != swift.end() && std::ranges::find(names, it->second) == names.end()) names.push_back(it->second);
+    }
+    std::string list;
+    for (std::string const& n : names) list += (list.empty() ? "" : ", ") + n;
+    return setting + ", .when(platforms: [" + list + "]))";
+}
+
+std::vector<std::string> detail::cmake_slices_of(std::vector<std::string> const& on)
+{
+    std::vector<std::string> out;
+    for (std::string const& p : on) {
+        if (p == "macosx") out.emplace_back("macos");
+        else if (p == "catalyst") out.emplace_back("ios-maccatalyst");
+        else if (p.ends_with("sim")) out.push_back(p.substr(0, p.size() - 3) + "-simulator");
+        else out.push_back(p);
+    }
+    return out;
+}
+
+std::vector<std::string> detail::missing_frameworks(std::span<output_package const> packages, std::map<std::string, std::string> const& deployment,
+    std::function<bool(std::string const& platform, std::string const& framework)> const& exists)
+{
+    std::vector<std::string> problems;
+    for (auto [family, platform] : {std::pair{"ios", "ios"}, std::pair{"macos", "macosx"}, std::pair{"catalyst", "catalyst"},
+             std::pair{"tvos", "tvos"}, std::pair{"watchos", "watchos"}, std::pair{"visionos", "xros"}}) {
+        if (!deployment.contains(family)) continue;
+        for (output_package const& p : packages) {
+            if (swift_package_settings(*p.rec)) continue;
+            for (output_product const& o : p.products) {
+                product_settings const* s = settings_of(*o.source);
+                for (system_framework const& f : s ? s->frameworks : std::vector<system_framework>{}) {
+                    auto const on = framework_platforms(f, p.options);
+                    if (std::ranges::find(on, platform) == on.end() || exists(platform, f.name)) continue;
+                    problems.push_back("the product '" + o.source->name + "' of '" + p.library + "' links the system framework '" + f.name + "' on '" + platform
+                        + "', whose SDK does not have it: a 'when' of its apple.frameworks entry leaves that platform out (recipe-toml.md 11)");
+                }
+            }
+        }
+    }
+    return problems;
+}
+
 std::optional<std::string> detail::cmake_slice_of(std::string_view identifier)
 {
     auto const first = identifier.find('-');
@@ -1810,6 +1906,13 @@ std::string detail::cmake_config(cmake_package const& p)
         // libc++ for a consumer linking with another driver than the C++ one, which links it itself (docs/PLAN.md decision 125)
         if (prod.cxx_runtime) items += " \"$<$<NOT:$<LINK_LANGUAGE:CXX,OBJCXX>>:-lc++>\"";
         if (!items.empty()) text += "set_property(TARGET " + target + " PROPERTY INTERFACE_LINK_LIBRARIES" + items + ")\n";
+        // what some platforms only link (docs/PLAN.md decision 135)
+        for (auto const& [item, slices] : prod.slice_link) {
+            std::string alternatives;
+            for (std::string const& s : slices) alternatives += (alternatives.empty() ? "" : "|") + s;
+            text += "if(_otok_slice MATCHES \"^(" + alternatives + ")$\")\n  set_property(TARGET " + target + " APPEND PROPERTY INTERFACE_LINK_LIBRARIES "
+                + cmake_string(item) + ")\nendif()\n";
+        }
         if (!prod.include_dirs.empty()) text += "set_property(TARGET " + target + " PROPERTY INTERFACE_INCLUDE_DIRECTORIES" + cmake_list(prod.include_dirs, cmake_path) + ")\n";
         if (!prod.defines.empty()) text += "set_property(TARGET " + target + " PROPERTY INTERFACE_COMPILE_DEFINITIONS" + cmake_list(prod.defines, cmake_string) + ")\n";
     }
