@@ -298,6 +298,9 @@ format = 1
 zlib = "3f5c…"   # 64 hex digits
 ```
 
+A library inside dynamic libraries alone (5), copied with its headers only, has ` headers` after its key: when that changes,
+it is copied again.
+
 A library whose package key has not changed is not copied again, so the consumer's build sees the same
 files with the same times. The files otok writes beside the libraries on every run (`Acknowledgements.md`,
 `Package.swift`, `otok-config.cmake`, `otok-provider.cmake` and `cmake.d/` (4.12), `otok.props`, …) are written only when their contents change, for the same
@@ -700,7 +703,8 @@ cmake -S . -B build -DCMAKE_PROJECT_TOP_LEVEL_INCLUDES=Otok/otok-provider.cmake
 
 Its own toolchain file (the NDK's, an iOS one) stays as it is.
 
-**The packages.** For each `[cmake.<package>]` of a library of the output, otok writes an ordinary config package in
+**The packages.** For each `[cmake.<package>]` of a library of the output, but those that do not exist for the consumer
+(inside dynamic libraries alone, 5), otok writes an ordinary config package in
 `<output>/cmake.d/<package>/` (`cmake.d`, since a library's directory may be named `cmake` on the targets of 4.11):
 
 - `<package>Config.cmake` includes `<output>/otok-config.cmake` (once, as `find_package(Otok)` does) and defines each
@@ -756,6 +760,8 @@ project after its first `project()`, in subdirectories, functions and FetchConte
   project calling `find_package(Otok …)` as in 4 and 4.11 keeps working beside the provider.
 - A name that is, without regard to case, a library of the output whose recipe gives no such package is warned of once
   (otok builds the library, CMake may find another one on the machine), naming `cmake` in `[deps.<library>]` (6).
+- The name or a package name of a library inside dynamic libraries alone (5) is left to CMake's own search too, warned
+  of once: the library is not the project's, `[deps]` makes it so.
 
 Without the provider, `<output>/cmake.d/<package>` as `<package>_DIR` finds the same package for a call in config mode
 (`CONFIG`, or `CMAKE_FIND_PACKAGE_PREFER_CONFIG` on), but not for one asking for `MODULE`, and CMake's own search after
@@ -793,7 +799,22 @@ A dynamic library holds a copy of every static library it links: its static depe
 ones, up to the next dynamic one. Its products hold their headers but not their code (4, 4.10, 4.11): the dynamic
 library's own headers may include theirs, the code is inside the dynamic library, where their symbols are hidden (5.2).
 A consumer calling one of them itself names it in `[deps]`; without that its calls stay undefined when it links, not
-resolved to a second copy. Each
+resolved to a second copy.
+
+A static library whose code reaches the consumer only inside dynamic libraries does not exist for the consumer: not in
+`[deps]`, and held with its code by no product of a library that does (one in `[deps]`, a dynamic one, or one such a
+product holds). Its directory in the output keeps its headers, which the products of the dynamic libraries holding it
+point to, and its licenses (4.2), its code being in the product; it has no libraries (4.1, 4.7, 4.8: no `lib/`, `bin/`
+or `debug/`; on Apple no XCFramework of its archive, only `<library>_<output name>_headers.xcframework`, 4.10), no
+products, no `otok::` targets (4.11), nothing in `Package.swift` but the binary targets of its headers, and no CMake
+package in `cmake.d/` (4.12), so that `find_package` of its names finds nothing of the output. A consumer needing it for
+itself names it in `[deps]`: the graph has one version and one linkage of a library, so it gets the version the dynamic
+library was built with, and the copy inside that library is then counted below unless `[deps.<library>] linkage =
+"dynamic"` makes it one library for both. Tool dependencies are apart: the zlib inside a tool is never the consumer's.
+Whether a library exists for the consumer depends on the project, not on the package: its package entry (`cache-key.md`
+4) is the same, and otok leaves out of the output what the consumer must not see (the state file records it, 4.2).
+
+Each
 place the code of a static library reaches the consumer is a copy: every dynamic library holding one, and the products
 of the project's `[deps]` that hold the static library otherwise (its own products when it is in `[deps]` itself). With
 two copies or more, one of them inside a dynamic library, the consumer has the code and the global state of the library

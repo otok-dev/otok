@@ -334,9 +334,18 @@ result<detail::cmake_package> cmake_package_of(fs::path const& dir, std::span<ou
         for (std::string const& library : p.libraries) {
             std::string const name = framework_name(p.library, library);
             fs::path const framework = p.dir / (name + ".xcframework");
+            std::error_code ec;
+            // inside dynamic libraries alone: the target of its headers for their products, no archive (otok-toml.md 5)
+            if (p.hidden) {
+                if (fs::path const headers = p.dir / (name + "_headers.xcframework"); fs::is_directory(dir / headers, ec)) {
+                    c.libraries.emplace_back(name + "_headers", slashed(headers));
+                    library_targets.insert(name + "_headers");
+                    with_headers.insert(name);
+                }
+                continue;
+            }
             c.libraries.emplace_back(name, slashed(framework));
             library_targets.insert(name);
-            std::error_code ec;
             if (dynamic) {
                 // frameworks (otok-toml.md 4.10)
                 c.shared.insert(name);
@@ -402,7 +411,7 @@ result<detail::cmake_package> cmake_package_of(fs::path const& dir, std::span<ou
     }
     if (slices) c.slices.assign(slices->begin(), slices->end());
     for (output_package const& p : packages) {
-        if (swift_package_settings(*p.rec)) continue;
+        if (swift_package_settings(*p.rec) || p.hidden) continue;
         for (output_product const& o : p.products) {
             product const& prod = *o.source;
             if (library_targets.contains(prod.name)) {
@@ -785,6 +794,14 @@ public:
         return flags;
     }
 
+    // inside dynamic libraries alone: the XCFrameworks of its archives, its `_headers` ones kept (otok-toml.md 5, 4.10)
+    std::vector<fs::path> hidden_package_removals(std::string const& library, std::span<std::string const> libraries) const override
+    {
+        std::vector<fs::path> out{"cmake-targets.txt"};
+        for (std::string const& name : libraries) out.push_back(path_from_utf8(framework_name(library, name) + ".xcframework"));
+        return out;
+    }
+
     // One XCFramework per library output name (otok-toml.md 4)
     result<void> make_package(built_package const& package, recipe const& rec, std::span<output_product const> products,
         fs::path const& staging) override
@@ -1075,9 +1092,13 @@ public:
                     return fail("the libraries '" + it->second + "' and '" + p.library + "' both have an XCFramework named '" + name + "'");
                 }
                 fs::path const framework = p.dir / (name + ".xcframework");
-                swift.binary_targets.emplace_back(name, slashed(framework));
+                // inside dynamic libraries alone: no XCFramework of its archive (otok-toml.md 5)
+                std::vector<fs::path> carrying;
+                if (!p.hidden) {
+                    swift.binary_targets.emplace_back(name, slashed(framework));
+                    carrying.push_back(framework);
+                }
                 // the headers of a library: an XCFramework of their own (otok-toml.md 4.10)
-                std::vector<fs::path> carrying{framework};
                 std::error_code ec;
                 if (fs::path const headers = p.dir / (name + "_headers.xcframework"); fs::is_directory(dir / headers, ec)) {
                     if (auto [it, fresh] = owners.emplace("library " + name + "_headers", p.library); !fresh) {
@@ -1145,7 +1166,7 @@ public:
         // symbols meet in one image between static libraries only (otok-toml.md 4.5, 4.10)
         std::vector<output_package> statics;
         for (output_package const& p : packages) {
-            if (p.linkage != "dynamic") statics.push_back(p);
+            if (p.linkage != "dynamic" && !p.hidden) statics.push_back(p);  // a hidden one's code is in a dynamic library
         }
         if (auto ok = check_symbol_overlaps(dir, statics); !ok) return ok;
         // the source targets: a name is a binary target's, a shim's or a wrapper's (shared by the products
@@ -1177,6 +1198,8 @@ public:
             if (source) swift.package_paths.push_back(slashed(p.dir / path_from_utf8(p.library)));
             for (output_product const& o : p.products) {
                 product const& prod = *o.source;
+                // inside dynamic libraries alone: no products, but the shims of products of headers only theirs hold
+                if (p.hidden && !prod.headers_only()) continue;
                 if (auto [it, fresh] = owners.emplace("product " + prod.name, p.library); !fresh) {
                     return fail("the libraries '" + it->second + "' and '" + p.library + "' both have a product named '" + prod.name + "'");
                 }
@@ -1221,6 +1244,7 @@ public:
             }
         }
         for (output_package const& p : packages) {
+            if (p.hidden) continue;
             for (output_product const& o : p.products) {
                 product const& prod = *o.source;
                 if (swift_package_settings(*p.rec)) {

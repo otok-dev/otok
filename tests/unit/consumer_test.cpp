@@ -515,6 +515,22 @@ TEST(cmake_packages, write_the_provider_without_packages)
     EXPECT_NE(file_of(*files, "otok-provider.cmake").find("_otok_provider_library_plain"), std::string::npos);
 }
 
+// docs/PLAN.md decision 137: a library inside dynamic libraries alone gives no package, and the provider warns of its names
+TEST(cmake_packages, give_none_of_a_library_inside_dynamic_ones_alone)
+{
+    cmake_library zlib{"zlib", "1.3.2", {"z"}, {"z"}, {{"ZLIB", {{"ZLIB::ZLIB", {"z"}}}, {}, {}}}};
+    zlib.package.hidden = true;
+    std::vector<output_package> const packages{zlib.package};
+    auto files = cmake_package_files(packages);
+    ASSERT_TRUE(files) << files.error().message;
+    ASSERT_EQ(files->size(), 1u);
+    std::string const provider = file_of(*files, "otok-provider.cmake");
+    EXPECT_EQ(provider.find("_otok_provider_library_zlib"), std::string::npos) << provider;
+    EXPECT_EQ(provider.find("_otok_provider_package_zlib"), std::string::npos) << provider;
+    EXPECT_NE(provider.find("set_property(GLOBAL PROPERTY _otok_provider_hidden_zlib \"zlib\")\n"), std::string::npos) << provider;
+    EXPECT_NE(provider.find("is inside its dynamic libraries alone, not given to this"), std::string::npos) << provider;
+}
+
 TEST(cmake_packages, refuse_one_package_in_two_libraries)
 {
     cmake_library a{"openssl", "4.1.0", {"ssl"}, {"ssl"}, {{"OpenSSL", {{"OpenSSL::SSL", {"ssl"}}}, {}, {}}}};

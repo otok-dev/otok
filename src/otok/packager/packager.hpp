@@ -8,6 +8,7 @@
 #include <functional>
 #include <map>
 #include <ostream>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -58,6 +59,10 @@ struct static_copies
     std::vector<std::string> warnings;
 };
 static_copies check_static_copies(std::span<packaged const* const> packages);
+
+// The static libraries of an output that do not exist for its consumer (otok-toml.md 5, docs/PLAN.md decision 137): not in
+// [deps], their code held by no product of a library that exists (one of [deps], a dynamic one, or one their products hold).
+std::set<std::string> hidden_packages(std::span<packaged const* const> packages);
 
 // The package entry of every built target package, one per target its slices belong to; tool
 // packages have none. `configuration` indexes resolution::configurations. `packaging` is told of each package

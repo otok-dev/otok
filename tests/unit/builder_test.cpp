@@ -1614,7 +1614,7 @@ TEST(static_copies, counts_the_dynamic_libraries_and_the_products_of_deps)
     };
     // a dynamic holding b; b not in [deps]: one copy
     packaged a = package("a", "dynamic", true, {{&pa, {{"a", "a"}}, {}, {}, {}, {{"b", "b"}}}}, {"b"});
-    packaged b = package("b", "static", false, {{&pb, {{"b", "b"}}}}, {}, "why");
+    packaged b = package("b", "static", false, {{&pb, {{"b", "b"}}, {}, {}, {}, {}}}, {}, "why");
     std::vector<packaged const*> packages{&a, &b};
     auto r = check_static_copies(packages);
     EXPECT_TRUE(r.errors.empty() && r.warnings.empty());
@@ -1636,6 +1636,47 @@ TEST(static_copies, counts_the_dynamic_libraries_and_the_products_of_deps)
     EXPECT_TRUE(r.errors.empty());
     EXPECT_EQ(r.warnings, std::vector<std::string>{"the consumer gets the code of the static library 'b' twice or more, each copy with its own global state: "
                                                    "inside 'a', and through the products of [deps] ('b')"});
+}
+
+// docs/PLAN.md decision 137: a static library inside dynamic ones alone does not exist for the consumer
+TEST(static_copies, hidden_packages_are_inside_dynamic_libraries_alone)
+{
+    product pa{}, pb{}, pc{}, ps{};
+    pa.name = "A";
+    pb.name = "B";
+    pc.name = "C";
+    ps.name = "S";
+    auto const package = [](std::string const& library, std::string const& linkage, bool direct, std::vector<output_product> products,
+                             std::vector<std::string> inside = {}) {
+        packaged p;
+        p.library = library;
+        p.libraries = {library};
+        p.linkage = linkage;
+        p.direct = direct;
+        p.products = std::move(products);
+        p.static_inside = std::move(inside);
+        return p;
+    };
+    // a dynamic in [deps] with b static inside, c static inside b's path too
+    packaged a = package("a", "dynamic", true, {{&pa, {{"a", "a"}}, {}, {}, {}, {{"b", "b"}, {"c", "c"}}}}, {"b", "c"});
+    packaged b = package("b", "static", false, {{&pb, {{"b", "b"}, {"c", "c"}}, {}, {}, {}, {}}});
+    packaged c = package("c", "static", false, {{&pc, {{"c", "c"}}, {}, {}, {}, {}}});
+    std::vector<packaged const*> packages{&a, &b, &c};
+    EXPECT_EQ(hidden_packages(packages), (std::set<std::string>{"b", "c"}));
+
+    // b in [deps]: it exists, and so does c, whose code b's products hold
+    b.direct = true;
+    EXPECT_TRUE(hidden_packages(packages).empty());
+
+    // a static library of [deps] holding c's code: c exists, b alone is inside a
+    b.direct = false;
+    packaged s = package("s", "static", true, {{&ps, {{"s", "s"}, {"c", "c"}}, {}, {}, {}, {}}});
+    packages.push_back(&s);
+    EXPECT_EQ(hidden_packages(packages), (std::set<std::string>{"b"}));
+
+    // a library of headers only is never hidden
+    b.libraries.clear();
+    EXPECT_TRUE(hidden_packages(packages).empty());
 }
 
 TEST_F(builder_test, checks_license_files_after_fetching)

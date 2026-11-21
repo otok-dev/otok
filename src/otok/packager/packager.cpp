@@ -37,6 +37,8 @@ std::string in_quotes(std::string_view s)
 }
 
 constexpr int output_state_format = 1;
+// after the key of a library copied with its headers only (otok-toml.md 4.2, 5)
+constexpr std::string_view hidden_state_suffix = " headers";
 
 std::string slashed(fs::path const& p)
 {
@@ -389,6 +391,9 @@ result<std::map<std::string, std::string>> read_output_state(fs::path const& dir
     if (!fs::exists(long_path(file), ec)) return output_state{};
     auto state = read_state(file);
     if (!state) return fail("the state file of the output '" + slashed(dir) + "' is damaged (" + state.error().message + ")");
+    for (auto& [library, key] : *state) {
+        if (key.ends_with(hidden_state_suffix)) key.resize(key.size() - hidden_state_suffix.size());
+    }
     return state;
 }
 
@@ -591,6 +596,26 @@ static_copies check_static_copies(std::span<packaged const* const> packages)
     return out;
 }
 
+std::set<std::string> hidden_packages(std::span<packaged const* const> packages)
+{
+    // the products' libraries are closed over the dependencies holding their code, so the roots' products name every
+    // library that exists
+    std::set<std::string> exists, inside;
+    for (packaged const* p : packages) {
+        if (!p->direct && p->linkage != "dynamic" && !p->libraries.empty()) continue;
+        exists.insert(p->library);
+        for (output_product const& o : p->products) {
+            for (library_ref const& l : o.libraries) exists.insert(l.package);
+        }
+    }
+    for (packaged const* p : packages) inside.insert(p->static_inside.begin(), p->static_inside.end());
+    std::set<std::string> hidden;
+    for (packaged const* p : packages) {
+        if (!exists.contains(p->library) && inside.contains(p->library)) hidden.insert(p->library);
+    }
+    return hidden;
+}
+
 result<output_changes> write_output(fs::path const& dir, build_target const& target, std::span<packaged const> packages,
     std::map<std::string, std::string> const& deployment)
 {
@@ -611,6 +636,9 @@ result<output_changes> write_output(fs::path const& dir, build_target const& tar
         for (std::string const& e : copies.errors) message += "\n  " + e;
         return fail(message);
     }
+    // inside dynamic libraries alone: their headers only (otok-toml.md 5, docs/PLAN.md decision 137)
+    std::set<std::string> const hidden = hidden_packages(of_output);
+    auto const recorded = [&](packaged const& p) { return hidden.contains(p.library) ? p.key + std::string{hidden_state_suffix} : p.key; };
 
     auto opened = open_output(dir, "output");
     if (!opened) return std::unexpected{opened.error()};
@@ -638,7 +666,7 @@ result<output_changes> write_output(fs::path const& dir, build_target const& tar
     }
     for (auto const& [library, p] : current) {
         fs::path const out = dir / target.package_output(library);
-        if (auto it = state.find(library); it != state.end() && it->second == p->key && fs::is_directory(long_path(out), ec)) {
+        if (auto it = state.find(library); it != state.end() && it->second == recorded(*p) && fs::is_directory(long_path(out), ec)) {
             ++changes.unchanged;
             continue;
         }
@@ -648,7 +676,13 @@ result<output_changes> write_output(fs::path const& dir, build_target const& tar
         if (auto ok = remove(library); !ok) return std::unexpected{ok.error()};
         if (auto ok = copy_tree(p->entry, out); !ok) return fail("cannot copy '" + library + "' into the output: " + ok.error().message);
         fs::remove(long_path(out / "key.txt"), ec);
-        state[library] = p->key;
+        if (hidden.contains(library)) {
+            for (fs::path const& removed : target.hidden_package_removals(library, p->libraries)) {
+                fs::remove_all(long_path(out / removed), ec);
+                if (ec) return fail("cannot remove '" + slashed(out / removed) + "': " + ec.message());
+            }
+        }
+        state[library] = recorded(*p);
         ++changes.copied;
         if (auto ok = write_state(state_file, state); !ok) return std::unexpected{ok.error()};
     }
@@ -659,6 +693,7 @@ result<output_changes> write_output(fs::path const& dir, build_target const& tar
         output_package o{library, p->rec, p->libraries, p->products, p->option_defines, {}, target.package_output(library), p->data, p->bundle_data, p->linkage, p->cmake};
         o.options = p->options;
         o.platforms = p->platforms;
+        o.hidden = hidden.contains(library);
         for (license_entry const& file : p->rec->license_files) {
             auto text = read_file(dir / o.dir / "licenses" / path_from_utf8(file.path));
             if (!text) return fail("the output '" + name + "': the license file '" + file.path + "' of '" + library + "': " + text.error().message);

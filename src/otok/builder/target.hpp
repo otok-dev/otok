@@ -184,6 +184,9 @@ struct output_package
     std::map<std::string, option_data, std::less<>> options{};
     // the platforms of this target it is built for (otok-toml.md 6): those of its graph, which a dependency may narrow
     std::vector<std::string> platforms{};
+    // inside dynamic libraries alone (otok-toml.md 5, docs/PLAN.md decision 137): its headers only in the output, no
+    // libraries, products, targets or CMake packages for the consumer
+    bool hidden = false;
 };
 
 class build_target
@@ -265,6 +268,17 @@ public:
 
     // Where a library's package entry is copied, relative to the target's output directory.
     std::filesystem::path package_output(std::string const& library) const { return package_output_of(info(), library); }
+
+    // What the output leaves out of the copy of a package entry, relative to it, for a library inside dynamic libraries
+    // alone (otok-toml.md 5, docs/PLAN.md decision 137): its libraries, not its headers or licenses. `libraries`: its
+    // library output names. The layout of 4.1, 4.7 and 4.8 by default, with the list of its files for the consumer files
+    // (otok-package.toml) and the targets its build exports (cmake-targets.txt).
+    virtual std::vector<std::filesystem::path> hidden_package_removals(std::string const& library, std::span<std::string const> libraries) const
+    {
+        (void)library;
+        (void)libraries;
+        return {"lib", "bin", "debug", "otok-package.toml", "cmake-targets.txt"};
+    }
 
     // Writes what the output directory `dir` needs besides the package entries and Acknowledgements.md,
     // once they are in place (Apple: Package.swift, Acknowledgements.plist). `deployment`: deployment

@@ -245,7 +245,18 @@ std::string provider_text(std::vector<package_view> const& views, std::span<outp
     }
     text += "# the libraries, for the names they give no package of\n";
     for (output_package const& p : packages) {
-        text += "set_property(GLOBAL PROPERTY _otok_provider_library_" + p.library + " " + cmake_quoted(p.library) + ")\n";
+        if (!p.hidden) text += "set_property(GLOBAL PROPERTY _otok_provider_library_" + p.library + " " + cmake_quoted(p.library) + ")\n";
+    }
+    // inside dynamic libraries alone, which the project does not get (otok-toml.md 5): by their names and those of their
+    // packages
+    bool any_hidden = false;
+    for (output_package const& p : packages) {
+        if (!p.hidden) continue;
+        if (!any_hidden) text += "# the libraries inside dynamic ones alone, by their names and those of their packages\n";
+        any_hidden = true;
+        std::set<std::string> names{p.library};
+        for (cmake_package_spec const& spec : p.cmake) names.insert(cmake_lower(spec.name));
+        for (std::string const& n : names) text += "set_property(GLOBAL PROPERTY _otok_provider_hidden_" + n + " " + cmake_quoted(p.library) + ")\n";
     }
     text +=
         "\n"
@@ -279,8 +290,15 @@ std::string provider_text(std::vector<package_view> const& views, std::span<outp
         "    endif()\n"
         "  else()\n"
         "    get_property(_otok_provider_library GLOBAL PROPERTY _otok_provider_library_${_otok_provider_lower})\n"
+        "    get_property(_otok_provider_hidden GLOBAL PROPERTY _otok_provider_hidden_${_otok_provider_lower})\n"
         "    get_property(_otok_provider_warned GLOBAL PROPERTY _otok_provider_warned_${_otok_provider_lower})\n"
-        "    if(_otok_provider_library AND NOT _otok_provider_warned)\n"
+        "    if(_otok_provider_hidden AND NOT _otok_provider_warned)\n"
+        "      set_property(GLOBAL PROPERTY _otok_provider_warned_${_otok_provider_lower} ON)\n"
+        "      get_property(_otok_provider_root GLOBAL PROPERTY _otok_provider_dir)\n"
+        "      message(WARNING \"otok: find_package(${_otok_provider_name}) is left to CMake's own search: the \"\n"
+        "        \"${_otok_provider_hidden} of ${_otok_provider_root} is inside its dynamic libraries alone, not given to this \"\n"
+        "        \"project; name it in [deps] of otok.toml to use it (otok-toml.md 5)\")\n"
+        "    elseif(_otok_provider_library AND NOT _otok_provider_warned)\n"
         "      set_property(GLOBAL PROPERTY _otok_provider_warned_${_otok_provider_lower} ON)\n"
         "      get_property(_otok_provider_root GLOBAL PROPERTY _otok_provider_dir)\n"
         "      message(WARNING \"otok: find_package(${_otok_provider_name}) is left to CMake's own search, which may find another \"\n"
@@ -296,6 +314,7 @@ std::string provider_text(std::vector<package_view> const& views, std::span<outp
         "  unset(_otok_provider_keep)\n"
         "  unset(_otok_provider_arg)\n"
         "  unset(_otok_provider_library)\n"
+        "  unset(_otok_provider_hidden)\n"
         "  unset(_otok_provider_warned)\n"
         "endmacro()\n\n"
         "cmake_language(SET_DEPENDENCY_PROVIDER _otok_provide_package SUPPORTED_METHODS FIND_PACKAGE)\n";
@@ -383,6 +402,7 @@ result<std::map<std::string, std::string>> cmake_package_files(std::span<output_
     // the patterns of `targets` found among the targets the builds export; the names of other keys keep their products
     std::vector<std::pair<output_package const*, cmake_package_spec>> expanded;
     for (output_package const& o : packages) {
+        if (o.hidden) continue;  // not given to the consumer (otok-toml.md 5)
         for (cmake_package_spec const& spec : o.cmake) {
             cmake_package_spec e = spec;
             e.targets.clear();

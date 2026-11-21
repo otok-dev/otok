@@ -184,7 +184,8 @@ result<consumer_package> consumer_package_of(fs::path const& dir, std::span<outp
         std::error_code ec;
         if (fs::is_directory(long_path(dir / p.dir / "include"), ec)) include_of[p.library] = slashed(p.dir / "include");
         if (!p.data.empty()) c.data_dirs.emplace_back(p.library, slashed(p.dir / "data"));
-        if (p.libraries.empty()) continue;
+        // inside dynamic libraries alone: its include/ for their products, nothing of its own (otok-toml.md 5)
+        if (p.libraries.empty() || p.hidden) continue;
         auto files = read_package_files(dir / p.dir);
         if (!files) return fail("the package of '" + p.library + "': " + files.error().message);
         for (auto const& [key, value] : files->properties) {
@@ -258,6 +259,7 @@ result<consumer_package> consumer_package_of(fs::path const& dir, std::span<outp
     std::set<std::string> library_names;
     for (consumer_library const& l : c.libraries) library_names.insert(l.name);
     for (output_package const& p : packages) {
+        if (p.hidden) continue;
         for (output_product const& o : p.products) {
             product const& prod = *o.source;
             if (library_names.contains(prod.name)) {
