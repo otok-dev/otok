@@ -377,7 +377,8 @@ Private external symbols (hidden visibility) are listed too: an archive's object
 app, where they meet.
 
 Every install matches the symbols against the exports of the private system libraries (`index.md` 10.2),
-read from the text stubs of the SDK of each platform the project builds for:
+read from the text stubs of the SDKs of the platforms its package is built for (a simulator's as its device's, Mac Catalyst's as
+macOS's):
 
 - A library collides when it defines a symbol that a listed library exports, by its Mach-O name (`_ubrk_next`).
 - A collision is a warning of `otok install` naming the library, the system library and up to ten of the

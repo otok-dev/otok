@@ -180,6 +180,25 @@ std::vector<std::string> header_files(fs::path const& dir)
     return out;
 }
 
+// The platform whose SDK stands for a platform's in the checks of the output (docs/PLAN.md decision 135): the device's for
+// a simulator, whose SDK has the same frameworks and libraries; Mac Catalyst is its own.
+std::string sdk_platform(std::string_view platform)
+{
+    for (std::string_view device : {"ios", "tvos", "watchos", "xros"}) {
+        if (platform.size() == device.size() + 3 && platform.starts_with(device) && platform.ends_with("sim")) return std::string{device};
+    }
+    return std::string{platform};
+}
+
+// The name of the SDK of a platform as sdk_platform gives it: Mac Catalyst's is macOS's.
+std::string sdk_name_of(std::string_view platform)
+{
+    static std::map<std::string, std::string, std::less<>> const names{{"ios", "iphoneos"}, {"macosx", "macosx"}, {"catalyst", "macosx"},
+        {"tvos", "appletvos"}, {"watchos", "watchos"}, {"xros", "xros"}};
+    auto const it = names.find(platform);
+    return it != names.end() ? it->second : std::string{};
+}
+
 // `apple = { … }` of a product; nothing when it has none.
 product_settings const* settings_of(product const& prod)
 {
@@ -1279,32 +1298,30 @@ public:
         return {};
     }
 
-    // The required-reason APIs no manifest declares (otok-toml.md 4.4) and the symbols of private system libraries (4.5)
+    // The required-reason APIs no manifest declares (otok-toml.md 4.4), the symbols of private system libraries (4.5) and the
+    // system frameworks missing from an SDK (recipe-toml.md 11), each package checked on its own platforms (docs/PLAN.md
+    // decision 135), not on the keys of `deployment`
     std::vector<std::string> output_problems(fs::path const& dir, std::span<output_package const> packages,
-        std::map<std::string, std::string> const& deployment, std::vector<std::string>& warnings) const override
+        std::map<std::string, std::string> const&, std::vector<std::string>& warnings) const override
     {
         std::vector<std::string> problems;
         for (output_package const& p : packages) check_required_reasons(dir, p, problems);
-        check_private_libraries(dir, packages, deployment, problems, warnings);
-        check_frameworks(packages, deployment, problems);
+        check_private_libraries(dir, packages, problems, warnings);
+        check_frameworks(packages, problems);
         return problems;
     }
 
 private:
     // The system frameworks the products link on a platform whose SDK does not have them (docs/PLAN.md decision 135); Mac
     // Catalyst's are in the macOS SDK and its iOSSupport.
-    void check_frameworks(std::span<output_package const> packages, std::map<std::string, std::string> const& deployment,
-        std::vector<std::string>& problems) const
+    void check_frameworks(std::span<output_package const> packages, std::vector<std::string>& problems) const
     {
         auto x = xcode();
         if (!x) return;
         auto const exists = [&](std::string const& platform, std::string const& framework) {
-            slice_spec spec;
-            spec.platform = platform;
-            spec.arch = info().find_platform(platform)->architectures.front();
-            auto const names = detail::names_of(spec);
-            if (!names) return true;
-            auto sdk = sdk_of(names->sdk, **x);
+            std::string const sdk_name = sdk_name_of(platform);
+            if (sdk_name.empty()) return true;
+            auto sdk = sdk_of(sdk_name, **x);
             if (!sdk) return true;  // not this check's to report
             std::error_code ec;
             fs::path const root{path_from_utf8(sdk->path)};
@@ -1312,7 +1329,7 @@ private:
             return fs::is_directory(root / "System/Library/Frameworks" / name, ec)
                 || (platform == "catalyst" && fs::is_directory(root / "System/iOSSupport/System/Library/Frameworks" / name, ec));
         };
-        auto found = detail::missing_frameworks(packages, deployment, exists);
+        auto found = detail::missing_frameworks(packages, exists);
         problems.insert(problems.end(), found.begin(), found.end());
     }
 
@@ -1372,18 +1389,19 @@ private:
     }
 
     // The libraries that define symbols exported by private system libraries (otok-toml.md 4.5), read from the text
-    // stubs of the SDKs of the output's platforms. A stub otok cannot read is a warning: the check is not done.
-    void check_private_libraries(fs::path const& dir, std::span<output_package const> packages, std::map<std::string, std::string> const& deployment,
-        std::vector<std::string>& problems, std::vector<std::string>& warnings) const
+    // stubs of the SDKs of each package's platforms (docs/PLAN.md decision 135), each SDK read once. A stub otok cannot read
+    // is a warning: the check is not done.
+    void check_private_libraries(fs::path const& dir, std::span<output_package const> packages, std::vector<std::string>& problems,
+        std::vector<std::string>& warnings) const
     {
-        std::map<std::string, std::string> owners;  // exported symbol → the private library's name
-        for (auto [family, sdk_name] : {std::pair{"ios", "iphoneos"}, std::pair{"macos", "macosx"}, std::pair{"catalyst", "macosx"},
-                 std::pair{"tvos", "appletvos"}, std::pair{"watchos", "watchos"}, std::pair{"visionos", "xros"}}) {
-            if (!deployment.contains(family)) continue;
+        std::map<std::string, std::map<std::string, std::string>> owners_of;  // SDK → exported symbol → the private library's name
+        auto const owners = [&](std::string const& sdk_name) -> std::map<std::string, std::string> const& {
+            if (auto it = owners_of.find(sdk_name); it != owners_of.end()) return it->second;
+            std::map<std::string, std::string>& map = owners_of[sdk_name];
             auto x = xcode();
-            if (!x) return;
+            if (!x) return map;
             auto sdk = sdk_of(sdk_name, **x);
-            if (!sdk) continue;
+            if (!sdk) return map;
             for (private_library const& library : builtin_private_libraries()) {
                 auto text = read_file(fs::path{sdk->path} / path_from_utf8(library.path));
                 if (!text) continue;  // not in this SDK
@@ -1392,17 +1410,28 @@ private:
                     warnings.push_back("cannot read the exports of " + library.name + " in the SDK '" + sdk_name + "': " + exports.error().message);
                     continue;
                 }
-                for (std::string const& s : *exports) owners.emplace(s, library.name);
+                for (std::string const& s : *exports) map.emplace(s, library.name);
             }
-        }
-        if (owners.empty()) return;
+            return map;
+        };
         for (output_package const& p : packages) {
+            std::set<std::string> sdks;
+            for (std::string const& platform : p.platforms) {
+                if (std::string const name = sdk_name_of(sdk_platform(platform)); !name.empty()) sdks.insert(name);
+            }
+            if (sdks.empty()) continue;
             for (std::string const& library : p.libraries) {
                 auto text = read_file(dir / p.dir / defined_symbols_dir / path_from_utf8(library + ".txt"));
                 if (!text) continue;
                 std::map<std::string, std::vector<std::string>> collisions;  // private library → symbols
                 for (std::string const& s : parse_undefined_symbols(*text)) {
-                    if (auto it = owners.find(s); it != owners.end()) collisions[it->second].push_back(s);
+                    for (std::string const& sdk : sdks) {
+                        auto const& of = owners(sdk);
+                        if (auto it = of.find(s); it != of.end()) {
+                            collisions[it->second].push_back(s);
+                            break;
+                        }
+                    }
                 }
                 for (auto const& [name, symbols] : collisions) {
                     std::string list;
@@ -1819,15 +1848,18 @@ std::vector<std::string> detail::cmake_slices_of(std::vector<std::string> const&
     return out;
 }
 
-std::vector<std::string> detail::missing_frameworks(std::span<output_package const> packages, std::map<std::string, std::string> const& deployment,
+std::vector<std::string> detail::missing_frameworks(std::span<output_package const> packages,
     std::function<bool(std::string const& platform, std::string const& framework)> const& exists)
 {
     std::vector<std::string> problems;
-    for (auto [family, platform] : {std::pair{"ios", "ios"}, std::pair{"macos", "macosx"}, std::pair{"catalyst", "catalyst"},
-             std::pair{"tvos", "tvos"}, std::pair{"watchos", "watchos"}, std::pair{"visionos", "xros"}}) {
-        if (!deployment.contains(family)) continue;
-        for (output_package const& p : packages) {
-            if (swift_package_settings(*p.rec)) continue;
+    for (output_package const& p : packages) {
+        if (swift_package_settings(*p.rec)) continue;
+        // a simulator's SDK has the frameworks of its device's
+        std::vector<std::string> checked;
+        for (std::string const& platform : p.platforms) {
+            if (std::string const s = sdk_platform(platform); std::ranges::find(checked, s) == checked.end()) checked.push_back(s);
+        }
+        for (std::string const& platform : checked) {
             for (output_product const& o : p.products) {
                 product_settings const* s = settings_of(*o.source);
                 for (system_framework const& f : s ? s->frameworks : std::vector<system_framework>{}) {

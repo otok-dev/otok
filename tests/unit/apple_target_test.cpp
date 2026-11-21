@@ -620,15 +620,30 @@ TEST(apple_target, links_frameworks_per_platform)
     EXPECT_TRUE(warnings.empty());
 
     // a framework linked on a platform whose SDK does not have it
-    auto const exists = [](std::string const& platform, std::string const& framework) { return !(platform == "watchos" && framework == "SystemConfiguration"); };
-    std::map<std::string, std::string> const deployment{{"macos", "13.0"}, {"watchos", "9.0"}};
-    EXPECT_TRUE(missing_frameworks(packages, deployment, exists).empty());
+    // (the package's own platforms, not the keys of `deployment`; a simulator checked as its device)
+    std::vector<std::pair<std::string, std::string>> asked;
+    auto const exists = [&](std::string const& platform, std::string const& framework) {
+        asked.emplace_back(platform, framework);
+        return !((platform == "watchos" && framework == "SystemConfiguration") || (platform == "catalyst" && framework == "CoreFoundation"));
+    };
+    packages[0].platforms = {"iossim", "macosx", "watchos", "watchossim"};
+    EXPECT_TRUE(missing_frameworks(packages, exists).empty());
+    EXPECT_EQ(asked, (std::vector<std::pair<std::string, std::string>>{{"ios", "CoreFoundation"}, {"ios", "SystemConfiguration"}, {"ios", "Security"},
+                         {"macosx", "CoreFoundation"}, {"macosx", "SystemConfiguration"}, {"macosx", "Security"}, {"watchos", "CoreFoundation"},
+                         {"watchos", "Security"}}));
     s.frameworks[1].when = nullptr;
     curl.target_settings["apple"] = s;
-    EXPECT_EQ(missing_frameworks(packages, deployment, exists),
+    EXPECT_EQ(missing_frameworks(packages, exists),
         std::vector<std::string>{"the product 'Curl' of 'curl' links the system framework 'SystemConfiguration' on 'watchos', whose SDK does not have it: "
                                  "a 'when' of its apple.frameworks entry leaves that platform out (recipe-toml.md 11)"});
-    EXPECT_TRUE(missing_frameworks(packages, {{"macos", "13.0"}}, exists).empty());  // no watchOS in the output
+    // a package narrowed to platforms without watchOS (otok-toml.md 6) is not checked there
+    packages[0].platforms = {"ios", "iossim"};
+    EXPECT_TRUE(missing_frameworks(packages, exists).empty());
+    // Mac Catalyst, whose deployment version is the `ios` key's, is checked as a platform of its own
+    packages[0].platforms = {"catalyst"};
+    EXPECT_EQ(missing_frameworks(packages, exists),
+        std::vector<std::string>{"the product 'Curl' of 'curl' links the system framework 'CoreFoundation' on 'catalyst', whose SDK does not have it: "
+                                 "a 'when' of its apple.frameworks entry leaves that platform out (recipe-toml.md 11)"});
 }
 
 TEST(apple_target, declares_the_target_of_bundled_data)
@@ -1046,13 +1061,20 @@ TEST(apple_target, warns_of_symbols_of_private_libraries)
     icu.libraries = {"icuuc"};
     std::vector<output_package> packages(1);
     packages[0] = {"icu4c", &rec, {"icuuc"}, {{&icu, {{"icu4c", "icuuc"}}, {}}}, {}, {}, "Packages/icu4c"};
+    packages[0].platforms = {"ios", "iossim"};  // its own, not the keys of deployment (docs/PLAN.md decision 135)
     dir.write("Packages/icu4c/defined-symbols/icuuc.txt", "_my_own\n_ubrk_next\n_unorm_normalize\n");
     auto target = target::apple::make_build_target("", current_environment());
     std::vector<std::string> warnings;
-    EXPECT_EQ(target->output_problems(dir.path(), packages, {{"ios", "15.0"}}, warnings), (std::vector<std::string>{
+    EXPECT_EQ(target->output_problems(dir.path(), packages, {}, warnings), (std::vector<std::string>{
         "the library 'icuuc' of 'icu4c' defines 2 symbols that ICU (libicucore) exports, a private system library, and App Store review "
         "rejects such an app (ITMS-90338): _ubrk_next, _unorm_normalize"}));
     EXPECT_TRUE(warnings.empty()) << warnings.front();
+    // Mac Catalyst alone, with no `catalyst` key in deployment: the macOS SDK's stubs
+    packages[0].platforms = {"catalyst"};
+    EXPECT_EQ(target->output_problems(dir.path(), packages, {{"ios", "15.0"}}, warnings).size(), 1u);
+    // a package built for no platform of the target has nothing to check
+    packages[0].platforms.clear();
+    EXPECT_TRUE(target->output_problems(dir.path(), packages, {{"ios", "15.0"}}, warnings).empty());
 }
 #endif
 

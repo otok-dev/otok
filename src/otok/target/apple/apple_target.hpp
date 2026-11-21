@@ -169,8 +169,8 @@ std::string linked_framework(std::string const& name, std::vector<std::string> c
 std::vector<std::string> cmake_slices_of(std::vector<std::string> const& platforms);
 
 // The frameworks of the products of `packages` linked on a platform whose SDK does not have them (docs/PLAN.md decision 135):
-// for each family of `deployment` ("ios", "catalyst"), `exists(platform, framework)` with its device platform.
-std::vector<std::string> missing_frameworks(std::span<output_package const> packages, std::map<std::string, std::string> const& deployment,
+// for each of a package's platforms, a simulator as its device, `exists(platform, framework)`.
+std::vector<std::string> missing_frameworks(std::span<output_package const> packages,
     std::function<bool(std::string const& platform, std::string const& framework)> const& exists);
 
 // The platform of an XCFramework's library identifier as the file checks it: "ios-arm64_x86_64-simulator" is

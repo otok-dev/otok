@@ -179,6 +179,8 @@ struct output_package
     std::vector<std::string> cmake_exported{};  // the targets its build exports, for the patterns of `cmake` (cmake-targets.txt)
     // its options, merged (recipe-toml.md 8.1), for the conditions of the target's own product tables (apple.frameworks)
     std::map<std::string, option_data, std::less<>> options{};
+    // the platforms of this target it is built for (otok-toml.md 6): those of its graph, which a dependency may narrow
+    std::vector<std::string> platforms{};
 };
 
 class build_target

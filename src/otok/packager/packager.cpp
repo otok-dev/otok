@@ -278,6 +278,9 @@ result<std::vector<packaged>> package_all(resolution const& r, std::size_t confi
             pk.products = std::move(*products);
             pk.option_defines = option_defines(rec, p->configurations[configuration].options);
             pk.options = p->configurations[configuration].options;
+            for (std::string const& platform : p->configurations[configuration].platforms) {
+                if (target->info().find_platform(platform)) pk.platforms.push_back(platform);
+            }
             if (!mine.slices.empty()) {
                 for (auto const& [name, file] : mine.slices.front().output.data) pk.data.push_back(name);
             }
@@ -549,6 +552,7 @@ result<output_changes> write_output(fs::path const& dir, build_target const& tar
     for (auto const& [library, p] : current) {
         output_package o{library, p->rec, p->libraries, p->products, p->option_defines, {}, target.package_output(library), p->data, p->bundle_data, p->linkage, p->cmake};
         o.options = p->options;
+        o.platforms = p->platforms;
         for (license_entry const& file : p->rec->license_files) {
             auto text = read_file(dir / o.dir / "licenses" / path_from_utf8(file.path));
             if (!text) return fail("the output '" + name + "': the license file '" + file.path + "' of '" + library + "': " + text.error().message);

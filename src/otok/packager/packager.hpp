@@ -41,6 +41,7 @@ struct packaged
     std::string linkage = "static";         // of its slices (otok-toml.md 5)
     std::vector<cmake_package_spec> cmake{};  // its CMake packages (otok-toml.md 4.12)
     merged_options options{};               // its options, merged (recipe-toml.md 8.1)
+    std::vector<std::string> platforms{};    // of the target, those it is built for (otok-toml.md 6)
 };
 
 // The package entry of every built target package, one per target its slices belong to; tool

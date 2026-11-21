@@ -91,6 +91,7 @@ struct fake_toolchain
     std::optional<std::set<std::string>> system;  // build_target::system_library; none: every library is the system's
     std::vector<std::string> problems;          // build_target::output_problems
     std::vector<std::string> unchecked;         // and its warnings: what it could not check
+    std::vector<std::string> output_platforms;  // "<library>: <platforms>" of the packages output_problems is given
     std::vector<std::filesystem::path> read_paths;  // toolchain_profile::read_paths
 };
 
@@ -136,9 +137,14 @@ public:
 
     bool system_library(std::string const& loaded, slice_spec const&) const override { return !t_.system || t_.system->contains(loaded); }
 
-    std::vector<std::string> output_problems(std::filesystem::path const&, std::span<output_package const>,
+    std::vector<std::string> output_problems(std::filesystem::path const&, std::span<output_package const> packages,
         std::map<std::string, std::string> const&, std::vector<std::string>& warnings) const override
     {
+        for (output_package const& p : packages) {
+            std::string platforms;
+            for (std::string const& platform : p.platforms) platforms += (platforms.empty() ? "" : " ") + platform;
+            t_.output_platforms.push_back(p.library + ": " + platforms);
+        }
         warnings.insert(warnings.end(), t_.unchecked.begin(), t_.unchecked.end());
         return t_.problems;
     }
@@ -358,6 +364,8 @@ TEST_F(builder_test, output_problems_warn_install_and_fail_publish)
     EXPECT_NE(err.str().find("warning: the output 'Otok': the library 'a' of 'a' uses required-reason APIs that no privacy manifest of its "
         "products declares: stat (NSPrivacyAccessedAPICategoryFileTimestamp)\n"), std::string::npos) << err.str();
     EXPECT_NE(out.str().find("output 'Otok': "), std::string::npos) << out.str();
+    // each package with the platforms it is built for, which the checks go by (docs/PLAN.md decision 135)
+    EXPECT_EQ(toolchain.output_platforms, (std::vector<std::string>{"a: native", "b: native"}));
 
     // the install of otok publish
     nested = true;

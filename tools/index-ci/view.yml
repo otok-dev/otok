@@ -28,8 +28,6 @@ jobs:
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
     container: ubuntu:26.04  # the tools below; otok-linux-x64 is static and runs on any system
-    environment:
-      name: github-pages
     steps:
       - name: Tools
         run: |
@@ -63,4 +61,14 @@ jobs:
       - uses: actions/upload-pages-artifact@v4
         with:
           path: ${{ runner.temp }}/site
-      - uses: actions/deploy-pages@v4
+  # a job of its own: deploy-pages lists the run's artifacts, and right after the upload in the same job the
+  # listing has come back empty (2026-11-21)
+  deploy:
+    needs: view
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
