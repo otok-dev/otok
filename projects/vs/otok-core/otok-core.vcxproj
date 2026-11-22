@@ -40,6 +40,7 @@
     <ClInclude Include="$(OtokRoot)src\otok\cache\inputs.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\cache\store.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\catalog\catalog.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\commands\agent_skill.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\commands\commands.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\config\config.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\core\binary.hpp" />
@@ -104,6 +105,7 @@
     <ClCompile Include="$(OtokRoot)src\otok\cache\store.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\catalog\catalog.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\catalog\site.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\commands\agent_skill.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\commands\commands.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\config\config.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\core\build_info.cpp" />

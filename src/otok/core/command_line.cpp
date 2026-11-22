@@ -142,7 +142,8 @@ result<parsed_command> parse_command_line(std::span<std::string const> args, std
     return out;
 }
 
-std::string general_usage(std::string_view program, std::span<option_spec const> global, std::span<command_spec const> commands)
+std::string general_usage(std::string_view program, std::span<option_spec const> global, std::span<command_spec const> commands,
+    std::string_view note)
 {
     std::string text = "usage: " + std::string{program} + " [options] <command> [command options] [arguments]\n\ncommands:\n";
     std::size_t width = 0;
@@ -150,6 +151,7 @@ std::string general_usage(std::string_view program, std::span<option_spec const>
     for (command_spec const& c : commands) {
         text += "  " + std::string{c.name} + std::string(width - c.name.size() + 2, ' ') + std::string{c.summary} + "\n";
     }
+    if (!note.empty()) text += "\n" + std::string{note};
     text += "\noptions:\n" + option_table(global);
     return text;
 }

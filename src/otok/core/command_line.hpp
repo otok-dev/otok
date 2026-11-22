@@ -57,8 +57,9 @@ struct parsed_command
 result<parsed_command> parse_command_line(std::span<std::string const> args, std::span<option_spec const> global,
     std::span<command_spec const> commands);
 
-// "usage: otok [options] <command> ...": the commands with their summaries and the global options.
-std::string general_usage(std::string_view program, std::span<option_spec const> global, std::span<command_spec const> commands);
+// "usage: otok [options] <command> ...": the commands with their summaries, `note` (whole lines) and the global options.
+std::string general_usage(std::string_view program, std::span<option_spec const> global, std::span<command_spec const> commands,
+    std::string_view note = {});
 
 // The usage of one command with its options.
 std::string command_usage(std::string_view program, command_spec const& command);

@@ -78,6 +78,9 @@ struct command_context
 std::span<option_spec const> global_options();
 std::span<command_spec const> command_specs();
 
+// The help of `otok help` and `otok --help`: the commands, a note for coding agents, the global options.
+std::string general_help();
+
 // Runs a parsed command. Returns the process exit code: 0 success, 1 failure (reported to ctx.err).
 int run_command(parsed_command const& command, command_context& ctx);
 

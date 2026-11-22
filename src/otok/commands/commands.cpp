@@ -29,6 +29,7 @@
 #include "otok/cache/inputs.hpp"
 #include "otok/cache/store.hpp"
 #include "otok/catalog/catalog.hpp"
+#include "otok/commands/agent_skill.hpp"
 #include "otok/core/build_info.hpp"
 #include "otok/core/diagnostics.hpp"
 #include "otok/core/environment.hpp"
@@ -1803,6 +1804,48 @@ std::string log_label(kept_log const& l)
     if (l.entry == "build_tools") text += " build_tools";
     if (l.failed) text += ", failed";
     return text;
+}
+
+// otok agent-skill: the skill for coding agents (SKILL.md of the Agent Skills format) of this otok, into the project's
+// .claude/skills/otok/, the user's, the skills directory of another agent, or on standard output.
+int agent_skill(parsed_command const& cmd, command_context& ctx)
+{
+    namespace fs = std::filesystem;
+    std::string_view const text = agent_skill_text();
+    if (cmd.flag("print")) {
+        ctx.out << text;
+        return 0;
+    }
+    if (cmd.flag("user") && cmd.value("dir")) {
+        ctx.err << "error: --user and --dir name two places; give one\n";
+        return 1;
+    }
+    fs::path skills = ctx.project_dir / ".claude" / "skills";
+    if (auto dir = cmd.value("dir")) {
+        skills = ctx.project_dir / path_from_utf8(*dir);
+    } else if (cmd.flag("user")) {
+        auto home = ctx.env("HOME");
+        if (!home || home->empty()) home = ctx.env("USERPROFILE");
+        if (!home || home->empty()) {
+            ctx.err << "error: --user needs HOME (or USERPROFILE on Windows)\n";
+            return 1;
+        }
+        skills = path_from_utf8(*home) / ".claude" / "skills";
+    }
+    fs::path const file = skills / "otok" / "SKILL.md";
+    std::string const shown = path_to_utf8(fs::absolute(file).lexically_normal().generic_u8string());
+    if (auto existing = read_file(file); existing && *existing == text) {
+        ctx.out << shown << " is up to date\n";
+        return 0;
+    }
+    std::error_code ec;
+    fs::create_directories(file.parent_path(), ec);
+    if (auto written = write_file_atomic(file, text); !written) {
+        ctx.err << "error: " << written.error().message << "\n";
+        return 1;
+    }
+    ctx.out << "wrote " << shown << "\n";
+    return 0;
 }
 
 // otok licenses: the notices of the third-party software built into this binary, which their licenses ask to go with it,
@@ -3613,7 +3656,7 @@ int index_catalog(parsed_command const& cmd, command_context& ctx)
 int help(parsed_command const& cmd, command_context& ctx)
 {
     if (cmd.arguments.empty()) {
-        ctx.out << general_usage("otok", global_options(), command_specs());
+        ctx.out << general_help();
         return 0;
     }
     auto const commands = command_specs();
@@ -3668,6 +3711,10 @@ std::span<command_spec const> command_specs()
                 {"no-push", 0, "", "With a checkout of the index: commit the entry, but do not push"},
                 verbose_option,
                 keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option, jobs_option}, 0, any_number},
+        {"agent-skill", "", "Write the skill for coding agents (SKILL.md: how to use otok) into the project's .claude/skills/otok/",
+            {{"user", 0, "", "Into ~/.claude/skills/ instead, for every project of this user"},
+                {"dir", 0, "DIR", "Into DIR/otok/ instead: the skills directory of another agent"},
+                {"print", 0, "", "Print it on standard output instead"}}, 0, 0},
         {"licenses", "", "Show the licenses of the third-party software built into otok, and where otok's source is", {}, 0, 0},
         {"log", "LIBRARY [SLICE]", "Show the log of the latest build of a library (or of one slice of it) kept in the cache, a failed one too",
             {{"list", 0, "", "List the logs of the library kept in the cache, the newest first"}, format_option}, 1, 2},
@@ -3692,6 +3739,14 @@ std::span<command_spec const> command_specs()
     return commands;
 }
 
+std::string general_help()
+{
+    // a coding agent meeting otok reads this first: where it learns how to use it
+    return general_usage("otok", global_options(), command_specs(),
+        "coding agents: 'otok agent-skill' writes a skill on using otok into .claude/skills/ of the project;\n"
+        "  read https://otok-dev.github.io/llms.txt, and pass --format json to the commands whose output you read\n");
+}
+
 int run_command(parsed_command const& command, command_context& ctx)
 {
     if (command.command == "install") return install(command, ctx);
@@ -3706,6 +3761,7 @@ int run_command(parsed_command const& command, command_context& ctx)
     if (command.command == "info") return info(command, ctx);
     if (command.command == "clean") return clean(command, ctx);
     if (command.command == "log") return show_log(command, ctx);
+    if (command.command == "agent-skill") return agent_skill(command, ctx);
     if (command.command == "licenses") return licenses(command, ctx);
     if (command.command == "publish") return publish(command, ctx);
     if (command.command == "index-check") return index_check(command, ctx);

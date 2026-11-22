@@ -686,6 +686,40 @@ TEST_F(commands, help_says_what_install_and_fetch_do)
                              "build nothing\n"), std::string::npos) << out.str();
     ASSERT_EQ(run({"help"}), 0);
     EXPECT_NE(out.str().find("then as install"), std::string::npos) << out.str();
+    // what a coding agent reads first: where it learns how to use otok, before the global options
+    std::string const help = out.str();
+    EXPECT_LT(help.find("\ncoding agents: 'otok agent-skill' writes a skill"), help.find("\noptions:\n")) << help;
+    EXPECT_NE(help.find("https://otok-dev.github.io/llms.txt"), std::string::npos) << help;
+}
+
+// otok agent-skill: the skill for coding agents of this otok, into the project, the user's skills or another directory
+TEST_F(commands, writes_the_skill_for_coding_agents)
+{
+    std::string const skill = read_file(path_from_utf8(OTOK_TEST_DATA_DIR) / "../../src/otok/commands/agents/SKILL.md").value();
+    std::string lf = skill;
+    std::erase(lf, '\r');  // embedded with LF, from a checkout that may have CRLF
+    ASSERT_TRUE(lf.starts_with("---\nname: otok\ndescription: ")) << lf.substr(0, 80);
+
+    ASSERT_EQ(run({"agent-skill"}), 0) << err.str();
+    std::filesystem::path const file = project.path() / ".claude/skills/otok/SKILL.md";
+    EXPECT_EQ(read_file(file).value_or(""), lf);
+    EXPECT_EQ(out.str(), "wrote " + path_to_utf8(std::filesystem::absolute(file).lexically_normal().generic_u8string()) + "\n");
+    ASSERT_EQ(run({"agent-skill"}), 0) << err.str();
+    EXPECT_TRUE(out.str().ends_with("/.claude/skills/otok/SKILL.md is up to date\n")) << out.str();
+    // an older skill is replaced
+    project.write(".claude/skills/otok/SKILL.md", "old");
+    ASSERT_EQ(run({"agent-skill"}), 0) << err.str();
+    EXPECT_EQ(read_file(file).value_or(""), lf);
+
+    ASSERT_EQ(run({"agent-skill", "--print"}), 0) << err.str();
+    EXPECT_EQ(out.str(), lf);
+    ASSERT_EQ(run({"agent-skill", "--dir", "agent/skills"}), 0) << err.str();
+    EXPECT_EQ(read_file(project.path() / "agent/skills/otok/SKILL.md").value_or(""), lf);
+    env_vars["HOME"] = path_to_utf8(project.path() / "home");
+    ASSERT_EQ(run({"agent-skill", "--user"}), 0) << err.str();
+    EXPECT_EQ(read_file(project.path() / "home/.claude/skills/otok/SKILL.md").value_or(""), lf);
+    EXPECT_EQ(run({"agent-skill", "--user", "--dir", "x"}), 1);
+    EXPECT_EQ(err.str(), "error: --user and --dir name two places; give one\n");
 }
 
 TEST_F(commands, collects_unused_cache_entries)

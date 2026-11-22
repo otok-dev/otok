@@ -63,6 +63,19 @@ add_custom_command(
     DEPENDS ${OTOK_SITE_FILES} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed.cmake
     COMMENT "Embedding the catalog site")
 
+# otok_agent_skill.inc: the skill for coding agents, src/otok/commands/agents/SKILL.md, written by `otok agent-skill`
+# (the MSBuild build generates the same file in Directory.Build.targets).
+set(OTOK_AGENTS_DIR ${OTOK_SRC}/commands/agents)
+file(GLOB_RECURSE OTOK_AGENTS_FILES CONFIGURE_DEPENDS ${OTOK_AGENTS_DIR}/*)
+add_custom_command(
+    OUTPUT ${OTOK_GENERATED_DIR}/otok_agent_skill.inc
+    COMMAND ${CMAKE_COMMAND}
+        -DOTOK_EMBED_DIR=${OTOK_AGENTS_DIR}
+        -DOTOK_OUTPUT=${OTOK_GENERATED_DIR}/otok_agent_skill.inc
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed.cmake
+    DEPENDS ${OTOK_AGENTS_FILES} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed.cmake
+    COMMENT "Embedding the skill for coding agents")
+
 # otok_notices.inc: the license notices of the third-party software built into otok, `otok licenses`
 # (cmake/notices.cmake; the MSBuild build generates the same file in Directory.Build.targets). Run at every build: what
 # vcpkg installed decides what is linked.
@@ -122,7 +135,7 @@ endif()
 # otok-core: everything except the targets and the command line.
 file(GLOB_RECURSE OTOK_CORE_SOURCES CONFIGURE_DEPENDS ${OTOK_SRC}/*.cpp)
 list(FILTER OTOK_CORE_SOURCES EXCLUDE REGEX "/src/otok/(target|cli)/")
-add_library(otok-core STATIC ${OTOK_CORE_SOURCES} ${OTOK_GENERATED_DIR}/otok_catalog_site.inc)
+add_library(otok-core STATIC ${OTOK_CORE_SOURCES} ${OTOK_GENERATED_DIR}/otok_catalog_site.inc ${OTOK_GENERATED_DIR}/otok_agent_skill.inc)
 add_dependencies(otok-core otok-revision otok-notices)
 target_link_libraries(otok-core PUBLIC otok-options tomlplusplus::tomlplusplus nlohmann_json::nlohmann_json pantor::inja otok-lua CURL::libcurl LibArchive::LibArchive Threads::Threads)
 # Microsoft Detours on Windows: the sandbox injects otok-sandbox.dll with it (docs/PLAN.md decision 103).

@@ -18,11 +18,13 @@
 
   <!--
     build/generated/otok_catalog_site.inc holds the files of src/otok/catalog/site/ (templates and assets of the catalog
-    site, docs/PLAN.md decision 49), written by cmake/embed.cmake only when they change. CMakeLists.txt generates the same file.
+    site, docs/PLAN.md decision 49), written by cmake/embed.cmake only when they change, and otok_agent_skill.inc the skill
+    for coding agents of src/otok/commands/agents/ (`otok agent-skill`). CMakeLists.txt generates the same files.
   -->
   <Target Name="OtokCatalogSite" BeforeTargets="ClCompile" Condition="'$(MSBuildProjectName)' == 'otok-core'">
     <MakeDir Directories="$(OtokGeneratedDir)" />
     <Exec Command="&quot;$(OtokCMake)&quot; -DOTOK_EMBED_DIR=$(OtokRoot)src/otok/catalog/site -DOTOK_OUTPUT=$(OtokGeneratedDir)otok_catalog_site.inc -P &quot;$(OtokRoot)cmake/embed.cmake&quot;" />
+    <Exec Command="&quot;$(OtokCMake)&quot; -DOTOK_EMBED_DIR=$(OtokRoot)src/otok/commands/agents -DOTOK_OUTPUT=$(OtokGeneratedDir)otok_agent_skill.inc -P &quot;$(OtokRoot)cmake/embed.cmake&quot;" />
   </Target>
 
   <!--

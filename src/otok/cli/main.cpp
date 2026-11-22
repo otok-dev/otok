@@ -105,7 +105,7 @@ int run(std::vector<std::string> const& args)
     }
     if (parsed->command.empty() || parsed->flag("help")) {
         if (parsed->command.empty() || parsed->command == "help") {
-            std::cout << otok::general_usage("otok", otok::global_options(), otok::command_specs());
+            std::cout << otok::general_help();
         } else {
             for (otok::command_spec const& c : otok::command_specs()) {
                 if (c.name == parsed->command) std::cout << otok::command_usage("otok", c);
