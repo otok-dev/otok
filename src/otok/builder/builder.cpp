@@ -480,6 +480,7 @@ slice_dependency dependency_of(built_slice const& s, resolved_package const& p, 
     d.bin = d.prefix / "bin";
     d.version = p.chosen.recipe->version->str();
     d.linkage = s.spec.linkage;
+    d.defines = s.defines;
     for (auto const& [name, value] : p.configurations[configuration].options) {
         // a file option: whether the project gave one (build-lua-api.md 4); the file was the dependency's
         option_schema const* o = p.chosen.recipe->find_option(name);
@@ -1579,6 +1580,13 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         if (standards[l]) key[std::string{standard_key(l)}] = std::to_string(*standards[l]);
     }
 
+    // the defines of the dependencies' products, which their headers may need (build-lua-api.md 4)
+    std::vector<std::string> inherited;
+    auto const add_defines = [](std::vector<std::string>& to, std::vector<std::string> const& from) {
+        for (std::string const& d : from) {
+            if (std::ranges::find(to, d) == to.end()) to.push_back(d);
+        }
+    };
     slice_context slice;
     for (recipe_dependency const& d : rec.dependencies) {
         if (building_tools) break;  // the tool slice has only the tool dependencies
@@ -1591,6 +1599,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         if (!dep || !dp) return fail(label + ": its dependency '" + d.library + "' was not built for " + slice_label(spec));
         key["dep." + d.library] = dep->key;
         slice.deps.emplace(d.library, dependency_of(*dep, *dp, c));
+        add_defines(inherited, dep->defines);
     }
     // the programs of toolchains their recipes built (recipe-toml.md 13.1, 13.2): name → program; scripts among them → their interpreter
     std::map<std::string, fs::path> built_toolchains;
@@ -1646,6 +1655,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         key["build-tools"] = tools->key;
         slice.tools_prefix = builds_drive_.empty() ? tools->entry / "prefix" : virtual_drives::to_virtual(tools->entry / "prefix");
     }
+    if (!inherited.empty()) key["defines"] = flags_text(inherited);
     key["entry"] = building_tools ? "build_tools" : "build";
     // build.lua sees it (slice.is_tool): a library that is a tool too builds its programs there only (recipe-toml.md 13.2)
     if (tool) key["tool"] = "true";
@@ -1655,6 +1665,14 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
     out.spec = spec;
     out.key = hex;
     out.option_keys = option_keys;
+    // its own products' defines, as packaging chooses them (recipe-toml.md 11), then its dependencies'
+    for (product const& prod : rec.products) {
+        if (prod.when && !condition_holds(*prod.when, options, os, "")) continue;
+        for (product_define const& d : prod.defines) {
+            if (!d.when || condition_holds(*d.when, options, os, "", {}, nullptr, headers ? std::string{} : spec.linkage)) add_defines(out.defines, {d.define});
+        }
+    }
+    add_defines(out.defines, inherited);
     out.entry = cache_.root() / "builds" / p.library / (rec.version->str() + "-r" + std::to_string(rec.revision)) / "slices" / hex.substr(0, 32);
     std::string const work_name = p.library + "-" + slice_name(spec) + (spec.configuration == "debug" ? "-debug" : "") + (building_tools ? "-tools" : tool ? "-tool" : "");
     // a dev slice: built every time in its work directory, kept in dev/, which is its entry (otok-dev-toml.md 4)
@@ -1963,6 +1981,11 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
             if (!flag.empty()) (l == language::c ? slice.toolchain.cflags : slice.toolchain.cxxflags).push_back(flag);
             (l == language::c ? slice.meson_c_std : slice.meson_cpp_std) = profile->meson_standard
                 ? profile->meson_standard(l, *standards[l]) : (l == language::c ? "c" : "c++") + std::to_string(*standards[l]);
+        }
+        // the defines of the dependencies after otok's flags and before the project's (build-lua-api.md 3.1)
+        for (std::string const& d : headers ? std::vector<std::string>{} : inherited) {
+            slice.toolchain.cflags.push_back("-D" + d);
+            slice.toolchain.cxxflags.push_back("-D" + d);
         }
         // the project's flags after otok's (otok-toml.md 4.3), in the arrays and in the environment
         auto const append = [](std::vector<std::string>& to, std::vector<std::string> const& from) { to.insert(to.end(), from.begin(), from.end()); };

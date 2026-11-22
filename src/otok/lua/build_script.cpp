@@ -134,6 +134,8 @@ void push_dependency(lua_State* L, slice_dependency const& d, bool tool)
     if (tool) set_path(L, "bin", d.bin);
     set_string(L, "version", d.version);
     set_string(L, "linkage", d.linkage);
+    push_strings(L, d.defines);
+    lua_setfield(L, -2, "defines");
     push_values(L, d.options);
     lua_setfield(L, -2, "options");
     freeze(L);

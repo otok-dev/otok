@@ -437,6 +437,25 @@ TEST(recipe, checks_conditions)
         .reports("may only test options here"));
 }
 
+// docs/PLAN.md decision 138: the linkage in the `when` of a product's defines, and nowhere else
+TEST(recipe, a_define_may_test_the_linkage)
+{
+    auto const product = [](std::string const& defines, std::string const& extra = "") {
+        return parse(head_text + source_text + platforms_text + "[[product]]\nname = \"A\"\nlibraries = [\"a\"]\ndefines = " + defines + "\n" + extra);
+    };
+    auto p = product("[{ define = \"A_STATIC\", when = { linkage = \"static\" } }, { define = \"A_DLL\", when = { not = { linkage = \"static\" } } }]");
+    ASSERT_TRUE(p.r.has_value()) << messages(p.diags);
+    EXPECT_EQ(p.r->products[0].defines[0].when->linkage, "static");
+    EXPECT_EQ(p.r->products[0].defines[1].when->negated->linkage, "static");
+
+    EXPECT_TRUE(product("[{ define = \"A_STATIC\", when = { linkage = \"shared\" } }]").reports("'linkage' in product[1].defines[1].when must be \"static\" or \"dynamic\""));
+    EXPECT_TRUE(product("[{ define = \"A\", when = { platform = [\"ios\"] } }]").reports("may only test options and 'linkage' here"));
+    EXPECT_TRUE(product("[{ define = \"A\", when = {} }]").reports("must test at least one of 'option', 'linkage' or 'not'"));
+    EXPECT_TRUE(product("[\"A\"]\nwhen = { linkage = \"static\" }").reports("only the 'when' of a product's defines may test the linkage"));
+    EXPECT_TRUE(parse_with("[deps.zlib]\nversion = \"1\"\ndefault-recipe = \"p/zlib\"\nwhen = { linkage = \"static\" }\n")
+                    .reports("'linkage' in deps.zlib.when: only the 'when' of a product's defines may test the linkage"));
+}
+
 TEST(recipe, checks_dependencies)
 {
     EXPECT_TRUE(parse_with("[deps.lz4]\nversion = \"1\"\ndefault-recipe = \"p/lz4\"\n").reports("cannot depend on its own library"));

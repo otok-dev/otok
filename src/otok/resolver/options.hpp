@@ -45,8 +45,9 @@ using merged_options = std::map<std::string, option_data, std::less<>>;
 // Whether a `when` condition holds for a slice (recipe-toml.md 9.1). `options` must contain the
 // options the condition names (the parser checked that they exist). `arch` and `environment` are those of the slice;
 // empty, or null, where they are not known (the resolver, which resolves no graph per architecture): their tests then hold.
+// `linkage`: the library's, for the defines of its products, which alone test it; empty elsewhere.
 bool condition_holds(condition const& c, merged_options const& options, std::string_view os, std::string_view platform,
-    std::string_view arch = {}, build_environment const* environment = nullptr);
+    std::string_view arch = {}, build_environment const* environment = nullptr, std::string_view linkage = {});
 
 // The system libraries of a product's `link.libraries` whose `when` holds on the target `os` (recipe-toml.md 11).
 std::vector<std::string> link_on(product const& prod, merged_options const& options, std::string_view os);

@@ -1878,6 +1878,7 @@ std::string condition_text(condition const& c)
     if (c.platform) add("platform " + names(*c.platform));
     if (c.host) add("host " + names(*c.host));
     if (c.arch) add("arch " + names(*c.arch));
+    if (c.linkage) add("linkage " + *c.linkage);
     if (c.environment) {
         std::vector<std::string> environments;
         for (build_environment const& e : *c.environment) environments.push_back(e.text());

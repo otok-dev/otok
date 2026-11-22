@@ -152,6 +152,7 @@ private:
     // options and the target's OS (toolchains, which are checked per target), options and the target's OS without the
     // architecture and the environment (the system libraries of a product, which a target's output holds for all its slices).
     // Options and the platform: the system frameworks of an Apple product, which the consumer files link per platform.
+    // Options and the linkage: the defines of a product, which the packager evaluates with the library's linkage.
     enum class tests
     {
         anything,
@@ -159,7 +160,8 @@ private:
         options_and_host,
         options_and_os,
         options_and_target,
-        options_and_platform
+        options_and_platform,
+        options_and_linkage
     };
     // `when = { … }`, or with `key` its `not = { … }` (recipe-toml.md 9.1)
     std::optional<condition> when(toml_table& parent, recipe const& r, tests allowed, std::string_view key = "when");
@@ -843,6 +845,19 @@ std::optional<condition> recipe_reader::when(toml_table& parent, recipe const& r
             }
         }
     }
+    if (t->contains("linkage")) {
+        // known only when the library is packaged: the defines of its products (recipe-toml.md 9.1, 11)
+        if (allowed != tests::options_and_linkage) {
+            t->error(t->position("linkage"), t->describe("linkage") + ": only the 'when' of a product's defines may test the linkage");
+            t->ignore("linkage");
+            ok = false;
+        } else if (auto linkage = t->string("linkage"); linkage && *linkage != "static" && *linkage != "dynamic") {
+            t->error(t->position("linkage"), t->describe("linkage") + " must be \"static\" or \"dynamic\"");
+            ok = false;
+        } else {
+            c.linkage = std::move(linkage);
+        }
+    }
     if (t->contains("arch") || t->contains("environment")) {
         // what the slice is built for and in: the edges of no graph depend on them (recipe-toml.md 9.1)
         if (allowed != tests::options_and_host && allowed != tests::options_and_os) {
@@ -892,6 +907,7 @@ std::optional<condition> recipe_reader::when(toml_table& parent, recipe const& r
                                                  : allowed == tests::options_and_host ? " may only test options, 'host', 'arch' and 'environment' here"
                                                  : allowed == tests::options_and_os ? " may only test options, 'os', 'arch' and 'environment' here"
                                                  : allowed == tests::options_and_target ? " may only test options and 'os' here"
+                                                 : allowed == tests::options_and_linkage ? " may only test options and 'linkage' here"
                                                                                     : " may only test options here"));
             t->ignore("os");
             t->ignore("platform");
@@ -928,9 +944,10 @@ std::optional<condition> recipe_reader::when(toml_table& parent, recipe const& r
         t->error(c.where, t->path() + " may have 'has' or 'is', not both");
         return std::nullopt;
     }
-    if (!c.option && !c.os && !c.platform && !c.host && !c.arch && !c.environment && !c.negated) {
+    if (!c.option && !c.os && !c.platform && !c.host && !c.arch && !c.environment && !c.linkage && !c.negated) {
         if (ok) {
             t->error(c.where, t->path() + (allowed == tests::options_and_host ? " must test at least one of 'option', 'host', 'arch', 'environment' or 'not'"
+                                           : allowed == tests::options_and_linkage ? " must test at least one of 'option', 'linkage' or 'not'"
                                            : allowed == tests::options_and_os ? " must test at least one of 'option', 'os', 'arch', 'environment' or 'not'"
                                            : allowed == tests::options_and_target ? " must test at least one of 'option', 'os' or 'not'"
                                            : allowed == tests::options_and_platform ? " must test at least one of 'option', 'platform' or 'not'"
@@ -1166,7 +1183,7 @@ void recipe_reader::products(toml_table& root, recipe& r)
                     } else if (auto const* table = element.as_table()) {
                         toml_table dt = t.nested(*table, "defines[" + std::to_string(i + 1) + "]");
                         def.define = dt.string("define", need::required).value_or("");
-                        if (dt.contains("when")) def.when = when(dt, r, tests::options);
+                        if (dt.contains("when")) def.when = when(dt, r, tests::options_and_linkage);
                         dt.finish();
                     } else {
                         t.error(t.position_of(element), t.describe("defines") + " must be an array of strings or { define, when } tables");

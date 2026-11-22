@@ -44,6 +44,8 @@ struct slice_dependency
     std::filesystem::path bin;                                  // tool dependencies only
     std::string version;
     std::string linkage = "static";
+    // the defines of its products and of its dependencies', in the compiler flags of the slice too (build-lua-api.md 4)
+    std::vector<std::string> defines;
     std::map<std::string, option_data> options;
 };
 

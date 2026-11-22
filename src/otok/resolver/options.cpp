@@ -150,9 +150,10 @@ std::string format_option_value(option_data const& value)
 }
 
 bool condition_holds(condition const& c, merged_options const& options, std::string_view os, std::string_view platform,
-    std::string_view arch, build_environment const* environment)
+    std::string_view arch, build_environment const* environment, std::string_view linkage)
 {
-    if (c.negated && condition_holds(*c.negated, options, os, platform, arch, environment)) return false;
+    if (c.negated && condition_holds(*c.negated, options, os, platform, arch, environment, linkage)) return false;
+    if (c.linkage && !linkage.empty() && *c.linkage != linkage) return false;
     if (c.arch && !arch.empty() && std::ranges::find(*c.arch, arch) == c.arch->end()) return false;
     if (c.environment && environment && !std::ranges::any_of(*c.environment, [&](build_environment const& e) { return covers(e, *environment); })) {
         return false;

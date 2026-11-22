@@ -157,6 +157,7 @@ public:
             std::string text = p.library + "." + o.source->name + ":";
             for (library_ref const& l : o.libraries) text += " " + l.package + "/" + l.name;
             for (library_ref const& l : o.hidden_libraries) text += " (headers of " + l.package + "/" + l.name + ")";
+            for (std::string const& d : o.defines) text += " [" + d + "]";
             t_.products.push_back(text);
         }
         if (p.bundle_data) t_.bundled.insert(p.library);
@@ -1565,6 +1566,62 @@ TEST_F(builder_test, products_of_a_dynamic_library_hold_the_headers_of_static_on
     toolchain.products.clear();
     ASSERT_EQ(run({"install"}), 0) << err.str();
     EXPECT_EQ(toolchain.products, (std::vector<std::string>{"a.P: a/a b/b"}));
+}
+
+// a define of the static library only (recipe-toml.md 9.1, docs/PLAN.md decision 138)
+TEST_F(builder_test, a_define_follows_the_linkage)
+{
+    std::string text = read_file(project.path() / "recipes" / "b" / "recipe.toml").value_or("?");
+    text.insert(text.find("revision = 1\n") + 13, "linkage = [\"static\", \"dynamic\"]\n");
+    std::string const libraries = "libraries = [\"b\"]\n";
+    text.insert(text.find(libraries) + libraries.size(),
+        "defines = [{ define = \"B_STATIC\", when = { linkage = \"static\" } }, { define = \"B_DLL\", when = { not = { linkage = \"static\" } } }]\n");
+    project.write("recipes/b/recipe.toml", text);
+    ASSERT_EQ(run({"install"}), 0) << err.str();
+    EXPECT_NE(std::ranges::find(toolchain.products, "b.P: b/b [B_STATIC]"), toolchain.products.end()) << testing::PrintToString(toolchain.products);
+
+    toolchain.products.clear();
+    project.write("otok.toml", manifest + "[profile.dynamic]\ndeps.b = { linkage = \"dynamic\" }\n");
+    ASSERT_EQ(run({"install", "--profile", "dynamic"}), 0) << err.str();
+    EXPECT_NE(std::ranges::find(toolchain.products, "b.P: b/b [B_DLL]"), toolchain.products.end()) << testing::PrintToString(toolchain.products);
+}
+
+// the defines of a dependency's products in its dependents' slices (build-lua-api.md 3.1, 4; docs/PLAN.md decision 139)
+TEST_F(builder_test, a_dependent_is_compiled_with_the_defines_of_its_dependencies)
+{
+    std::string text = read_file(project.path() / "recipes" / "b" / "recipe.toml").value_or("?");
+    text.insert(text.find("revision = 1\n") + 13, "linkage = [\"static\", \"dynamic\"]\n");
+    std::string const libraries = "libraries = [\"b\"]\n";
+    text.insert(text.find(libraries) + libraries.size(),
+        "defines = [\"B_API=1\", { define = \"B_STATIC\", when = { linkage = \"static\" } }]\n");
+    project.write("recipes/b/recipe.toml", text);
+    auto const a_checks = [&](std::string const& defines) {
+        write_recipe("a", "1.0", build_lua("a",
+            "    assert(table.concat(deps.b.defines, ' ') == '" + defines + "', table.concat(deps.b.defines, ' '))\n"
+            "    local function flags(list)\n"
+            "        local found = {}\n"
+            "        for _, f in ipairs(list) do if f:sub(1, 2) == '-D' and f:sub(3, 3) == 'B' then found[#found + 1] = f end end\n"
+            "        return table.concat(found, ' ')\n"
+            "    end\n"
+            "    local expected = ('" + defines + "'):gsub('(%S+)', '-D%1')\n"
+            "    assert(flags(slice.toolchain.cflags) == expected, flags(slice.toolchain.cflags))\n"
+            "    assert(flags(slice.toolchain.cxxflags) == expected, flags(slice.toolchain.cxxflags))\n"
+            "    assert(slice.toolchain.cflags[#slice.toolchain.cflags] == '-fake-project', slice.toolchain.cflags[#slice.toolchain.cflags])\n"),
+            "[deps.b]\nversion = \">= 1\"\ndefault-recipe = \"p/b\"\n");
+    };
+    std::string const flagged = manifest + "[profile.p]\ndeps.a = { cflags = [\"-fake-project\"] }\n";
+    a_checks("B_API=1 B_STATIC");
+    project.write("otok.toml", flagged);
+    ASSERT_EQ(run({"install", "--profile", "p"}), 0) << err.str();
+    bool keyed = false;
+    for (auto const& d : std::filesystem::recursive_directory_iterator(cache.path() / "builds" / "a")) {
+        if (d.path().filename() == "key.txt") keyed = keyed || read_file(d.path()).value_or("").find("defines = [\"B_API=1\", \"B_STATIC\"]\n") != std::string::npos;
+    }
+    EXPECT_TRUE(keyed);
+
+    a_checks("B_API=1");
+    project.write("otok.toml", flagged + "deps.b = { linkage = \"dynamic\" }\n");
+    ASSERT_EQ(run({"install", "--profile", "p"}), 0) << err.str();
 }
 
 // the copies of a static library inside a dynamic one (otok-toml.md 5, docs/PLAN.md decision 136)

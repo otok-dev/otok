@@ -76,6 +76,8 @@ struct condition
     // resolver, not knowing the architecture, takes them as holding; not under `not` (recipe-toml.md 9.1)
     std::optional<std::vector<std::string>> arch;
     std::optional<std::vector<build_environment>> environment;
+    // "static" or "dynamic", the linkage of this recipe's library on the target: a product's `defines` only (recipe-toml.md 9.1, 11)
+    std::optional<std::string> linkage;
     std::shared_ptr<condition const> negated;    // `not = { … }`: holds when it does not
     source_position where;
 };

@@ -260,6 +260,17 @@ TEST(options, conditions)
     EXPECT_FALSE(condition_holds(negated, values, "apple", "ios"));
     EXPECT_EQ(*tested_option(negated), "ssl");
 
+    // the library's linkage (a product's defines, docs/PLAN.md decision 138); not known, the test holds
+    condition linkage;
+    linkage.linkage = "static";
+    EXPECT_TRUE(condition_holds(linkage, values, "windows", "windows", {}, nullptr, "static"));
+    EXPECT_FALSE(condition_holds(linkage, values, "windows", "windows", {}, nullptr, "dynamic"));
+    EXPECT_TRUE(condition_holds(linkage, values, "windows", "windows"));
+    condition not_static;
+    not_static.negated = std::make_shared<condition const>(linkage);
+    EXPECT_TRUE(condition_holds(not_static, values, "windows", "windows", {}, nullptr, "dynamic"));
+    EXPECT_FALSE(condition_holds(not_static, values, "windows", "windows", {}, nullptr, "static"));
+
     // the slice's architecture and environment; where they are not known (the resolver), their tests hold
     condition slice;
     slice.arch = std::vector<std::string>{"arm64"};

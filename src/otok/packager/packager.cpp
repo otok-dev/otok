@@ -197,8 +197,10 @@ result<std::vector<output_product>> products_on(resolved_package const& p, std::
         append_unique(o.libraries, dependencies);
         o.hidden_libraries = hidden;
         append_unique(o.header_products, dependency_headers);
+        // `linkage` of a define's `when`: the library's on this target (recipe-toml.md 9.1)
+        std::string const linkage = linkage_on(p.library, target, built);
         for (product_define const& d : prod.defines) {
-            if (!d.when || condition_holds(*d.when, options, target.info().name, "")) o.defines.push_back(d.define);
+            if (!d.when || condition_holds(*d.when, options, target.info().name, "", {}, nullptr, linkage)) o.defines.push_back(d.define);
         }
         o.link = link_on(prod, options, target.info().name);
         out.push_back(std::move(o));

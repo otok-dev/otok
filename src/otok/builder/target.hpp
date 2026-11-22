@@ -104,6 +104,8 @@ struct built_slice
     slice_spec spec;
     std::string key;                        // 64 hex digits
     std::map<std::string, std::string> option_keys;   // option → its value in the key (cache-key.md 3)
+    // the defines of its products, and those of its dependencies, given to the slices of its dependents (build-lua-api.md 4)
+    std::vector<std::string> defines;
     std::filesystem::path entry;            // builds/<library>/<version>-r<revision>/slices/<key>/
     build_output output;                    // paths inside entry/prefix
     bool cached = false;                    // found, not built

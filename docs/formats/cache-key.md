@@ -62,6 +62,7 @@ The names:
 | `toolchain.<name>` | the environment's compiler identity: `toolchain.xcode` and `toolchain.sdk` on Apple; `toolchain.ndk` and, in dynamic slices, `toolchain.stl` (`shared` or `static`, `otok-toml.md` 4.7) on Android; `toolchain.msvc` (`windows/msvc`) or `toolchain.clang-cl` (`*/clang-cl`), with `toolchain.crt` and `toolchain.windows-sdk`, on Windows; `toolchain.gcc` or `toolchain.clang` on Linux |
 | `toolchains.<name>` | the version found of each toolchain the recipe declares and whose `when` holds (`recipe-toml.md` 13): `toolchains.cmake = 3.31.6`; not for a toolchain a tool recipe builds (`recipe-toml.md` 13.1), which is in the key as `tool.<name>` |
 | `dep.<library>`, `tool.<library>`, `build-tools` | the keys of dependencies, tool dependencies and the `build_tools` entry; for a dev slice (`otok-dev-toml.md` 4), `dev:<tree hash of its prefix/>` |
+| `defines` | the defines of the dependencies' products the slice is compiled with (`build-lua-api.md` 4), in their order, as a TOML array (`["LZMA_API_STATIC"]`); absent when empty |
 | `entry` | `build` or `build_tools` |
 | `tool` | `true` in the slices of a tool package, absent elsewhere: `build.lua` sees it as `slice.is_tool` (`build-lua-api.md` 3), and a library that is a tool too builds its programs there only (`recipe-toml.md` 13.2) |
 
