@@ -157,6 +157,22 @@ std::string log_tail(fs::path const& log, std::size_t lines)
     return text.substr(pos == 0 ? 0 : pos + 1);
 }
 
+// A hint for a failed build from its log: what the user can do about a cause otok recognizes; empty: none.
+std::string failure_hint(fs::path const& log)
+{
+    std::string const text = read_file(log).value_or("");
+    // Windows makes symbolic links only for administrators and with Developer Mode on: a build making them fails
+    // elsewhere with ERROR_PRIVILEGE_NOT_HELD
+    for (std::string const& refusal : symbolic_link_refusals()) {
+        if (text.find(refusal) != std::string::npos) {
+            return "hint: the build was refused a privilege, most likely that of making a symbolic link, which Windows grants with "
+                   "Developer Mode on (Settings > System > For developers) or to administrators; turn Developer Mode on, or tell "
+                   "the recipe's authors, whose build can copy the file instead";
+        }
+    }
+    return {};
+}
+
 std::string timestamp()
 {
     std::time_t const now = std::time(nullptr);
@@ -1807,6 +1823,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
             std::string const tail = log_tail(log, 30);
             // the tail was just shown as it came
             if (!tail.empty() && !shown_log) message += "\nthe end of the log:\n" + tail;
+            if (std::string const hint = failure_hint(log); !hint.empty()) message += "\n" + hint;
             // a dev slice's work directory stays as the failure left it
             message += keep_failure(cache_, work, log, text, work_name, settings_.keep_build_dirs && !dev, !dev);
             return fail(label + " for " + slice_label(spec) + ": " + message);

@@ -1774,4 +1774,55 @@ bool check_license_policy(resolution const& r, license_policy const& policy, dia
     return ok;
 }
 
+// The rule of the packager's hidden_packages over the resolution: a library exists for the consumer when it is in [deps],
+// dynamic or of headers only, or when the products of an existing static library hold its code.
+std::set<std::string> inside_dynamic_alone(resolution const& r, std::size_t configuration, std::string_view target, target_info const& info)
+{
+    std::map<std::string, resolved_package const*> of_target;
+    for (resolved_package const& pkg : r.packages) {
+        if (pkg.target == target && !pkg.configurations[configuration].platforms.empty()) of_target.emplace(pkg.library, &pkg);
+    }
+    // its linkage and the platform it is decided on, on a platform of the target
+    auto const first_platform = [&](resolved_package const& pkg) -> std::string {
+        for (std::string const& pl : pkg.configurations[configuration].platforms) {
+            if (info.find_platform(pl)) return pl;
+        }
+        return {};
+    };
+    auto const dynamic = [&](resolved_package const& pkg) {
+        auto const& linkage = pkg.configurations[configuration].linkage;
+        auto const it = linkage.find(first_platform(pkg));
+        return it != linkage.end() && it->second == "dynamic";
+    };
+    auto const headers_only = [&](resolved_package const& pkg) {
+        merged_options const& options = pkg.configurations[configuration].options;
+        return std::ranges::all_of(pkg.chosen.recipe->products, [&](product const& prod) {
+            return prod.headers_only() || (prod.when && !condition_holds(*prod.when, options, target, ""));
+        });
+    };
+    std::set<std::string> exists;
+    // a static library's products hold the code of its static dependencies, and theirs; a dynamic one's are inside it
+    auto const hold = [&](auto& self, resolved_package const& of) -> void {
+        merged_options const& options = of.configurations[configuration].options;
+        std::string const platform = first_platform(of);
+        for (recipe_dependency const& d : of.chosen.recipe->dependencies) {
+            if (d.when && !condition_holds(*d.when, options, target, platform)) continue;
+            auto const it = of_target.find(d.library);
+            if (it == of_target.end() || dynamic(*it->second)) continue;
+            if (exists.insert(d.library).second) self(self, *it->second);
+        }
+    };
+    for (auto const& [library, pkg] : of_target) {
+        bool const direct = std::ranges::any_of(pkg->required_by, [](package_requirement const& q) { return q.requester == "otok.toml"; });
+        if (!direct && !dynamic(*pkg) && !headers_only(*pkg)) continue;
+        exists.insert(library);
+        if (!dynamic(*pkg)) hold(hold, *pkg);
+    }
+    std::set<std::string> hidden;
+    for (auto const& [library, pkg] : of_target) {
+        if (!exists.contains(library) && !dynamic(*pkg)) hidden.insert(library);
+    }
+    return hidden;
+}
+
 }

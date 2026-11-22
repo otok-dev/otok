@@ -657,6 +657,20 @@ TEST_F(builder_test, builds_a_damaged_slice_again)
     EXPECT_EQ(err.str().find("damaged"), std::string::npos) << err.str();
 }
 
+// a symbolic link Windows refused: what the user can do (the text of ERROR_PRIVILEGE_NOT_HELD, as CMake writes it)
+TEST_F(builder_test, a_refused_symbolic_link_gets_a_hint)
+{
+    write_recipe("b", "2.0", "function build(slice)\n    otok.log('CMake Error: file CREATE_LINK cannot symlink \"a\" to \"b\": A required privilege is not held by the client.')\n"
+                             "    error('no luck')\nend\n", options_of_b);
+    EXPECT_EQ(run({"install"}), 1);
+    EXPECT_NE(err.str().find("hint: the build was refused a privilege, most likely that of making a symbolic link, which Windows grants with "
+                             "Developer Mode on (Settings > System > For developers)"), std::string::npos) << err.str();
+
+    write_recipe("b", "2.0", "function build(slice)\n    otok.log('step one')\n    error('no luck')\nend\n", options_of_b);
+    EXPECT_EQ(run({"install"}), 1);
+    EXPECT_EQ(err.str().find("hint:"), std::string::npos) << err.str();
+}
+
 TEST_F(builder_test, reports_failures)
 {
     std::string const slice = "native-" + machine_arch();

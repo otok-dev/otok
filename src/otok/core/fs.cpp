@@ -80,6 +80,24 @@ std::filesystem::path plain_path(std::filesystem::path const& path)
     return path;
 }
 
+std::vector<std::string> symbolic_link_refusals()
+{
+    std::vector<std::string> out{"A required privilege is not held by the client", "WinError 1314"};
+#ifdef _WIN32
+    wchar_t* buffer = nullptr;
+    DWORD const n = ::FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr,
+        ERROR_PRIVILEGE_NOT_HELD, 0, reinterpret_cast<wchar_t*>(&buffer), 0, nullptr);
+    if (n > 0 && buffer) {
+        std::wstring text{buffer, n};
+        while (!text.empty() && (text.back() == L'\r' || text.back() == L'\n' || text.back() == L' ' || text.back() == L'.')) text.pop_back();
+        std::string const own = path_to_utf8(std::filesystem::path{text});
+        if (!own.empty() && own != out.front()) out.push_back(own);
+    }
+    if (buffer) ::LocalFree(buffer);
+#endif
+    return out;
+}
+
 result<std::string> read_file(std::filesystem::path const& path)
 {
 #ifdef _WIN32

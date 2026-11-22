@@ -657,6 +657,35 @@ TEST(resolver, linkage_needs_the_recipe)
     EXPECT_TRUE(o.of("b").linkage_fallback.empty());
 }
 
+// The static libraries inside dynamic libraries alone (otok-toml.md 5): what `otok metadata` calls hidden
+TEST(resolver, libraries_inside_dynamic_ones_alone)
+{
+    target_info const* const native[] = {&test::native_info()};
+    memory_provider p;
+    std::string const both = "linkage = [\"static\", \"dynamic\"]\n";
+    p.add({.library = "z", .version = "1.0", .platforms = "\"native\""});  // static only
+    p.add({.library = "y", .version = "1.0", .extra = recipe_dep("z", ">= 1"), .platforms = "\"native\""});
+    p.add({.library = "png", .version = "1.0", .extra = recipe_dep("y", ">= 1"), .platforms = "\"native\"", .recipe_keys = both});
+    p.add({.library = "tiff", .version = "1.0", .extra = recipe_dep("z", ">= 1"), .platforms = "\"native\"", .recipe_keys = both});
+    auto const hidden = [&](std::string const& body) {
+        diagnostics d;
+        auto m = parse_manifest("[otok]\nformat = 1\n[native]\nplatforms = [\"native\"]\n" + body, "otok.toml", native, {}, d);
+        EXPECT_TRUE(m) << messages(d);
+        auto r = resolve(*m, native, p, {}, d);
+        EXPECT_TRUE(r) << messages(d);
+        return r ? inside_dynamic_alone(*r, 0, "native", test::native_info()) : std::set<std::string>{"?"};
+    };
+    // png dynamic: y and z, static, are inside it, and theirs alone
+    std::string const png = "[deps.png]\nrecipe = \"p/png\"\nversion = \"1.0\"\n";
+    EXPECT_EQ(hidden(png + "linkage = \"dynamic\"\n"), (std::set<std::string>{"y", "z"}));
+    // all static: the products of png hold their code
+    EXPECT_EQ(hidden(png), std::set<std::string>{});
+    // in [deps]: z exists, y stays inside
+    EXPECT_EQ(hidden(png + "linkage = \"dynamic\"\n[deps.z]\nrecipe = \"p/z\"\nversion = \"1.0\"\n"), std::set<std::string>{"y"});
+    // a static tiff beside: its products hold z
+    EXPECT_EQ(hidden(png + "linkage = \"dynamic\"\n[deps.tiff]\nrecipe = \"p/tiff\"\nversion = \"1.0\"\nlinkage = \"static\"\n"), std::set<std::string>{"y"});
+}
+
 // [deps.<library>] linkage: the dependency's when the project chooses none (docs/PLAN.md decision 68)
 TEST(resolver, linkage_a_dependent_asks_for)
 {

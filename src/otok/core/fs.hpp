@@ -10,6 +10,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "otok/core/error.hpp"
 
@@ -34,6 +35,10 @@ std::filesystem::path identity_path(std::filesystem::path const& path);
 
 // The path as the user knows it, for messages: on Windows without the extended-length prefix long_path gives it.
 std::filesystem::path plain_path(std::filesystem::path const& path);
+
+// What a build's log says when the system refuses it a symbolic link: Windows' text of ERROR_PRIVILEGE_NOT_HELD in English,
+// as Python writes the error, and on Windows in the system's language.
+std::vector<std::string> symbolic_link_refusals();
 
 // std::filesystem::rename that waits out another process holding a file in `from` open: Windows refuses meanwhile
 // with access denied (an indexer or an antivirus reading what was just unpacked, another thread replacing the same

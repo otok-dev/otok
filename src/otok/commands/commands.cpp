@@ -1428,6 +1428,7 @@ int metadata(parsed_command const& cmd, command_context& ctx)
     }
 
     doc["packages"] = nlohmann::json::array();
+    std::map<std::string, std::set<std::string>> hidden_of;  // target → its libraries inside dynamic ones alone
     auto const add = [&](resolved_package const& pkg, bool tool) {
         locked_package const* locked = locked_entry(*fresh, p->r, pkg, tool);
         if (!locked) return;
@@ -1490,6 +1491,9 @@ int metadata(parsed_command const& cmd, command_context& ctx)
             o["linkage"] = std::move(linkage);
             // why it is not the linkage the target table prefers (docs/PLAN.md decision 136)
             o["linkage-fallback"] = std::move(fallback);
+            // inside dynamic libraries alone: its headers only (otok-toml.md 5)
+            if (!hidden_of.contains(ts.target)) hidden_of[ts.target] = inside_dynamic_alone(p->r, c, ts.target, *info);
+            o["hidden"] = hidden_of[ts.target].contains(pkg.library);
             auto const& state = output_states[ts.target];
             auto const key = state.find(pkg.library);
             o["package-key"] = key == state.end() ? nlohmann::json(nullptr) : nlohmann::json(key->second);

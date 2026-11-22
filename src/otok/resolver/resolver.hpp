@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <map>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -133,5 +134,10 @@ std::optional<std::string> policy_refusal(license_expression const& license, lic
 // `[policy]` (otok-toml.md 9) for every package of both arrays. Reports each violation; returns
 // whether there was none.
 bool check_license_policy(resolution const& r, license_policy const& policy, diagnostics& diags);
+
+// The libraries of `target` that exist for the consumer only inside dynamic libraries (otok-toml.md 5), in the configuration:
+// static, not in [deps], their code held by no product of a library existing for the consumer. The packager finds the
+// same from what was built (hidden_packages); `otok metadata` tells them before.
+std::set<std::string> inside_dynamic_alone(resolution const& r, std::size_t configuration, std::string_view target, target_info const& info);
 
 }
