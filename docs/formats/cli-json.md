@@ -6,7 +6,7 @@ Commands that report something print it for people by default: columns, sections
 `--format json` they print one JSON document instead, which scripts, IDEs and coding agents read without parsing that
 layout, and which says everything the text says. `otok metadata` (`metadata.md`) is JSON always and stays as it is.
 
-This document defines the rules common to every command (1, 2) and the document of each command (3, 4). Commands not
+This document defines the rules common to every command (1, 2) and the document of each command (3 to 9). Commands not
 listed here do not take `--format`.
 
 ## 1. The option
@@ -17,7 +17,8 @@ otok <command> --format text|json …
 
 - `text`, the default, is the output for people, which may change in any release.
 - `json` prints the document of 2 and of the command's section on standard output, UTF-8, followed by a line end,
-  and nothing else there. The exit code is the command's own, as without the option.
+  and nothing else there; `install`, `update` and `fetch` print a stream of events instead, one per line (9). The exit
+  code is the command's own, as without the option.
 - Errors and warnings of the command are in the document (2.1) and are not printed on standard error as well.
   Standard error still carries what is shown while the command works (notes of waiting for the cache, progress), which
   a reader of the document can ignore.
@@ -32,11 +33,11 @@ Every document is an object with these keys, beside those of its command:
 |---|---|---|
 | `format` | integer | The format of this document; `1`. A change that removes or changes a key raises it; new keys may be added without (unlike the files of README 1.4, which a newer otok must read: a reader of this document runs against the otok it calls). |
 | `otok` | string | The version of otok that wrote it. |
-| `command` | string | The command: `"search"`, `"info"`. |
+| `command` | string | The command: `"search"`, `"info"`, `"outdated"`, `"audit"`, `"why"`, `"log"`. |
 | `diagnostics` | array | 2.1: the errors and warnings of the command, in the order they were found; empty when there are none. |
 
-The keys of the command are present when the exit code is 0. When the command fails they are `null`, and
-`diagnostics` holds at least one error that says why.
+The keys of the command are present when it did its work, whatever its exit code (`otok audit` exits with 1 for what it
+found, 6). When the command could not do it they are `null`, and `diagnostics` holds at least one error that says why.
 
 As in `metadata.md` 3: every key listed is always present, `null` stands for "none", object keys are written in sorted
 order (the examples are ordered for reading) with two spaces of indentation, and paths are absolute with `/` as the
@@ -343,9 +344,259 @@ What the entry of the variant holds (`index.md` 3, `recipe-toml.md`), every list
 | `from-dependency` | boolean | A program of a dependency (`recipe-toml.md` 13.2): its recipe and version are those the dependency gets. |
 | `when` | condition or null | 2.2; `null`: unconditional. |
 
-## 5. Later
+## 5. `otok outdated`
 
-The commands that are to take `--format json` next, each with its section here: `outdated`, `audit`, `why`,
-`log --list`, and `install`, `update` and `fetch`, whose document will be a stream of JSON lines, one event per line
-(the slices built, the targets skipped and why, the diagnostics), since they run for a long time. `otok tree` gets none:
-its graph is in `otok metadata`.
+```text
+otok outdated [--profile NAME] [--offline] --format json
+```
+
+```json
+{
+  "format": 1,
+  "otok": "0.6.0",
+  "command": "outdated",
+  "diagnostics": [],
+  "packages": [
+    {
+      "library": "libpng",
+      "tool": false,
+      "id": "libpng",
+      "target": "linux",
+      "environment": "linux/gcc",
+      "recipe": "apotocki/libpng",
+      "index": "default",
+      "current": { "version": "1.6.47", "revision": 1 },
+      "compatible": { "version": "1.6.47", "revision": 2 },
+      "latest": { "version": "1.6.50", "revision": 1 },
+      "behind": true,
+      "deprecation": null,
+      "unreadable": []
+    }
+  ]
+}
+```
+
+`packages` holds every package of the graphs this machine builds, as the text lists them: the target packages, then the
+tool packages, in the order of the resolution.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `library` | string | The library name. |
+| `tool` | boolean | A tool package (`otok-toml.md` 7). |
+| `id` | string | Its id in `otok.lock` (`otok-lock.md` 2): `"zlib"`, `"zlib@android"`, `"cmake@4.4.5"`. |
+| `target`, `environment` | string | The target and the environment of its graph, as in `metadata.md` 3.3. |
+| `recipe` | string | The recipe id, `"git"` or `"path"`, as in `metadata.md` 3.3. |
+| `index` | string or null | As in `metadata.md` 3.3; `null` for a git or path recipe. |
+| `current` | `{ version, revision }` or null | What `otok.lock` holds; `null` when it has no entry for the package. |
+| `compatible` | `{ version, revision }` or null | What `otok update` would choose within the constraints of `otok.toml`; `null` when the package would leave the graph. |
+| `latest` | `{ version, revision }` or null | The newest stable version of the recipe in its index, whatever the constraints, at the newest revision of the package's variant (`recipe-toml.md` 6.1), or of the first variant of that version by name when the package's has none; `null` for a git or path recipe and when the index cannot be read. |
+| `behind` | boolean | Whether `compatible` or `latest` differs from `current`. |
+| `deprecation` | string or null | `"deprecated: <reason>; use '<id>' instead"` when the recipe is deprecated (`index.md` 5). |
+| `unreadable` | array | The entries of the recipe this otok cannot read, as in 4.2. |
+
+## 6. `otok audit`
+
+```text
+otok audit [--offline] --format json
+```
+
+```json
+{
+  "format": 1,
+  "otok": "0.6.0",
+  "command": "audit",
+  "diagnostics": [],
+  "packages": 12,
+  "findings": [
+    {
+      "kind": "advisory",
+      "severity": "error",
+      "message": "libpng 1.6.47 (r1) from 'apotocki/libpng' has advisory 2026-0003 (security): Overflow in png_read_row.",
+      "package": {
+        "library": "libpng",
+        "tool": false,
+        "target": "linux",
+        "recipe": "apotocki/libpng",
+        "index": "default",
+        "variant": "linux",
+        "version": "1.6.47",
+        "revision": 1
+      },
+      "license": null,
+      "advisory": { "id": "2026-0003", "severity": "security", "summary": "Overflow in png_read_row.", "unknown": [] },
+      "deprecation": null,
+      "index": null
+    }
+  ]
+}
+```
+
+What audit finds is in `findings`, not in `diagnostics`, which holds only the problems that kept it from checking
+something (an index that cannot be read). The exit code is 1 when a finding is an error, as without `--format`.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `packages` | integer | The number of packages of `otok.lock` checked, tool packages included. |
+| `findings` | array | In the order the text reports them: the licenses, then each package's advisories (sorted by id) and deprecation, then the advisories that cannot be read. Empty: nothing to report. |
+
+A finding:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `kind` | string | `"license"`: `[policy]` refuses the package's license (`otok-toml.md` 9); `"advisory"` (`index.md` 7); `"deprecated"` (`index.md` 5); `"unreadable-advisory"`: an advisory of an index this otok cannot read (`index.md` 7.2), which may concern any package. |
+| `severity` | string | `"error"` (a refused license, a `withdrawn` or `security` advisory, an advisory that cannot be read) or `"warning"`. |
+| `message` | string | What the text prints after `error: ` or `warning: `. |
+| `package` | object or null | The package of `otok.lock`: `library`, `tool`, `target` (`null` for a tool package), `recipe`, `index`, `variant` (as in `metadata.md` 3.3), `version`, `revision`. `null` for `"unreadable-advisory"`. |
+| `license` | string or null | `"license"`: the package's license expression. |
+| `advisory` | advisory or null | `"advisory"`: 2.2. |
+| `deprecation` | string or null | `"deprecated"`: as `deprecation` of 5. |
+| `index` | string or null | `"unreadable-advisory"`: the index, `"default"` or a name of `[indexes]`. |
+
+## 7. `otok why`
+
+```text
+otok why LIBRARY [--profile NAME] [--offline] --format json
+```
+
+```json
+{
+  "format": 1,
+  "otok": "0.6.0",
+  "command": "why",
+  "diagnostics": [],
+  "library": "zlib",
+  "profile": null,
+  "packages": [
+    {
+      "library": "zlib",
+      "tool": false,
+      "id": "zlib",
+      "target": "linux",
+      "environment": "linux/gcc",
+      "recipe": "apotocki/zlib",
+      "index": "default",
+      "version": "1.3.2",
+      "revision": 3,
+      "required-by": [
+        { "requester": "otok.toml", "constraint": null },
+        { "requester": "apotocki/libpng 1.6.47", "constraint": ">= 1.2" }
+      ],
+      "platforms": ["linux"],
+      "options": {
+        "minizip": { "value": false, "requests": [] },
+        "shared": { "value": true, "requests": [{ "requester": "otok.toml", "value": true }] }
+      }
+    }
+  ]
+}
+```
+
+| Key | Type | Meaning |
+|---|---|---|
+| `library` | string | The library asked about. |
+| `profile` | string or null | The profile selected with `--profile`. |
+| `packages` | array | Every package of the library in the graphs this machine builds, as in 5: one per target and environment, and a tool package beside them when it is also a tool. |
+
+A package:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `library`, `tool`, `id`, `target`, `environment`, `recipe`, `index` | | As in 5. |
+| `version`, `revision` | string, integer | The version the resolution chose, with its revision. |
+| `required-by` | array of `{ requester, constraint }` | As in `metadata.md` 3.3: who asked for the library and with which constraint, `null` for any version. |
+| `platforms` | array of strings | The platforms it is built for in the selected profile; empty when not built. |
+| `options` | object: name → `{ value, requests }` | Every option of its recipe: the merged value (2.2) and who asked for which value (`{ requester, value }`), in the order the resolver met them; empty `requests`: the default. |
+
+A library that is not in the graphs is an error, and the keys of the command are `null`.
+
+## 8. `otok log --list`
+
+```text
+otok log LIBRARY [SLICE] --list --format json
+```
+
+The log itself is text, which `--format json` does not wrap: without `--list` it is an error of the command line.
+
+```json
+{
+  "format": 1,
+  "otok": "0.6.0",
+  "command": "log",
+  "diagnostics": [],
+  "library": "zlib",
+  "slice": null,
+  "cache": "/home/me/.cache/otok",
+  "logs": [
+    {
+      "file": "/home/me/.cache/otok/failed/zlib-linux-x86_64-20261122-123033/build.log",
+      "version": "1.3.2",
+      "slice": "linux-x86_64",
+      "configuration": "release",
+      "entry": "build",
+      "failed": true,
+      "time": "2026-11-22T12:30:33Z"
+    }
+  ]
+}
+```
+
+| Key | Type | Meaning |
+|---|---|---|
+| `library` | string | The library asked about. |
+| `slice` | string or null | The slice asked about, `null` when none was. |
+| `cache` | path | The cache the logs were found in (`cache.md`). |
+| `logs` | array | The logs kept in the cache, the newest first. None is an error, as without `--format`. |
+
+A log:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `file` | path | The log file. |
+| `version` | string | The version of the library built. |
+| `slice`, `configuration` | string or null | The slice and its configuration (`"release"`, `"debug"`); `null` for the patching of a source. |
+| `entry` | string | `"build"`, `"build_tools"` (the `build_tools` entries of the recipe, `recipe-toml.md`), or `"source"` (the source patched). |
+| `failed` | boolean | Whether the build failed (the log kept in `failed/`, `cache.md`). |
+| `time` | string | When the log was last written. |
+
+## 9. `otok install`, `update` and `fetch`
+
+```text
+otok install|update|fetch … --format json
+```
+
+These run for minutes, so they do not print one document at the end: they print a stream of JSON lines (JSON Lines,
+`https://jsonlines.org`), one event per line as it happens, each a JSON object on one line with its `event`. The rules
+of 1 and 2 hold for each event; in place of the keys of 2, the stream begins with `start` and ends with `end`:
+
+```text
+{"command":"install","event":"start","format":1,"otok":"0.6.0"}
+{"changes":["added zlib 1.3.2 (r3)"],"event":"lock","state":"created"}
+{"event":"inputs","resources":0,"sources":1}
+{"build-tools":false,"configuration":"release","dev":null,"event":"slice","id":"zlib","library":"zlib","revision":3,"seconds":null,"slice":"linux-x86_64","state":"building","tool":false,"version":"1.3.2"}
+{"build-tools":false,"configuration":"release","dev":null,"event":"slice","id":"zlib","library":"zlib","revision":3,"seconds":12.4,"slice":"linux-x86_64","state":"built","tool":false,"version":"1.3.2"}
+{"cached":0,"count":1,"event":"slices"}
+{"copied":14,"dir":"Otok","event":"output","removed":0,"target":"linux","unchanged":0}
+{"event":"end","exit":0}
+```
+
+A reader takes each line as it comes and ignores the events and keys it does not know. A line of standard output that
+otok has not made into an event of its own is given as a `text` event rather than left out, so the stream is always
+valid. Standard error carries the same progress for people as without the option (the slices under way, `note:` lines
+of waiting and fetching); errors and warnings are `diagnostic` events instead.
+
+| `event` | Keys | When |
+|---|---|---|
+| `start` | `format`, `otok`, `command` (`"install"`, `"update"`, `"fetch"`) | First. |
+| `lock` | `state`: `"created"`, `"updated"`, `"rewritten"` (the same packages written anew) or `"up-to-date"`; `changes`: the changes, as the text prints them (`"added zlib 1.3.2 (r3)"`, `"zlib: 1.3.1 (r1) -> 1.3.2 (r3)"`) | After resolving, once `otok.lock` is checked or written. Not with an error before. |
+| `standard` | `target`, `language` (`"C"`, `"C++"`), `standard` (`"17"`) | A C or C++ standard the project does not set, chosen as the lowest every recipe allows (`otok-toml.md` 5.1). |
+| `inputs` | `sources`, `resources`: how many are in the cache | Once the inputs are fetched (or found in the cache). |
+| `skipped` | `target`, `reason` | A target table this machine does not build (`otok-toml.md` 4.9). |
+| `linkage-fallback` | `package` (its id in `otok.lock`), `linkage`, `reason` | A library built with another linkage than its target table prefers (`otok-toml.md` 5). |
+| `slice` | `state`: `"building"`, `"built"` or `"cached"`; `library`, `id` (as in 5), `version`, `revision`, `tool`, `build-tools` (the `build_tools` entry of its recipe), `slice` (`"linux-x86_64"`, `"headers"`), `configuration`, `seconds` (the build's, for `"built"`; else `null`), `dev` (the working trees of `otok.dev.toml` it was built from, as the text names them; else `null`) | Each slice, as it starts building, is built (`seconds` to a tenth), or is found in the cache. A slice that fails is an error `diagnostic`. |
+| `slices` | `count`, `cached` | Once every slice is there. |
+| `output` | `target`, `dir` (the output as `otok.toml` writes it), `copied`, `unchanged`, `removed` (files) | Each output written. |
+| `tools` | `dir`, `copied`, `unchanged`, `removed` | The tools output written (`otok-toml.md` 7.1). |
+| `garbage` | `entries`, `bytes` | The cache entries removed by the collection at the end (`cache.md` 9). |
+| `diagnostic` | as 2.1 | An error or a warning. Those of the slices and the outputs come as they are found; those otok gathers while it checks the project and the lock (and the failures of slices) come together before `end`. |
+| `text` | `text` | A line of standard output not made into an event (see above). |
+| `end` | `exit` | Last: the exit code. |

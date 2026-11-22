@@ -5,6 +5,7 @@
 // toolchain: build.lua writes its "libraries" itself, so no compiler is needed.
 
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -756,6 +757,72 @@ TEST_F(builder_test, shows_what_slices_build_with)
     EXPECT_EQ(err.str().find("\x1b["), std::string::npos) << err.str();
 }
 
+// install --format json: JSON lines, one event per line (cli-json.md 9)
+TEST_F(builder_test, prints_json_lines)
+{
+    auto const events = [&] {
+        std::vector<nlohmann::json> list;
+        std::istringstream lines{out.str()};
+        for (std::string line; std::getline(lines, line);) {
+            auto j = nlohmann::json::parse(line, nullptr, false);
+            EXPECT_FALSE(j.is_discarded()) << line;
+            EXPECT_TRUE(j.is_object() && j.contains("event")) << line;
+            list.push_back(std::move(j));
+        }
+        return list;
+    };
+    auto const names = [](std::vector<nlohmann::json> const& list) {
+        std::string text;
+        for (nlohmann::json const& e : list) text += e["event"].get<std::string>() + (e.contains("state") ? ":" + e["state"].get<std::string>() : "") + " ";
+        return text;
+    };
+    std::string const slice = "native-" + machine_arch();
+
+    ASSERT_EQ(run({"install", "--format", "json"}), 0) << err.str();
+    auto list = events();
+    EXPECT_EQ(names(list), "start lock:created inputs slice:building slice:built slice:building slice:built slices output end ");
+    EXPECT_EQ(list.front(), nlohmann::json::parse(R"({"event": "start", "format": 1, "otok": ")" + std::string{build_info::version}
+        + R"(", "command": "install"})"));
+    EXPECT_EQ(list[1]["changes"], (nlohmann::json{"added a 1.0 (r1)", "added b 2.0 (r1)"}));
+    EXPECT_EQ(list[2], nlohmann::json::parse(R"({"event": "inputs", "sources": 2, "resources": 0})"));
+    nlohmann::json built = list[4];
+    EXPECT_TRUE(built["seconds"].is_number()) << built;
+    built.erase("seconds");
+    EXPECT_EQ(built, nlohmann::json::parse(R"({"event": "slice", "state": "built", "library": "b", "id": "b", "version": "2.0", "revision": 1,
+        "tool": false, "build-tools": false, "slice": ")" + slice + R"(", "configuration": "release", "dev": null})"));
+    EXPECT_EQ(list[7], nlohmann::json::parse(R"({"event": "slices", "count": 2, "cached": 0})"));
+    EXPECT_EQ(list[8], nlohmann::json::parse(R"({"event": "output", "target": "native", "dir": "Otok", "copied": )"
+        + std::to_string(list[8]["copied"].get<int>()) + R"(, "unchanged": 0, "removed": 0})"));
+    EXPECT_EQ(list.back(), nlohmann::json::parse(R"({"event": "end", "exit": 0})"));
+    // the progress for people stays on standard error
+    EXPECT_NE(err.str().find("built b 2.0 for " + slice), std::string::npos) << err.str();
+
+    // again: nothing changes
+    ASSERT_EQ(run({"install", "--format", "json"}), 0) << err.str();
+    list = events();
+    EXPECT_EQ(names(list), "start lock:up-to-date inputs slice:cached slice:cached slices output end ");
+    EXPECT_EQ(list[1]["changes"], nlohmann::json::array());
+    ASSERT_EQ(run({"install", "--locked", "--format", "json"}), 0) << err.str();
+    EXPECT_EQ(events()[1], nlohmann::json::parse(R"({"event": "lock", "state": "up-to-date", "changes": []})"));
+
+    // a failed build: its error as a diagnostic, before the end
+    write_recipe("b", "2.0", "function build(slice)\n    error('no luck')\nend\n", options_of_b + "[options.extra]\ntype = \"bool\"\ndefault = true\ndoc = \"d\"\n");
+    EXPECT_EQ(run({"install", "--format", "json"}), 1);
+    list = events();
+    ASSERT_GE(list.size(), 3u);
+    EXPECT_EQ(list.back(), nlohmann::json::parse(R"({"event": "end", "exit": 1})"));
+    nlohmann::json const& failure = list[list.size() - 2];
+    EXPECT_EQ(failure["event"], "diagnostic");
+    EXPECT_EQ(failure["severity"], "error");
+    EXPECT_NE(failure["message"].get<std::string>().find("no luck"), std::string::npos) << failure;
+    EXPECT_EQ(err.str().find("error:"), std::string::npos) << err.str();
+
+    // an error before anything is built
+    project.write("otok.toml", manifest + "[deps.zz]\nrecipe = { path = \"recipes/zz\" }\n");
+    EXPECT_EQ(run({"install", "--format", "json"}), 1);
+    EXPECT_EQ(names(events()), "start diagnostic end ");
+}
+
 // `otok log` (docs/PLAN.md decision 59): the newest log of a library's builds in the cache, a failed one too.
 TEST_F(builder_test, shows_the_logs_of_builds)
 {
@@ -781,6 +848,34 @@ TEST_F(builder_test, shows_the_logs_of_builds)
     EXPECT_LT(listed.find("2.0 " + slice + " release, "), listed.find("2.0 " + slice + " release, failed, ")) << listed;
     EXPECT_EQ(run({"log", "b", "other-slice"}), 1);
     EXPECT_NE(err.str().find("error: no log of 'b' for 'other-slice'"), std::string::npos) << err.str();
+
+    // the list as JSON (cli-json.md 8)
+    ASSERT_EQ(run({"log", "b", "--list", "--format", "json"}), 0) << err.str();
+    EXPECT_EQ(err.str(), "");
+    auto j = nlohmann::json::parse(out.str());
+    EXPECT_EQ(j["command"], "log");
+    EXPECT_EQ(j["library"], "b");
+    EXPECT_EQ(j["slice"], nullptr);
+    EXPECT_TRUE(j["cache"].is_string());
+    ASSERT_EQ(j["logs"].size(), 2u) << j;
+    for (std::size_t i = 0; i < 2; ++i) {
+        nlohmann::json const& l = j["logs"][i];
+        EXPECT_EQ(l["version"], "2.0");
+        EXPECT_EQ(l["slice"], slice);
+        EXPECT_EQ(l["configuration"], "release");
+        EXPECT_EQ(l["entry"], "build");
+        EXPECT_EQ(l["failed"], i == 1);
+        EXPECT_TRUE(std::filesystem::exists(path_from_utf8(l["file"].get<std::string>()))) << l;
+        std::string const time = l["time"];
+        EXPECT_EQ(time.size(), 20u) << time;  // 2026-11-22T12:30:33Z
+        EXPECT_EQ(time.substr(10, 1) + time.substr(19), "TZ") << time;
+    }
+    EXPECT_EQ(run({"log", "b", "other-slice", "--list", "--format", "json"}), 1);
+    j = nlohmann::json::parse(out.str());
+    EXPECT_EQ(j["logs"], nullptr);
+    EXPECT_NE(j["diagnostics"][0]["message"].get<std::string>().find("no log of 'b' for 'other-slice'"), std::string::npos) << j;
+    EXPECT_EQ(run({"log", "b", "--format", "json"}), 1);
+    EXPECT_EQ(err.str(), "error: --format json needs --list: a log itself is text\n");
 }
 
 TEST_F(builder_test, checks_libraries)

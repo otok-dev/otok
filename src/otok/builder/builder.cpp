@@ -1697,6 +1697,12 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         out.entry = cache_.root() / "dev" / project_key / work_name;
     }
 
+    // for --format json (cli-json.md 9)
+    auto const report_slice = [&](slice_event::kind state, double seconds) {
+        if (!settings_.on_slice) return;
+        settings_.on_slice({state, p.library, p.id, rec.version->str(), rec.revision, tool, building_tools, spec, seconds,
+            dev ? inputs.dev->label : std::string{}});
+    };
     std::error_code ec;
     if (!dev && fs::exists(out.entry, ec)) {
         auto result = read_result(out.entry);
@@ -1704,6 +1710,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
             out.output = std::move(*result);
             out.cached = true;
             cache_.mark_used(out.entry);
+            report_slice(slice_event::kind::cached, 0);
             say(label + " " + slice_label(spec) + ": cached" + slice_done(p.id, tool, entry));
             return out;
         }
@@ -1715,6 +1722,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
     }
 
     // on a terminal the slice is shown below the lines while it builds (docs/PLAN.md decision 59); with -vv this heads its output
+    report_slice(slice_event::kind::building, 0);
     if (!settings_.display || settings_.verbosity >= 2) say("building " + label + " for " + slice_label(spec));
     // below the lines while it builds (docs/PLAN.md decision 59)
     struct shown_task
@@ -2418,6 +2426,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
     char seconds[32];
     std::snprintf(seconds, sizeof seconds, "%.1f", took.count());
     if (shown.display) shown.display->end(shown.id);  // off the display before its line
+    report_slice(slice_event::kind::built, took.count());
     say("built " + label + " for " + slice_label(spec) + (dev ? " (dev: " + inputs.dev->label + ")" : std::string{}) + " (" + seconds + " s)"
         + slice_done(p.id, tool, entry));
     return out;

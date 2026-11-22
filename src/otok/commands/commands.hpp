@@ -27,6 +27,8 @@
 // and building come with phases 4-6), tree, why, help.
 namespace otok {
 
+class json_lines;
+
 struct command_context
 {
     std::filesystem::path project_dir;              // where otok.toml and otok.lock are
@@ -69,6 +71,8 @@ struct command_context
     // Variables added to the environment of git: `otok publish` gives git its GitHub token for the index, as GIT_CONFIG_*
     // of an http.extraHeader, which no command line or message shows.
     env_vars git_env{};
+    // install, update and fetch with --format json (cli-json.md 9): their events; nothing: text
+    json_lines* events = nullptr;
 };
 
 std::span<option_spec const> global_options();

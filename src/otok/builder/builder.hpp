@@ -4,8 +4,10 @@
 #pragma once
 
 #include <condition_variable>
+#include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -88,6 +90,25 @@ struct announcements
     }
 };
 
+// A slice as it starts building, is built, or is found in the cache: for `--format json` (cli-json.md 9).
+struct slice_event
+{
+    enum class kind
+    {
+        building,
+        built,
+        cached
+    };
+    kind state = kind::building;
+    std::string library, id, version;
+    std::int64_t revision = 0;
+    bool tool = false;
+    bool build_tools = false;
+    slice_spec spec;
+    double seconds = 0;  // built: how long it took
+    std::string dev;     // the working trees of otok.dev.toml it was built from; empty: none
+};
+
 struct build_settings
 {
     std::size_t configuration = 0;          // index into resolution::configurations
@@ -100,6 +121,8 @@ struct build_settings
     // of its own with `jobs`
     job_broker* broker = nullptr;
     announcements* announced = nullptr;     // shared with other builders; nothing: each says its own
+    // Told of each slice, from the threads of the builds; nothing: none
+    std::function<void(slice_event const&)> on_slice;
     std::optional<git_tool> git;            // applies patches
     build_isolation isolation = build_isolation::unavailable;
     host_sandbox sandbox;                   // the mechanism, with `isolation == sandbox`; why there is none, with `unavailable`

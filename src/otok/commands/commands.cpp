@@ -6,12 +6,14 @@
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -51,7 +53,86 @@
 
 namespace otok {
 
+// The events of install, update and fetch with --format json (cli-json.md 9): one JSON object per line on standard output,
+// from the threads of the builds too.
+class json_lines
+{
+public:
+    explicit json_lines(std::streambuf* out)
+        : out_{out}
+    {
+    }
+
+    void emit(nlohmann::json const& event)
+    {
+        std::lock_guard lock{mutex_};
+        out_ << event.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) << "\n" << std::flush;
+    }
+
+    // cli-json.md 2.1
+    void report(otok::diagnostic const& d)
+    {
+        nlohmann::json j;
+        j["event"] = "diagnostic";
+        j["severity"] = d.level == severity::error ? "error" : "warning";
+        j["message"] = d.message;
+        j["file"] = d.where.file.empty() ? nlohmann::json(nullptr) : nlohmann::json(d.where.file);
+        j["line"] = d.where.line != 0 ? nlohmann::json(d.where.line) : nlohmann::json(nullptr);
+        j["column"] = d.where.column != 0 ? nlohmann::json(d.where.column) : nlohmann::json(nullptr);
+        emit(j);
+    }
+
+    void warning(std::string const& message)
+    {
+        otok::diagnostic d;
+        d.level = severity::warning;
+        d.message = message;
+        report(d);
+    }
+
+private:
+    std::mutex mutex_;
+    std::ostream out_;
+};
+
 namespace {
+
+// Standard output while install, update or fetch prints JSON lines: a line otok has not made into an event of its own is a
+// `text` event (cli-json.md 9).
+class text_lines : public std::streambuf
+{
+public:
+    explicit text_lines(json_lines& events)
+        : events_{events}
+    {
+    }
+
+    ~text_lines() override { finish(); }
+
+    void finish()
+    {
+        if (line_.empty()) return;
+        events_.emit({{"event", "text"}, {"text", line_}});
+        line_.clear();
+    }
+
+protected:
+    int_type overflow(int_type c) override
+    {
+        if (traits_type::eq_int_type(c, traits_type::eof())) return traits_type::not_eof(c);
+        if (traits_type::to_char_type(c) == '\n') {
+            events_.emit({{"event", "text"}, {"text", line_}});
+            line_.clear();
+        } else {
+            line_ += traits_type::to_char_type(c);
+        }
+        return c;
+    }
+
+private:
+    json_lines& events_;
+    std::string line_;
+};
 
 constexpr std::size_t any_number = static_cast<std::size_t>(-1);
 
@@ -60,6 +141,7 @@ option_spec const build_profile_option{"profile", 0, "NAME", "Fetch (and build) 
 option_spec const locked_option{"locked", 0, "", "Fail if otok.lock is missing or would change (for CI)"};
 option_spec const offline_option{"offline", 0, "", "Use only the cache: download and fetch nothing"};
 option_spec const format_option{"format", 0, "text|json", "Print for people (text, the default) or one JSON document for scripts and agents (json; docs/formats/cli-json.md)"};
+option_spec const stream_format_option{"format", 0, "text|json", "Print for people (text, the default) or JSON lines, one event per line, for scripts and agents (json; docs/formats/cli-json.md 9)"};
 option_spec const frozen_option{"frozen", 0, "", "--locked and --offline together"};
 option_spec const allow_advisory_option{"allow-advisory", 0, "ID,...", "Install versions with these withdrawn or security advisories all the same"};
 // What a build shows (docs/PLAN.md decision 59).
@@ -94,6 +176,63 @@ std::string in_quotes(std::string_view s)
 void report(diagnostics const& diags, std::ostream& err)
 {
     for (diagnostic const& d : diags.items()) err << format(d) << "\n";
+}
+
+// The diagnostics of install, update or fetch: on standard error, or events (cli-json.md 9).
+void report(diagnostics const& diags, command_context& ctx)
+{
+    if (!ctx.events) return report(diags, ctx.err);
+    for (diagnostic const& d : diags.items()) ctx.events->report(d);
+}
+
+// The format of the documents of --format json (cli-json.md 2).
+constexpr int cli_json_format = 1;
+
+// --format (cli-json.md 1): whether the command prints its JSON document; nothing, reported, for a value neither 'text' nor
+// 'json'.
+std::optional<bool> json_requested(parsed_command const& cmd, command_context& ctx)
+{
+    auto const format = cmd.value("format");
+    if (!format || *format == "text") return false;
+    if (*format == "json") return true;
+    ctx.err << "error: --format must be 'text' or 'json', not " << in_quotes(*format) << "\n";
+    return std::nullopt;
+}
+
+// The document of cli-json.md 2 around `body`, the command's keys (null when it failed), on standard output; the exit code.
+int print_json(command_context& ctx, std::string_view command, diagnostics const& diags, nlohmann::json body)
+{
+    body["format"] = cli_json_format;
+    body["otok"] = std::string{build_info::version};
+    body["command"] = std::string{command};
+    nlohmann::json list = nlohmann::json::array();
+    for (diagnostic const& d : diags.items()) {
+        nlohmann::json j;
+        j["severity"] = d.level == severity::error ? "error" : "warning";
+        j["message"] = d.message;
+        j["file"] = d.where.file.empty() ? nlohmann::json(nullptr) : nlohmann::json(d.where.file);
+        j["line"] = d.where.line != 0 ? nlohmann::json(d.where.line) : nlohmann::json(nullptr);
+        j["column"] = d.where.column != 0 ? nlohmann::json(d.where.column) : nlohmann::json(nullptr);
+        list.push_back(std::move(j));
+    }
+    body["diagnostics"] = std::move(list);
+    ctx.out << body.dump(2, ' ', false, nlohmann::json::error_handler_t::replace) << "\n";
+    return diags.has_errors() ? 1 : 0;
+}
+
+// A warning said while install, update or fetch works.
+void warn(command_context& ctx, std::string const& message)
+{
+    if (ctx.events) ctx.events->warning(message);
+    else ctx.err << "warning: " << message << "\n";
+}
+
+// An event of install, update or fetch with --format json; nothing without (cli-json.md 9).
+void emit(command_context& ctx, std::string const& event, nlohmann::json keys)
+{
+    if (!ctx.events) return;
+    keys["event"] = event;
+    ctx.events->emit(keys);
 }
 
 // --progress (docs/PLAN.md decision 59): false, reported, when it is neither `auto` nor `plain`.
@@ -616,7 +755,11 @@ bool write_changes(project const& p, lock_file const& fresh, command_context& ct
             diags.warning({}, "'mirrors-only' in fetch names " + in_quotes(library) + ", which is not a dependency of the project");
         }
     }
-    if (changes.empty()) {
+    if (ctx.events) {
+        char const* const state = !changes.empty() ? (p.lock ? "updated" : "created")
+            : text == p.lock_text ? "up-to-date" : p.lock ? "rewritten" : "created";
+        emit(ctx, "lock", {{"state", state}, {"changes", changes}});
+    } else if (changes.empty()) {
         ctx.out << (text == p.lock_text ? "otok.lock is up to date\n" : "otok.lock rewritten\n");
     } else {
         ctx.out << (p.lock ? "otok.lock updated:\n" : "otok.lock created:\n");
@@ -790,7 +933,8 @@ std::optional<std::map<std::string, package_inputs>> fetch_project_inputs(projec
     auto const counted = [](std::size_t n, std::string const& what) { return std::to_string(n) + " " + what + (n == 1 ? "" : "s"); };
     std::string summary = sources ? counted(sources, "source") : std::string{};
     if (std::size_t const resources = targets.size() - sources) summary += (summary.empty() ? "" : ", ") + counted(resources, "resource");
-    ctx.out << (requests.empty() ? std::string{"no inputs to fetch"} : "inputs in the cache: " + summary) << "\n";
+    if (ctx.events) emit(ctx, "inputs", {{"sources", sources}, {"resources", targets.size() - sources}});
+    else ctx.out << (requests.empty() ? std::string{"no inputs to fetch"} : "inputs in the cache: " + summary) << "\n";
     return inputs;
 }
 
@@ -914,6 +1058,8 @@ bool deliver_tools(project const& p, manifest const& built_m, std::span<built_pa
         fs::remove(long_path(dir / output_state_file), ec);
         for (char const* file : {tools_file, tools_msbuild_file, tools_cmake_file}) fs::remove(long_path(dir / file), ec);
         fs::remove(long_path(dir), ec);  // when empty
+    } else if (ctx.events) {
+        emit(ctx, "tools", {{"dir", p.m.tools_output}, {"copied", changes->copied}, {"unchanged", changes->unchanged}, {"removed", changes->removed}});
     } else {
         ctx.out << "tools '" << p.m.tools_output << "': " << changes->copied << " copied, " << changes->unchanged << " unchanged, "
                 << changes->removed << " removed\n";
@@ -940,7 +1086,13 @@ bool build_project(parsed_command const& cmd, project& p, lock_file const& lock,
             otok::profile const* const prof = p.configuration > 0 ? &p.m.profiles[p.configuration - 1] : nullptr;
             for (language const l : languages) {
                 if (info && standards[l] && !standard_of(p.m, prof, "", false, *info, l)) {
-                    ctx.out << language_name(l) << " standard of '" << target << "': " << *standards[l] << ", the lowest every recipe allows\n";
+                    std::ostringstream standard;
+                    standard << *standards[l];
+                    if (ctx.events) {
+                        emit(ctx, "standard", {{"target", target}, {"language", std::string{language_name(l)}}, {"standard", standard.str()}});
+                    } else {
+                        ctx.out << language_name(l) << " standard of '" << target << "': " << standard.str() << ", the lowest every recipe allows\n";
+                    }
                 }
             }
         }
@@ -970,6 +1122,15 @@ bool build_project(parsed_command const& cmd, project& p, lock_file const& lock,
     std::expected<std::vector<built_package>, std::vector<error>> built;
     settings.broker = ctx.jobs;
     settings.announced = ctx.announced;
+    if (ctx.events) {
+        settings.on_slice = [&ctx](slice_event const& e) {
+            char const* const state = e.state == slice_event::kind::building ? "building" : e.state == slice_event::kind::built ? "built" : "cached";
+            emit(ctx, "slice", {{"state", state}, {"library", e.library}, {"id", e.id}, {"version", e.version}, {"revision", e.revision},
+                {"tool", e.tool}, {"build-tools", e.build_tools}, {"slice", slice_name(e.spec)}, {"configuration", e.spec.configuration},
+                {"seconds", e.state == slice_event::kind::built ? nlohmann::json(std::round(e.seconds * 10) / 10) : nlohmann::json(nullptr)},
+                {"dev", e.dev.empty() ? nlohmann::json(nullptr) : nlohmann::json(e.dev)}});
+        };
+    }
     if (ctx.display) {
         // the command running this build shows it, and ctx.err reaches its display already (docs/PLAN.md decision 60)
         if (ctx.display->live()) settings.display = ctx.display;
@@ -1003,12 +1164,13 @@ bool build_project(parsed_command const& cmd, project& p, lock_file const& lock,
             if (s.cached) ++cached;
         }
     }
-    ctx.out << "slices: " << slices << " (" << cached << " from the cache)\n";
+    if (ctx.events) emit(ctx, "slices", {{"count", slices}, {"cached", cached}});
+    else ctx.out << "slices: " << slices << " (" << cached << " from the cache)\n";
     // the static libraries a dynamic one should hide (otok-toml.md 5.2): an error of otok publish, whose installs are nested
     std::vector<std::string> const exported = hidden_export_problems(p.built(), p.configuration, *built);
     for (std::string const& e : exported) {
         if (ctx.nested) diags.error({}, e);
-        else ctx.err << "warning: " << e << "\n";
+        else warn(ctx, e);
     }
     if (ctx.nested && !exported.empty()) return false;
 
@@ -1056,15 +1218,20 @@ bool build_project(parsed_command const& cmd, project& p, lock_file const& lock,
             diags.error({}, changes.error().message);
             return false;
         }
-        for (std::string const& w : changes->warnings) ctx.err << "warning: the output '" << ts.output << "': " << w << "\n";
+        for (std::string const& w : changes->warnings) warn(ctx, "the output '" + ts.output + "': " + w);
         // what App Store review would reject: an error of otok publish (otok-toml.md 4.4, 4.5), whose installs are nested
         for (std::string const& w : changes->problems) {
             if (ctx.nested) diags.error({}, "the output '" + ts.output + "': " + w);
-            else ctx.err << "warning: the output '" << ts.output << "': " << w << "\n";
+            else warn(ctx, "the output '" + ts.output + "': " + w);
         }
         if (ctx.nested && !changes->problems.empty()) return false;
-        ctx.out << "output '" << ts.output << "': " << changes->copied << " copied, " << changes->unchanged << " unchanged, "
-                << changes->removed << " removed\n";
+        if (ctx.events) {
+            emit(ctx, "output", {{"target", ts.target}, {"dir", ts.output}, {"copied", changes->copied}, {"unchanged", changes->unchanged},
+                {"removed", changes->removed}});
+        } else {
+            ctx.out << "output '" << ts.output << "': " << changes->copied << " copied, " << changes->unchanged << " unchanged, "
+                    << changes->removed << " removed\n";
+        }
     }
     return deliver_tools(p, built_m, *built, targets, ctx, diags);
 }
@@ -1100,14 +1267,13 @@ void collect_garbage_if_due(project& p, command_context& ctx);
 
 // install, update and fetch (docs/PLAN.md decision 16): resolve, check against the lock, write it,
 // fetch the inputs. `use_lock` and `unlocked` as for load_project; `everything`: every package's inputs.
-int install_pipeline(parsed_command const& cmd, command_context& ctx, bool use_lock, std::vector<std::string> const& unlocked,
+int run_install_pipeline(parsed_command const& cmd, command_context& ctx, bool use_lock, std::vector<std::string> const& unlocked,
     bool everything)
 {
-    if (!progress_valid(cmd, ctx)) return 1;
     diagnostics diags;
     auto p = load_project(ctx, cmd, use_lock, unlocked, diags, !cmd.flag("no-dev"));
     if (!p) {
-        report(diags, ctx.err);
+        report(diags, ctx);
         return 1;
     }
     for (std::string const& library : unlocked) {
@@ -1135,14 +1301,19 @@ int install_pipeline(parsed_command const& cmd, command_context& ctx, bool use_l
     if (!diags.has_errors()) {
         if (locked(cmd)) {
             check_locked(*p, *fresh, diags);
-            if (!diags.has_errors()) ctx.out << "otok.lock is up to date\n";
+            if (diags.has_errors()) {
+            } else if (ctx.events) {
+                emit(ctx, "lock", {{"state", "up-to-date"}, {"changes", nlohmann::json::array()}});
+            } else {
+                ctx.out << "otok.lock is up to date\n";
+            }
         } else {
             write_changes(*p, *fresh, ctx, diags);
         }
     }
     // update --no-build: the lock alone, for scripts that compare it with an earlier one (docs/PLAN.md decision 131)
     if (cmd.flag("no-build")) {
-        report(diags, ctx.err);
+        report(diags, ctx);
         return diags.has_errors() ? 1 : 0;
     }
     // the targets and the toolchains before anything is fetched (docs/PLAN.md decision 38); the target tables this machine
@@ -1207,6 +1378,7 @@ int install_pipeline(parsed_command const& cmd, command_context& ctx, bool use_l
             auto const why = skipped.find(ts.target);
             if (why == skipped.end()) continue;
             if (none_built()) none += "\n  '" + ts.target + "': " + why->second;
+            else if (ctx.events) emit(ctx, "skipped", {{"target", ts.target}, {"reason", why->second}});
             else ctx.out << "note: not building for '" << ts.target << "': " << why->second << "\n";
         }
         if (none_built()) diags.error({}, none);
@@ -1216,15 +1388,49 @@ int install_pipeline(parsed_command const& cmd, command_context& ctx, bool use_l
             package_configuration const& pc = pkg.configurations[p->configuration];
             std::set<std::string> said;
             for (auto const& [platform, why] : pc.linkage_fallback) {
-                if (said.insert(why).second) ctx.out << "note: " << pkg.id << ": " << pc.linkage.at(platform) << ", " << why << "\n";
+                if (!said.insert(why).second) continue;
+                if (ctx.events) emit(ctx, "linkage-fallback", {{"package", pkg.id}, {"linkage", pc.linkage.at(platform)}, {"reason", why}});
+                else ctx.out << "note: " << pkg.id << ": " << pc.linkage.at(platform) << ", " << why << "\n";
             }
         }
     }
     bool const ok = inputs && (everything
         || (!none_built() && build_project(cmd, *p, *fresh, std::move(*inputs), targets, std::move(*toolchains), skipped, ctx, diags)));
-    report(diags, ctx.err);
+    report(diags, ctx);
     collect_garbage_if_due(*p, ctx);
     return ok ? 0 : 1;
+}
+
+// install, update and fetch, as text or as JSON lines (cli-json.md 9).
+int install_pipeline(parsed_command const& cmd, command_context& ctx, bool use_lock, std::vector<std::string> const& unlocked,
+    bool everything)
+{
+    if (!progress_valid(cmd, ctx)) return 1;
+    auto const json = json_requested(cmd, ctx);
+    if (!json) return 1;
+    if (!*json) return run_install_pipeline(cmd, ctx, use_lock, unlocked, everything);
+    json_lines events{ctx.out.rdbuf()};
+    events.emit({{"event", "start"}, {"format", cli_json_format}, {"otok", std::string{build_info::version}}, {"command", cmd.command}});
+    int code = 1;
+    {
+        // what is still printed as text reaches standard output as `text` events
+        text_lines texts{events};
+        struct restore
+        {
+            command_context& ctx;
+            std::streambuf* out;
+            ~restore()
+            {
+                ctx.out.rdbuf(out);
+                ctx.events = nullptr;
+            }
+        } const restored{ctx, ctx.out.rdbuf(&texts)};
+        ctx.events = &events;
+        code = run_install_pipeline(cmd, ctx, use_lock, unlocked, everything);
+        texts.finish();
+    }
+    events.emit({{"event", "end"}, {"exit", code}});
+    return code;
 }
 
 int install(parsed_command const& cmd, command_context& ctx)
@@ -1538,28 +1744,6 @@ void explain(resolved_package const& pkg, bool tool, project const& p, std::ostr
     }
 }
 
-int why(parsed_command const& cmd, command_context& ctx)
-{
-    diagnostics diags;
-    auto p = load_project(ctx, cmd, true, {}, diags);
-    report(diags, ctx.err);
-    if (!p) return 1;
-    std::string const& library = cmd.arguments.front();
-    bool found = false;
-    for (auto [packages, tool] : {std::pair{&p->r.packages, false}, std::pair{&p->r.tool_packages, true}}) {
-        for (resolved_package const& pkg : *packages) {
-            if (pkg.library != library) continue;
-            explain(pkg, tool, *p, ctx.out);
-            found = true;
-        }
-    }
-    if (!found) {
-        ctx.err << "error: " << in_quotes(library) << " is not a dependency of this project\n";
-        return 1;
-    }
-    return 0;
-}
-
 // "512 B", "1.5 KiB", "12.3 MiB"
 std::string format_size(std::uintmax_t bytes)
 {
@@ -1594,7 +1778,9 @@ void collect_garbage_if_due(project& p, command_context& ctx)
     if (!store || !*store) return;  // another otok process uses the cache: a later run collects
     auto collected = (*store)->collect_garbage({}, days, false);
     if (!collected) {
-        ctx.err << "warning: garbage collection of the cache: " << collected.error().message << "\n";
+        warn(ctx, "garbage collection of the cache: " + collected.error().message);
+    } else if (collected->entries > 0 && ctx.events) {
+        emit(ctx, "garbage", {{"entries", collected->entries}, {"bytes", collected->bytes}});
     } else if (collected->entries > 0) {
         ctx.out << "removed " << collected_text(*collected, days) << "\n";
     }
@@ -1636,26 +1822,78 @@ int licenses(parsed_command const&, command_context& ctx)
     return 0;
 }
 
+// A file's time in UTC, RFC 3339 to the second (cli-json.md 2).
+std::string file_time_text(std::filesystem::file_time_type time)
+{
+    // by the distance from now: file_clock::to_sys is not in every standard library yet
+    auto const system = std::chrono::system_clock::now()
+        + std::chrono::duration_cast<std::chrono::system_clock::duration>(time - std::filesystem::file_time_type::clock::now());
+    auto const at = std::chrono::floor<std::chrono::seconds>(system);
+    auto const day = std::chrono::floor<std::chrono::days>(at);
+    std::chrono::year_month_day const ymd{day};
+    std::chrono::hh_mm_ss const hms{at - day};
+    char text[32];
+    std::snprintf(text, sizeof text, "%04d-%02u-%02uT%02d:%02d:%02dZ", static_cast<int>(ymd.year()), static_cast<unsigned>(ymd.month()),
+        static_cast<unsigned>(ymd.day()), static_cast<int>(hms.hours().count()), static_cast<int>(hms.minutes().count()),
+        static_cast<int>(hms.seconds().count()));
+    return text;
+}
+
 // otok log: the logs of a library's builds kept in the cache (docs/PLAN.md decision 59); no project needed.
 int show_log(parsed_command const& cmd, command_context& ctx)
 {
+    auto const json = json_requested(cmd, ctx);
+    if (!json) return 1;
+    if (*json && !cmd.flag("list")) {
+        ctx.err << "error: --format json needs --list: a log itself is text\n";
+        return 1;
+    }
     diagnostics diags;
+    nlohmann::json body;
+    body["library"] = nullptr;
+    body["slice"] = nullptr;
+    body["cache"] = nullptr;
+    body["logs"] = nullptr;
+    auto const failed = [&] {
+        if (*json) return print_json(ctx, "log", diags, std::move(body));
+        report(diags, ctx.err);
+        return 1;
+    };
     auto config = load_config(ctx.env, diags);
-    report(diags, ctx.err);
-    if (!config) return 1;
+    if (!config) return failed();
+    if (!*json) report(diags, ctx.err);
     cache_notices notices{.waiting = [&ctx](std::string const& what) { ctx.err << "note: " << what << "\n"; }};
     auto cache = cache_store::open(config->cache_dir, std::move(notices));
     if (!cache) {
-        ctx.err << "error: " << cache.error().message << "\n";
-        return 1;
+        diags.error({}, cache.error().message);
+        return failed();
     }
     std::string const& library = cmd.arguments.front();
     std::vector<kept_log> logs = find_build_logs(*cache, library);
     if (cmd.arguments.size() > 1) std::erase_if(logs, [&](kept_log const& l) { return l.slice != cmd.arguments[1]; });
     if (logs.empty()) {
-        ctx.err << "error: no log of " << in_quotes(library) << (cmd.arguments.size() > 1 ? " for " + in_quotes(cmd.arguments[1]) : "")
-                << " in the cache '" << path_to_utf8(cache->root()) << "'\n";
-        return 1;
+        diags.error({}, "no log of " + in_quotes(library) + (cmd.arguments.size() > 1 ? " for " + in_quotes(cmd.arguments[1]) : "")
+                + " in the cache '" + path_to_utf8(cache->root()) + "'");
+        return failed();
+    }
+    if (*json) {
+        body["library"] = library;
+        body["slice"] = cmd.arguments.size() > 1 ? nlohmann::json(cmd.arguments[1]) : nlohmann::json(nullptr);
+        body["cache"] = absolute_path(cache->root());
+        body["logs"] = nlohmann::json::array();
+        for (kept_log const& l : logs) {
+            bool const source = l.entry == "sources";
+            nlohmann::json j;
+            j["file"] = absolute_path(l.file);
+            j["version"] = l.version;
+            j["slice"] = source ? nlohmann::json(nullptr) : string_or_null(l.slice);
+            j["configuration"] = source ? nlohmann::json(nullptr) : string_or_null(l.configuration);
+            j["entry"] = source ? "source" : l.entry;
+            j["failed"] = l.failed;
+            j["time"] = file_time_text(l.time);
+            body["logs"].push_back(std::move(j));
+        }
+        return print_json(ctx, "log", diags, std::move(body));
     }
     if (cmd.flag("list")) {
         for (kept_log const& l : logs) ctx.out << log_label(l) << ", " << age_text(l.time) << ": " << path_to_utf8(l.file) << "\n";
@@ -1825,40 +2063,49 @@ void print_columns(std::vector<std::vector<std::string>> const& rows, std::ostre
     }
 }
 
-// otok search: recipes whose id, library, description or keywords contain the text (docs/PLAN.md decision 45).
-// The format of the documents of --format json (cli-json.md 2).
-constexpr int cli_json_format = 1;
-
-// --format (cli-json.md 1): whether the command prints its JSON document; nothing, reported, for a value neither 'text' nor
-// 'json'.
-std::optional<bool> json_requested(parsed_command const& cmd, command_context& ctx)
+// `recipe` of a package as metadata.md 3.3 writes it: the recipe id, "git" or "path".
+std::string recipe_key(locked_package::recipe_kind kind, recipe_id const& id)
 {
-    auto const format = cmd.value("format");
-    if (!format || *format == "text") return false;
-    if (*format == "json") return true;
-    ctx.err << "error: --format must be 'text' or 'json', not " << in_quotes(*format) << "\n";
-    return std::nullopt;
+    switch (kind) {
+    case locked_package::recipe_kind::index: return id.str();
+    case locked_package::recipe_kind::git: return "git";
+    case locked_package::recipe_kind::path: return "path";
+    }
+    return "?";
 }
 
-// The document of cli-json.md 2 around `body`, the command's keys (null when it failed), on standard output; the exit code.
-int print_json(command_context& ctx, std::string_view command, diagnostics const& diags, nlohmann::json body)
+// `index` of a package as metadata.md 3.3 writes it: the project's index, null for a git or path recipe.
+nlohmann::json index_key(locked_package::recipe_kind kind, std::string const& index)
 {
-    body["format"] = cli_json_format;
-    body["otok"] = std::string{build_info::version};
-    body["command"] = std::string{command};
+    if (kind != locked_package::recipe_kind::index) return nullptr;
+    return index.empty() ? std::string{default_index_name} : index;
+}
+
+// The entries of a recipe this otok cannot read (cli-json.md 4.2): "<variant>/<version>-r<revision>.toml" (index.md 3.2).
+nlohmann::json unreadable_json(recipe_index& idx, recipe_id const& id)
+{
     nlohmann::json list = nlohmann::json::array();
-    for (diagnostic const& d : diags.items()) {
-        nlohmann::json j;
-        j["severity"] = d.level == severity::error ? "error" : "warning";
-        j["message"] = d.message;
-        j["file"] = string_or_null(d.where.file);
-        j["line"] = d.where.line != 0 ? nlohmann::json(d.where.line) : nlohmann::json(nullptr);
-        j["column"] = d.where.column != 0 ? nlohmann::json(d.where.column) : nlohmann::json(nullptr);
-        list.push_back(std::move(j));
+    for (unreadable_entry const& u : idx.unreadable(id)) {
+        std::size_t const slash = u.file.find('/');
+        std::string const name = u.file.substr(slash + 1, u.file.size() - slash - 1 - std::string_view{".toml"}.size());
+        std::size_t const r_at = name.rfind("-r");
+        nlohmann::json item;
+        item["variant"] = u.file.substr(0, slash);
+        item["version"] = name.substr(0, r_at);
+        item["revision"] = r_at == std::string::npos ? nlohmann::json(nullptr) : nlohmann::json(std::stoll(name.substr(r_at + 2)));
+        item["reason"] = u.reason;
+        list.push_back(std::move(item));
     }
-    body["diagnostics"] = std::move(list);
-    ctx.out << body.dump(2, ' ', false, nlohmann::json::error_handler_t::replace) << "\n";
-    return diags.has_errors() ? 1 : 0;
+    return list;
+}
+
+// `{ version, revision }` (cli-json.md 5, 6).
+nlohmann::json version_json(otok::version const& v, std::int64_t revision)
+{
+    nlohmann::json j;
+    j["version"] = v.str();
+    j["revision"] = revision;
+    return j;
 }
 
 // A recipe found by search or info (cli-json.md 3).
@@ -1887,6 +2134,7 @@ nlohmann::json summaries_json(std::vector<std::pair<std::string, recipe_summary>
     return list;
 }
 
+// otok search: recipes whose id, library, description or keywords contain the text (docs/PLAN.md decision 45).
 int search(parsed_command const& cmd, command_context& ctx)
 {
     auto const json = json_requested(cmd, ctx);
@@ -2133,20 +2381,7 @@ result<nlohmann::json> recipe_json(recipe_id const& id, std::string const& index
     }
     j["versions"] = std::move(versions);
 
-    // "<variant>/<version>-r<revision>.toml" (index.md 3.2)
-    nlohmann::json unreadable = nlohmann::json::array();
-    for (unreadable_entry const& u : idx.unreadable(id)) {
-        std::size_t const slash = u.file.find('/');
-        std::string const name = u.file.substr(slash + 1, u.file.size() - slash - 1 - std::string_view{".toml"}.size());
-        std::size_t const r_at = name.rfind("-r");
-        nlohmann::json item;
-        item["variant"] = u.file.substr(0, slash);
-        item["version"] = name.substr(0, r_at);
-        item["revision"] = r_at == std::string::npos ? nlohmann::json(nullptr) : nlohmann::json(std::stoll(name.substr(r_at + 2)));
-        item["reason"] = u.reason;
-        unreadable.push_back(std::move(item));
-    }
-    j["unreadable"] = std::move(unreadable);
+    j["unreadable"] = unreadable_json(idx, id);
 
     // every variant of the newest version, each at its newest revision, by name (cli-json.md 4.2.2)
     std::map<std::string, index_entry const*> variants;
@@ -2364,11 +2599,107 @@ int info(parsed_command const& cmd, command_context& ctx)
     return 0;
 }
 
+// A package of otok.lock as audit names it (cli-json.md 6).
+nlohmann::json locked_package_json(locked_package const& p, bool tool)
+{
+    nlohmann::json j;
+    j["library"] = p.library;
+    j["tool"] = tool;
+    j["target"] = tool ? nlohmann::json(nullptr) : nlohmann::json(p.target);
+    j["recipe"] = recipe_key(p.kind, p.id);
+    j["index"] = index_key(p.kind, p.index);
+    j["variant"] = string_or_null(p.variant);
+    j["version"] = p.version ? nlohmann::json(p.version->str()) : nlohmann::json(nullptr);
+    j["revision"] = p.revision;
+    return j;
+}
+
+// otok why --format json of a package (cli-json.md 7).
+nlohmann::json explain_json(resolved_package const& pkg, bool tool, project const& p)
+{
+    package_configuration const& c = pkg.configurations[p.configuration];
+    recipe const& rec = *pkg.chosen.recipe;
+    nlohmann::json j;
+    j["library"] = pkg.library;
+    j["tool"] = tool;
+    j["id"] = pkg.id;
+    j["target"] = pkg.target;
+    j["environment"] = (tool ? p.r.tool_graphs : p.r.graphs)[pkg.graph].environment.text();
+    j["recipe"] = recipe_key(pkg.chosen.kind, pkg.chosen.id);
+    j["index"] = index_key(pkg.chosen.kind, pkg.chosen.index);
+    j["version"] = rec.version->str();
+    j["revision"] = rec.revision;
+    j["required-by"] = nlohmann::json::array();
+    for (package_requirement const& r : pkg.required_by) {
+        j["required-by"].push_back({{"requester", r.requester}, {"constraint", string_or_null(r.constraint)}});
+    }
+    j["platforms"] = c.platforms;
+    nlohmann::json options = nlohmann::json::object();
+    for (auto const& [name, value] : c.options) {
+        nlohmann::json o;
+        o["value"] = option_json(value);
+        o["requests"] = nlohmann::json::array();
+        if (auto const requests = c.requests.find(name); requests != c.requests.end()) {
+            for (option_request const& r : requests->second) o["requests"].push_back({{"requester", r.requester}, {"value", option_json(r.value)}});
+        }
+        options[name] = std::move(o);
+    }
+    j["options"] = std::move(options);
+    return j;
+}
+
+// otok why: who requires a library and who asked for each of its option values.
+int why(parsed_command const& cmd, command_context& ctx)
+{
+    auto const json = json_requested(cmd, ctx);
+    if (!json) return 1;
+    diagnostics diags;
+    auto p = load_project(ctx, cmd, true, {}, diags);
+    if (!*json) report(diags, ctx.err);
+    std::string const& library = cmd.arguments.front();
+    nlohmann::json packages_json = nlohmann::json::array();
+    bool found = false;
+    if (p) {
+        for (auto [packages, tool] : {std::pair{&p->r.packages, false}, std::pair{&p->r.tool_packages, true}}) {
+            for (resolved_package const& pkg : *packages) {
+                if (pkg.library != library) continue;
+                if (*json) packages_json.push_back(explain_json(pkg, tool, *p));
+                else explain(pkg, tool, *p, ctx.out);
+                found = true;
+            }
+        }
+    }
+    if (*json) {
+        if (p && !found) diags.error({}, in_quotes(library) + " is not a dependency of this project");
+        nlohmann::json body;
+        body["library"] = found ? nlohmann::json(library) : nlohmann::json(nullptr);
+        body["profile"] = found && p->configuration != 0 ? nlohmann::json(p->r.configurations[p->configuration]) : nlohmann::json(nullptr);
+        body["packages"] = found ? std::move(packages_json) : nlohmann::json(nullptr);
+        return print_json(ctx, "why", diags, std::move(body));
+    }
+    if (!p) return 1;
+    if (!found) {
+        ctx.err << "error: " << in_quotes(library) << " is not a dependency of this project\n";
+        return 1;
+    }
+    return 0;
+}
+
 // otok audit: otok.lock against the advisories, [policy] and the deprecations, without resolving
 // (docs/PLAN.md decision 45). Exit 1 on a withdrawn or security advisory or a refused license.
 int audit(parsed_command const& cmd, command_context& ctx)
 {
+    auto const json = json_requested(cmd, ctx);
+    if (!json) return 1;
     diagnostics diags;
+    nlohmann::json body;
+    body["packages"] = nullptr;
+    body["findings"] = nullptr;
+    auto const failed = [&] {
+        if (*json) return print_json(ctx, "audit", diags, std::move(body));
+        report(diags, ctx.err);
+        return 1;
+    };
     std::filesystem::path const manifest_path = ctx.project_dir / "otok.toml";
     auto m = load_manifest(manifest_path, ctx.targets, diags);
     std::optional<lock_file> lock;
@@ -2377,12 +2708,29 @@ int audit(parsed_command const& cmd, command_context& ctx)
         if (!text) diags.error({}, "audit needs otok.lock, and there is none; run 'otok install' to create it");
         else lock = parse_lock(*text, path_to_utf8(lock_path(ctx)), diags);
     }
-    if (!m || !lock) {
-        report(diags, ctx.err);
-        return 1;
-    }
+    if (!m || !lock) return failed();
 
-    std::size_t findings = 0;
+    // what audit found (cli-json.md 6): findings of the document, errors and warnings of the text
+    nlohmann::json findings = nlohmann::json::array();
+    bool failing = false;
+    auto const found = [&](char const* kind, bool error, std::string const& message, locked_package const* p, bool tool) -> nlohmann::json& {
+        failing = failing || error;
+        if (!*json) {
+            if (error) diags.error({}, message);
+            else diags.warning({}, message);
+        }
+        nlohmann::json f;
+        f["kind"] = kind;
+        f["severity"] = error ? "error" : "warning";
+        f["message"] = message;
+        f["package"] = p ? locked_package_json(*p, tool) : nlohmann::json(nullptr);
+        f["license"] = nullptr;
+        f["advisory"] = nullptr;
+        f["deprecation"] = nullptr;
+        f["index"] = nullptr;
+        findings.push_back(std::move(f));
+        return findings.back();
+    };
     auto const label = [](locked_package const& p, bool tool) {
         return (tool ? "tool " : "") + p.library + " " + (p.version ? p.version->str() : "?") + " (r" + std::to_string(p.revision) + ")";
     };
@@ -2391,8 +2739,7 @@ int audit(parsed_command const& cmd, command_context& ctx)
             auto license = parse_license_expression(p.license);
             if (!license) continue;  // the lock parser has checked it
             if (auto rule = policy_refusal(*license, m->policy)) {
-                diags.error({}, label(p, tool) + " is licensed under '" + p.license + "', and " + *rule);
-                ++findings;
+                found("license", true, label(p, tool) + " is licensed under '" + p.license + "', and " + *rule, &p, tool)["license"] = p.license;
             }
         }
     }
@@ -2402,10 +2749,7 @@ int audit(parsed_command const& cmd, command_context& ctx)
     std::unique_ptr<index_session> s;
     if (any_index) {
         s = open_index(cmd, ctx, &*m, diags);
-        if (!s) {
-            report(diags, ctx.err);
-            return 1;
-        }
+        if (!s) return failed();
     }
     for (auto [packages, tool] : {std::pair{&lock->packages, false}, std::pair{&lock->tool_packages, true}}) {
         for (locked_package const& p : *packages) {
@@ -2418,37 +2762,46 @@ int audit(parsed_command const& cmd, command_context& ctx)
                 continue;
             }
             recipe_index* const index = *idx;
-            auto found = index->advisories_of(p.id, p.variant, p.library, *p.version, p.revision);
-            if (!found) {
-                diags.error({}, found.error().message);
+            auto advisories = index->advisories_of(p.id, p.variant, p.library, *p.version, p.revision);
+            if (!advisories) {
+                diags.error({}, advisories.error().message);
                 continue;
             }
-            for (candidate_advisory const& a : *found) {
+            std::ranges::sort(*advisories, {}, &candidate_advisory::id);
+            for (candidate_advisory const& a : *advisories) {
                 std::string const text = name + " has advisory " + a.id + " (" + std::string{severity_name(a.severity)} + "): " + a.summary
                     + unknown_note(a.unknown);
-                if (a.severity == advisory_severity::broken) diags.warning({}, text);
-                else diags.error({}, text);
-                ++findings;
+                nlohmann::json advisory;
+                advisory["id"] = a.id;
+                advisory["severity"] = std::string{severity_name(a.severity)};
+                advisory["summary"] = a.summary;
+                advisory["unknown"] = a.unknown;
+                found("advisory", a.severity != advisory_severity::broken, text, &p, tool)["advisory"] = std::move(advisory);
             }
             auto status = index->status(p.id);
             if (!status) diags.error({}, status.error().message);
-            else if (status->deprecated) {
-                diags.warning({}, name + " is " + status->deprecation());
-                ++findings;
-            }
+            else if (status->deprecated) found("deprecated", false, name + " is " + status->deprecation(), &p, tool)["deprecation"] = status->deprecation();
         }
     }
     if (s) {
         for (auto const& [index_name, index] : s->indexes->opened()) {
             for (std::string const& u : index->unreadable_advisories()) {
-                diags.error({}, index_label(index_name) + " has an advisory this otok cannot read, which a newer otok may: " + u);
-                ++findings;
+                found("unreadable-advisory", true, index_label(index_name) + " has an advisory this otok cannot read, which a newer otok may: " + u,
+                    nullptr, false)["index"] = index_name;
             }
         }
     }
-    report(diags, ctx.err);
     std::size_t const count = lock->packages.size() + lock->tool_packages.size();
-    if (findings == 0) ctx.out << "otok.lock: " << count << (count == 1 ? " package" : " packages") << ", nothing to report\n";
+    if (*json) {
+        if (!diags.has_errors()) {
+            body["packages"] = count;
+            body["findings"] = std::move(findings);
+        }
+        int const code = print_json(ctx, "audit", diags, std::move(body));
+        return failing ? 1 : code;
+    }
+    report(diags, ctx.err);
+    if (findings.empty()) ctx.out << "otok.lock: " << count << (count == 1 ? " package" : " packages") << ", nothing to report\n";
     return diags.has_errors() ? 1 : 0;
 }
 
@@ -2456,29 +2809,47 @@ int audit(parsed_command const& cmd, command_context& ctx)
 // recipe (docs/PLAN.md decision 45).
 int outdated(parsed_command const& cmd, command_context& ctx)
 {
+    auto const json = json_requested(cmd, ctx);
+    if (!json) return 1;
     diagnostics diags;
+    nlohmann::json body;
+    body["packages"] = nullptr;
     auto current = load_project(ctx, cmd, true, {}, diags);
     if (current && !current->lock) diags.error({}, "outdated needs otok.lock, and there is none; run 'otok install' to create it");
     std::unique_ptr<project> compatible;
     if (current && !diags.has_errors()) compatible = load_project(ctx, cmd, false, {}, diags);
     if (!compatible) {
+        if (*json) return print_json(ctx, "outdated", diags, std::move(body));
         report(diags, ctx.err);
         return 1;
     }
     std::map<std::string, std::vector<std::string>> unreadable;  // by recipe id: versions needing a newer otok (index.md 3.2)
-    auto const latest_of = [&](resolved_package const& pkg) -> std::string {
-        if (pkg.chosen.kind != locked_package::recipe_kind::index) return "-";
-        if (!current->indexes) return "?";
+    // the index of an index recipe, when it can be read
+    auto const index_of = [&](resolved_package const& pkg) -> recipe_index* {
+        if (pkg.chosen.kind != locked_package::recipe_kind::index || !current->indexes) return nullptr;
         auto idx = current->indexes->get(pkg.chosen.index.empty() ? std::string{default_index_name} : pkg.chosen.index);
-        if (!idx) return "?";
-        auto list = (*idx)->newest_first(pkg.chosen.id);
-        for (unreadable_entry const& u : (*idx)->unreadable(pkg.chosen.id)) {
+        return idx ? *idx : nullptr;
+    };
+    // the newest stable entry of an index recipe
+    auto const latest_of = [&](resolved_package const& pkg) -> recipe const* {
+        recipe_index* const idx = index_of(pkg);
+        if (!idx) return nullptr;
+        auto list = idx->newest_first(pkg.chosen.id);
+        for (unreadable_entry const& u : idx->unreadable(pkg.chosen.id)) {
             auto& labels = unreadable[pkg.chosen.id.str()];
             if (std::ranges::find(labels, u.label()) == labels.end()) labels.push_back(u.label());
         }
-        return list ? version_text(newest_stable(*list)->projection) : "?";
+        if (!list) return nullptr;
+        index_entry const* newest = newest_stable(*list);
+        if (!newest) return nullptr;
+        // the newest revision of that version in the package's variant, whose revisions are its own (recipe-toml.md 6.1)
+        for (index_entry const* e : *list) {
+            if (*e->projection.version == *newest->projection.version && e->projection.variant == pkg.chosen.recipe->variant) return &e->projection;
+        }
+        return &newest->projection;
     };
     std::vector<std::vector<std::string>> rows{{"library", "current", "compatible", "latest", "recipe"}};
+    nlohmann::json packages_json = nlohmann::json::array();
     std::size_t behind = 0;
     for (auto [packages, tool] : {std::pair{&current->r.packages, false}, std::pair{&current->r.tool_packages, true}}) {
         for (resolved_package const& pkg : *packages) {
@@ -2488,12 +2859,38 @@ int outdated(parsed_command const& cmd, command_context& ctx)
                 : compatible->r.find_tool(pkg.id) ? compatible->r.find_tool(pkg.id) : compatible->r.find_tool(pkg.library);
             std::string const now = locked && locked->version ? locked->version->str() + " (r" + std::to_string(locked->revision) + ")" : "-";
             std::string const update = fresh ? version_text(*fresh->chosen.recipe) : "-";
-            std::string const latest = latest_of(pkg);
-            if (update != now || (latest != "-" && latest != now)) ++behind;
+            recipe const* const newest = latest_of(pkg);
+            bool const from_index = pkg.chosen.kind == locked_package::recipe_kind::index;
+            std::string const latest = newest ? version_text(*newest) : from_index ? "?" : "-";
+            bool const is_behind = update != now || (latest != "-" && latest != now);
+            if (is_behind) ++behind;
+            if (*json) {
+                nlohmann::json j;
+                j["library"] = pkg.library;
+                j["tool"] = tool;
+                j["id"] = pkg.id;
+                j["target"] = pkg.target;
+                j["environment"] = (tool ? current->r.tool_graphs : current->r.graphs)[pkg.graph].environment.text();
+                j["recipe"] = recipe_key(pkg.chosen.kind, pkg.chosen.id);
+                j["index"] = index_key(pkg.chosen.kind, pkg.chosen.index);
+                j["current"] = locked && locked->version ? version_json(*locked->version, locked->revision) : nlohmann::json(nullptr);
+                j["compatible"] = fresh ? version_json(*fresh->chosen.recipe->version, fresh->chosen.recipe->revision) : nlohmann::json(nullptr);
+                j["latest"] = newest ? version_json(*newest->version, newest->revision) : nlohmann::json(nullptr);
+                j["behind"] = is_behind;
+                j["deprecation"] = string_or_null(pkg.chosen.deprecation);
+                recipe_index* const idx = index_of(pkg);
+                j["unreadable"] = idx ? unreadable_json(*idx, pkg.chosen.id) : nlohmann::json::array();
+                packages_json.push_back(std::move(j));
+                continue;
+            }
             std::string recipe = recipe_label(pkg.chosen);
             if (!pkg.chosen.deprecation.empty()) recipe += " (" + pkg.chosen.deprecation + ")";
             rows.push_back({(tool ? "tool " : "") + package_name(pkg, tool, current->r.tool_packages), now, update, latest, recipe});
         }
+    }
+    if (*json) {
+        body["packages"] = std::move(packages_json);
+        return print_json(ctx, "outdated", diags, std::move(body));
     }
     report(diags, ctx.err);
     print_columns(rows, ctx.out);
@@ -3245,15 +3642,15 @@ std::span<command_spec const> command_specs()
 {
     static command_spec const commands[] = {
         {"install", "", "Resolve the dependencies (keeping locked versions), write otok.lock, fetch the inputs and build the libraries into the output",
-            {build_profile_option, locked_option, offline_option, frozen_option, allow_advisory_option, verbose_option, keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option, jobs_option, no_dev_option}, 0, 0},
+            {build_profile_option, locked_option, offline_option, frozen_option, allow_advisory_option, verbose_option, keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option, jobs_option, no_dev_option, stream_format_option}, 0, 0},
         {"update", "[LIBRARY...]", "Move every library (or the named ones) to the newest allowed version, then as install",
-            {build_profile_option, offline_option, allow_advisory_option, verbose_option, keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option, jobs_option, no_dev_option, drop_option, no_build_option}, 0, any_number},
+            {build_profile_option, offline_option, allow_advisory_option, verbose_option, keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option, jobs_option, no_dev_option, drop_option, no_build_option, stream_format_option}, 0, any_number},
         {"fetch", "", "Resolve and write otok.lock as install does, then fetch the inputs of every package in it (all profiles); build nothing",
-            {locked_option, offline_option, frozen_option, allow_advisory_option, no_dev_option}, 0, 0},
+            {locked_option, offline_option, frozen_option, allow_advisory_option, no_dev_option, stream_format_option}, 0, 0},
         {"tree", "", "Print the resolved graph with versions, recipes, platforms and changed options", {profile_option, offline_option, no_dev_option}, 0, 0},
-        {"why", "LIBRARY", "Show who requires a library and who asked for each of its option values", {profile_option, offline_option}, 1, 1},
-        {"audit", "", "Check otok.lock against the advisories of the index, [policy] and deprecated recipes (exit 1 on a withdrawn or security advisory or a refused license)", {offline_option}, 0, 0},
-        {"outdated", "", "List, for each locked library, the version update would choose and the newest of its recipe", {profile_option, offline_option}, 0, 0},
+        {"why", "LIBRARY", "Show who requires a library and who asked for each of its option values", {profile_option, offline_option, format_option}, 1, 1},
+        {"audit", "", "Check otok.lock against the advisories of the index, [policy] and deprecated recipes (exit 1 on a withdrawn or security advisory or a refused license)", {offline_option, format_option}, 0, 0},
+        {"outdated", "", "List, for each locked library, the version update would choose and the newest of its recipe", {profile_option, offline_option, format_option}, 0, 0},
         {"search", "TEXT...", "Find recipes of the index by id, library, description or keyword", {offline_option, format_option}, 1, any_number},
         {"info", "RECIPE|LIBRARY", "Show the versions, options and dependencies of a recipe of the index, or the recipes of a library", {offline_option, format_option}, 1, 1},
         {"metadata", "", "Print the resolved graph, the targets and where each library lands, as JSON for IDEs and scripts", {profile_option, offline_option}, 0, 0},
@@ -3273,7 +3670,7 @@ std::span<command_spec const> command_specs()
                 keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option, jobs_option}, 0, any_number},
         {"licenses", "", "Show the licenses of the third-party software built into otok, and where otok's source is", {}, 0, 0},
         {"log", "LIBRARY [SLICE]", "Show the log of the latest build of a library (or of one slice of it) kept in the cache, a failed one too",
-            {{"list", 0, "", "List the logs of the library kept in the cache, the newest first"}}, 1, 2},
+            {{"list", 0, "", "List the logs of the library kept in the cache, the newest first"}, format_option}, 1, 2},
         {"index-check", "[DIR]", "Check the changes of a checkout of the index as index CI does with a pull request (for index maintainers)",
             {{"base", 0, "REV", "The commit the changes are made on"}, {"author-id", 0, "N", "The GitHub account id of their author"},
                 {"repository", 0, "OWNER/NAME", "The index's repository on GitHub: its maintainers and open pull requests"},

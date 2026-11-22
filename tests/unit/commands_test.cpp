@@ -584,6 +584,32 @@ TEST_F(commands, why)
 
     EXPECT_EQ(run({"why", "zlib"}), 1);
     EXPECT_EQ(err.str(), "error: 'zlib' is not a dependency of this project\n");
+
+    // as JSON (cli-json.md 7)
+    ASSERT_EQ(run({"why", "b", "--format", "json"}), 0) << err.str();
+    EXPECT_EQ(err.str(), "");
+    auto j = nlohmann::json::parse(out.str());
+    EXPECT_EQ(j["command"], "why");
+    EXPECT_EQ(j["library"], "b");
+    EXPECT_EQ(j["profile"], nullptr);
+    ASSERT_EQ(j["packages"].size(), 1u);
+    nlohmann::json b = j["packages"][0];
+    EXPECT_TRUE(b["environment"].is_string()) << b;
+    b.erase("environment");
+    EXPECT_EQ(b, nlohmann::json::parse(R"({"library": "b", "tool": false, "id": "b", "target": "apple", "recipe": "path", "index": null,
+        "version": "2.0", "revision": 1,
+        "required-by": [{"requester": "otok.toml", "constraint": null}, {"requester": "a 1.0", "constraint": ">= 1"}],
+        "platforms": ["ios", "iossim"],
+        "options": {"level": {"value": 1, "requests": []}, "shared": {"value": true, "requests": [{"requester": "a 1.0", "value": true}]}}})"));
+    ASSERT_EQ(run({"why", "b", "--profile", "ci", "--format", "json"}), 0) << err.str();
+    j = nlohmann::json::parse(out.str());
+    EXPECT_EQ(j["profile"], "ci");
+    EXPECT_EQ(j["packages"][0]["platforms"], nlohmann::json{"iossim"});
+    EXPECT_EQ(run({"why", "zlib", "--format", "json"}), 1);
+    EXPECT_EQ(err.str(), "");
+    j = nlohmann::json::parse(out.str());
+    EXPECT_EQ(j["packages"], nullptr);
+    EXPECT_EQ(j["diagnostics"][0]["message"], "'zlib' is not a dependency of this project");
 }
 
 // a profile's linkage of a library without a [deps] entry needs it in a graph (otok-toml.md 8, docs/PLAN.md decision 136)
@@ -957,6 +983,15 @@ TEST_F(commands, checks_advisories_and_queries_the_index)
     env_vars["OTOK_INDEX_MIRROR"] = index_arg;
     project.write("otok.toml", "[otok]\nformat = 1\n[apple]\nplatforms = [\"ios\"]\ndeployment = { ios = \"15.0\" }\n"
                                "[deps.a]\nrecipe = \"p/a\"\nversion = \">= 1\"\n");
+    // without otok.lock the keys of the commands are null (cli-json.md 2)
+    for (std::string const command : {"audit", "outdated"}) {
+        EXPECT_EQ(run({command, "--format", "json"}), 1);
+        EXPECT_EQ(err.str(), "");
+        auto j = nlohmann::json::parse(out.str());
+        EXPECT_EQ(j["packages"], nullptr);
+        ASSERT_EQ(j["diagnostics"].size(), 1u) << j;
+        EXPECT_EQ(j["diagnostics"][0]["message"], command + " needs otok.lock, and there is none; run 'otok install' to create it");
+    }
     ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
     EXPECT_EQ(out.str(), "otok.lock created:\n  added a 1.1 (r1)\n  added b 2.0 (r1)\ninputs in the cache: 2 sources\n");
 
@@ -976,6 +1011,22 @@ TEST_F(commands, checks_advisories_and_queries_the_index)
     EXPECT_EQ(out.str(), "library  current   compatible  latest    recipe\n"
                          "a        1.1 (r1)  1.0 (r1)    1.1 (r1)  p/a\n"
                          "b        2.0 (r1)  2.0 (r1)    2.0 (r1)  p/b\n");
+    // as JSON (cli-json.md 5)
+    {
+        ASSERT_EQ(run({"outdated", "--format", "json"}), 0) << err.str();
+        auto j = nlohmann::json::parse(out.str());
+        EXPECT_EQ(j["command"], "outdated");
+        EXPECT_EQ(j["diagnostics"], nlohmann::json::array());
+        ASSERT_EQ(j["packages"].size(), 2u);
+        nlohmann::json a = j["packages"][0];
+        EXPECT_TRUE(a["environment"].is_string()) << a;
+        a.erase("environment");
+        EXPECT_EQ(a, nlohmann::json::parse(R"({"library": "a", "tool": false, "id": "a", "target": "apple", "recipe": "p/a",
+            "index": "default", "current": {"version": "1.1", "revision": 1}, "compatible": {"version": "1.0", "revision": 1},
+            "latest": {"version": "1.1", "revision": 1}, "behind": true, "deprecation": null, "unreadable": []})"));
+        EXPECT_EQ(j["packages"][1]["library"], "b");
+        EXPECT_EQ(j["packages"][1]["behind"], false);
+    }
     ASSERT_EQ(run_unbuilt({"update"}), 0) << err.str();
     EXPECT_NE(out.str().find("a: 1.1 (r1) -> 1.0 (r1)"), std::string::npos) << out.str();
 
@@ -986,6 +1037,23 @@ TEST_F(commands, checks_advisories_and_queries_the_index)
     EXPECT_EQ(run({"audit"}), 0) << err.str();
     EXPECT_NE(err.str().find("warning: b 2.0 (r1) from 'p/b' has advisory 2026-0002 (broken): Slow."), std::string::npos) << err.str();
     EXPECT_NE(err.str().find("warning: b 2.0 (r1) from 'p/b' is deprecated: unmaintained; use 'q/b' instead"), std::string::npos) << err.str();
+    // as JSON: findings, not diagnostics (cli-json.md 6)
+    {
+        EXPECT_EQ(run({"audit", "--format", "json"}), 0) << err.str();
+        EXPECT_EQ(err.str(), "");
+        auto j = nlohmann::json::parse(out.str());
+        EXPECT_EQ(j["command"], "audit");
+        EXPECT_EQ(j["diagnostics"], nlohmann::json::array());
+        EXPECT_EQ(j["packages"], 2);
+        ASSERT_EQ(j["findings"].size(), 2u) << j;
+        nlohmann::json const b = nlohmann::json::parse(R"({"library": "b", "tool": false, "target": "apple", "recipe": "p/b", "index": "default",
+            "variant": "apple", "version": "2.0", "revision": 1})");
+        EXPECT_EQ(j["findings"][0], nlohmann::json::parse(R"({"kind": "advisory", "severity": "warning",
+            "message": "b 2.0 (r1) from 'p/b' has advisory 2026-0002 (broken): Slow.", "package": )" + b.dump() + R"(, "license": null,
+            "advisory": {"id": "2026-0002", "severity": "broken", "summary": "Slow.", "unknown": []}, "deprecation": null, "index": null})"));
+        EXPECT_EQ(j["findings"][1]["kind"], "deprecated");
+        EXPECT_EQ(j["findings"][1]["deprecation"], "deprecated: unmaintained; use 'q/b' instead");
+    }
     ASSERT_EQ(run_unbuilt({"install"}), 0) << err.str();
     EXPECT_NE(err.str().find("warning: b 2.0 (r1) from 'p/b' is deprecated: unmaintained; use 'q/b' instead"), std::string::npos) << err.str();
 
@@ -994,6 +1062,17 @@ TEST_F(commands, checks_advisories_and_queries_the_index)
                                "[deps.a]\nrecipe = \"p/a\"\nversion = \">= 1\"\n[policy]\ndeny-licenses = [\"MIT\"]\n");
     EXPECT_EQ(run({"audit"}), 1);
     EXPECT_NE(err.str().find("error: a 1.0 (r1) is licensed under 'MIT', and [policy] deny-licenses forbids it"), std::string::npos) << err.str();
+    {
+        EXPECT_EQ(run({"audit", "--format", "json"}), 1);
+        EXPECT_EQ(err.str(), "");
+        auto j = nlohmann::json::parse(out.str());
+        EXPECT_EQ(j["diagnostics"], nlohmann::json::array());
+        ASSERT_EQ(j["findings"].size(), 4u) << j;  // a and b: MIT; b: broken, deprecated
+        EXPECT_EQ(j["findings"][0]["kind"], "license");
+        EXPECT_EQ(j["findings"][0]["severity"], "error");
+        EXPECT_EQ(j["findings"][0]["license"], "MIT");
+        EXPECT_EQ(j["findings"][0]["package"]["library"], "a");
+    }
 
     // the queries
     ASSERT_EQ(run({"search", "TEST"}), 0) << err.str();
@@ -1211,6 +1290,18 @@ TEST_F(commands, names_tool_packages)
                          "b           1.0 (r1)  1.0 (r1)    1.0 (r1)  p/b\n"
                          "tool t@1.0  1.0 (r1)  1.0 (r1)    2.0 (r1)  p/t\n"
                          "tool t@2.0  2.0 (r1)  2.0 (r1)    2.0 (r1)  p/t\n");
+
+    // the latest revision is that of the package's variant: another variant of 2.0, listed first, has its own
+    std::string entry = read_file(index / "recipes/p/t/native/2.0-r1.toml").value();
+    for (auto [from, to] : {std::pair{"variant = \"native\"", "variant = \"a\""}, std::pair{"revision = 1", "revision = 3"},
+             std::pair{"\"*/cc\"", "\"zz/cc\""}}) {
+        ASSERT_NE(entry.find(from), std::string::npos) << entry;
+        entry.replace(entry.find(from), std::string_view{from}.size(), to);
+    }
+    upstream.write("index/recipes/p/t/a/2.0-r3.toml", entry);
+    ASSERT_EQ(run({"outdated"}), 0) << err.str();
+    EXPECT_NE(out.str().find("tool t@1.0  1.0 (r1)  1.0 (r1)    2.0 (r1)  p/t\ntool t@2.0  2.0 (r1)  2.0 (r1)    2.0 (r1)  p/t\n"),
+        std::string::npos) << out.str();
 }
 
 // otok info shows every variant of the newest version (recipe-toml.md 6.1), and options and dependencies per group of
