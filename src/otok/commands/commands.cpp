@@ -59,6 +59,7 @@ option_spec const profile_option{"profile", 0, "NAME", "Show the configuration o
 option_spec const build_profile_option{"profile", 0, "NAME", "Fetch (and build) what this profile builds"};
 option_spec const locked_option{"locked", 0, "", "Fail if otok.lock is missing or would change (for CI)"};
 option_spec const offline_option{"offline", 0, "", "Use only the cache: download and fetch nothing"};
+option_spec const format_option{"format", 0, "text|json", "Print for people (text, the default) or one JSON document for scripts and agents (json; docs/formats/cli-json.md)"};
 option_spec const frozen_option{"frozen", 0, "", "--locked and --offline together"};
 option_spec const allow_advisory_option{"allow-advisory", 0, "ID,...", "Install versions with these withdrawn or security advisories all the same"};
 // What a build shows (docs/PLAN.md decision 59).
@@ -1737,12 +1738,10 @@ struct index_session
     std::shared_ptr<index_set> indexes;
 };
 
-// `m`: the project's manifest; null outside a project.
-std::unique_ptr<index_session> open_index(parsed_command const& cmd, command_context& ctx, manifest const* m)
+// `m`: the project's manifest; null outside a project. Its problems go to `diags`.
+std::unique_ptr<index_session> open_index(parsed_command const& cmd, command_context& ctx, manifest const* m, diagnostics& diags)
 {
-    diagnostics diags;
     auto config = load_config(ctx.env, diags);
-    report(diags, ctx.err);
     if (!config) return nullptr;
     cache_notices notices{
         .waiting = [&ctx](std::string const& what) { ctx.err << "note: " << what << "\n"; },
@@ -1750,7 +1749,7 @@ std::unique_ptr<index_session> open_index(parsed_command const& cmd, command_con
     };
     auto cache = cache_store::open(config->cache_dir, std::move(notices));
     if (!cache) {
-        ctx.err << "error: " << cache.error().message << "\n";
+        diags.error({}, cache.error().message);
         return nullptr;
     }
     cache->set_offline(offline(cmd));
@@ -1760,15 +1759,14 @@ std::unique_ptr<index_session> open_index(parsed_command const& cmd, command_con
     return s;
 }
 
-// The manifest of the project in the working directory, for the indexes it adds; null without one. False when it is invalid.
-bool manifest_here(command_context& ctx, std::optional<manifest>& m)
+// The manifest of the project in the working directory, for the indexes it adds; null without one. False when it is
+// invalid, its problems in `diags`.
+bool manifest_here(command_context& ctx, std::optional<manifest>& m, diagnostics& diags)
 {
     std::filesystem::path const path = ctx.project_dir / "otok.toml";
     std::error_code ec;
     if (!std::filesystem::exists(path, ec)) return true;
-    diagnostics diags;
     m = load_manifest(path, ctx.targets, diags);
-    report(diags, ctx.err);
     return m.has_value();
 }
 
@@ -1828,36 +1826,117 @@ void print_columns(std::vector<std::vector<std::string>> const& rows, std::ostre
 }
 
 // otok search: recipes whose id, library, description or keywords contain the text (docs/PLAN.md decision 45).
+// The format of the documents of --format json (cli-json.md 2).
+constexpr int cli_json_format = 1;
+
+// --format (cli-json.md 1): whether the command prints its JSON document; nothing, reported, for a value neither 'text' nor
+// 'json'.
+std::optional<bool> json_requested(parsed_command const& cmd, command_context& ctx)
+{
+    auto const format = cmd.value("format");
+    if (!format || *format == "text") return false;
+    if (*format == "json") return true;
+    ctx.err << "error: --format must be 'text' or 'json', not " << in_quotes(*format) << "\n";
+    return std::nullopt;
+}
+
+// The document of cli-json.md 2 around `body`, the command's keys (null when it failed), on standard output; the exit code.
+int print_json(command_context& ctx, std::string_view command, diagnostics const& diags, nlohmann::json body)
+{
+    body["format"] = cli_json_format;
+    body["otok"] = std::string{build_info::version};
+    body["command"] = std::string{command};
+    nlohmann::json list = nlohmann::json::array();
+    for (diagnostic const& d : diags.items()) {
+        nlohmann::json j;
+        j["severity"] = d.level == severity::error ? "error" : "warning";
+        j["message"] = d.message;
+        j["file"] = string_or_null(d.where.file);
+        j["line"] = d.where.line != 0 ? nlohmann::json(d.where.line) : nlohmann::json(nullptr);
+        j["column"] = d.where.column != 0 ? nlohmann::json(d.where.column) : nlohmann::json(nullptr);
+        list.push_back(std::move(j));
+    }
+    body["diagnostics"] = std::move(list);
+    ctx.out << body.dump(2, ' ', false, nlohmann::json::error_handler_t::replace) << "\n";
+    return diags.has_errors() ? 1 : 0;
+}
+
+// A recipe found by search or info (cli-json.md 3).
+nlohmann::json summary_json(recipe_summary const& r, std::string const& index)
+{
+    nlohmann::json j;
+    j["id"] = r.id.str();
+    j["index"] = index;
+    j["library"] = r.library;
+    j["description"] = r.description;
+    j["keywords"] = r.keywords;
+    j["version"] = r.version;
+    j["targets"] = r.targets;
+    return j;
+}
+
+// Recipes with the index each is of, sorted by id and then index (cli-json.md 3).
+nlohmann::json summaries_json(std::vector<std::pair<std::string, recipe_summary>> found)
+{
+    std::ranges::sort(found, [](auto const& a, auto const& b) {
+        std::string const x = a.second.id.str(), y = b.second.id.str();
+        return x != y ? x < y : a.first < b.first;
+    });
+    nlohmann::json list = nlohmann::json::array();
+    for (auto const& [index, r] : found) list.push_back(summary_json(r, index));
+    return list;
+}
+
 int search(parsed_command const& cmd, command_context& ctx)
 {
+    auto const json = json_requested(cmd, ctx);
+    if (!json) return 1;
     std::string text;
     for (std::string const& a : cmd.arguments) text += (text.empty() ? "" : " ") + a;
     std::string const needle = lowercase(text);
+    diagnostics diags;
+    nlohmann::json body;
+    body["query"] = nullptr;
+    body["recipes"] = nullptr;
+    auto const failed = [&] {
+        if (*json) return print_json(ctx, "search", diags, std::move(body));
+        report(diags, ctx.err);
+        return 1;
+    };
     std::optional<manifest> m;
-    if (!manifest_here(ctx, m)) return 1;
-    auto s = open_index(cmd, ctx, m ? &*m : nullptr);
-    if (!s) return 1;
+    if (!manifest_here(ctx, m, diags)) return failed();
+    auto s = open_index(cmd, ctx, m ? &*m : nullptr, diags);
+    if (!s) return failed();
     auto indexes = all_indexes(*s);
     if (!indexes) {
-        ctx.err << "error: " << indexes.error().message << "\n";
-        return 1;
+        diags.error({}, indexes.error().message);
+        return failed();
     }
-    // the index of each recipe when the project has several (otok-toml.md 6.4)
-    bool const named = indexes->size() > 1;
-    std::vector<std::vector<std::string>> rows;
+    std::vector<std::pair<std::string, recipe_summary>> found;  // index → recipe
     for (auto const& [name, idx] : *indexes) {
         auto summaries = idx->summaries();
         if (!summaries) {
-            ctx.err << "error: " << summaries.error().message << "\n";
-            return 1;
+            diags.error({}, summaries.error().message);
+            return failed();
         }
         for (recipe_summary const& r : *summaries) {
             std::string haystack = r.id.str() + "\n" + r.library + "\n" + r.description;
             for (std::string const& k : r.keywords) haystack += "\n" + k;
-            if (lowercase(haystack).find(needle) == std::string::npos) continue;
-            if (named) rows.push_back({r.id.str(), name, version_text(r), r.description});
-            else rows.push_back({r.id.str(), version_text(r), r.description});
+            if (lowercase(haystack).find(needle) != std::string::npos) found.emplace_back(name, r);
         }
+    }
+    if (*json) {
+        body["query"] = text;
+        body["recipes"] = summaries_json(std::move(found));
+        return print_json(ctx, "search", diags, std::move(body));
+    }
+    report(diags, ctx.err);
+    // the index of each recipe when the project has several (otok-toml.md 6.4)
+    bool const named = indexes->size() > 1;
+    std::vector<std::vector<std::string>> rows;
+    for (auto const& [name, r] : found) {
+        if (named) rows.push_back({r.id.str(), name, version_text(r), r.description});
+        else rows.push_back({r.id.str(), version_text(r), r.description});
     }
     if (rows.empty()) ctx.out << "no recipes match " << in_quotes(text) << "\n";
     print_columns(rows, ctx.out);
@@ -1891,18 +1970,230 @@ std::string condition_text(condition const& c)
     return text;
 }
 
-// otok info: a recipe of the index, or the recipes of a library (docs/PLAN.md decision 45).
+// A condition of a recipe (cli-json.md 2.2): the keys it has.
+nlohmann::json condition_json(condition const& c)
+{
+    nlohmann::json j = nlohmann::json::object();
+    if (c.option) j["option"] = *c.option;
+    if (c.has) j["has"] = *c.has;
+    if (c.is) j["is"] = option_json(*c.is);
+    if (c.os) j["os"] = *c.os;
+    if (c.platform) j["platform"] = *c.platform;
+    if (c.host) j["host"] = *c.host;
+    if (c.arch) j["arch"] = *c.arch;
+    if (c.environment) {
+        nlohmann::json list = nlohmann::json::array();
+        for (build_environment const& e : *c.environment) list.push_back(e.text());
+        j["environment"] = std::move(list);
+    }
+    if (c.linkage) j["linkage"] = *c.linkage;
+    if (c.negated) j["not"] = condition_json(*c.negated);
+    return j;
+}
+
+// A dependency of a variant (cli-json.md 4.2.3).
+nlohmann::json dependency_json(recipe_dependency const& d)
+{
+    nlohmann::json j;
+    j["library"] = string_or_null(d.library);
+    j["programs"] = d.library.empty() ? d.programs : std::vector<std::string>{};
+    j["version"] = d.from_dependency ? nlohmann::json(nullptr) : nlohmann::json(d.version.str());
+    j["default-recipe"] = d.from_dependency || d.default_recipe.name.empty() ? nlohmann::json(nullptr) : nlohmann::json(d.default_recipe.str());
+    j["prerelease"] = d.prerelease;
+    nlohmann::json options = nlohmann::json::object();
+    for (auto const& [option, value] : d.requires_options) options[option] = option_json(value.value);
+    j["requires-options"] = std::move(options);
+    j["linkage"] = d.linkage ? nlohmann::json(*d.linkage) : nlohmann::json(nullptr);
+    j["export"] = d.export_symbols;
+    j["toolchains"] = d.toolchains;
+    j["from-dependency"] = d.from_dependency;
+    j["when"] = d.when ? condition_json(*d.when) : nlohmann::json(nullptr);
+    return j;
+}
+
+std::string_view option_type_name(option_type t)
+{
+    static constexpr std::string_view names[] = {"bool", "int", "string", "enum", "list", "file"};
+    return names[static_cast<int>(t)];
+}
+
+// A variant of a recipe from its index entry (cli-json.md 4.2.2).
+nlohmann::json variant_json(index_entry const& e, std::span<target_info const* const> targets)
+{
+    recipe const& v = e.projection;
+    nlohmann::json j;
+    j["variant"] = v.variant;
+    j["revision"] = v.revision;
+    j["target"] = string_or_null(target_of_entry(v, targets));
+    j["platforms"] = v.platforms;
+    nlohmann::json architectures(nullptr);
+    for (auto const& [platform, list] : v.architectures) architectures[platform] = list;
+    j["architectures"] = std::move(architectures);
+    nlohmann::json build_on = nlohmann::json::array();
+    for (build_environment const& b : v.build_on) build_on.push_back(b.text());
+    j["build-on"] = std::move(build_on);
+    j["linkage"] = v.linkage;
+    j["c-standard"] = v.standards.c ? nlohmann::json(v.standards.c->str()) : nlohmann::json(nullptr);
+    j["cxx-standard"] = v.standards.cxx ? nlohmann::json(v.standards.cxx->str()) : nlohmann::json(nullptr);
+    j["programs"] = v.programs;
+    nlohmann::json options = nlohmann::json::array();
+    for (option_schema const& o : v.options) {
+        nlohmann::json item;
+        item["name"] = o.name;
+        item["type"] = std::string{option_type_name(o.type)};
+        item["values"] = o.values;
+        item["default"] = o.type == option_type::file ? nlohmann::json(nullptr) : option_json(o.default_value);
+        item["additive"] = o.additive;
+        item["doc"] = string_or_null(o.doc);
+        options.push_back(std::move(item));
+    }
+    j["options"] = std::move(options);
+    for (auto [deps, key] : {std::pair{&recipe::dependencies, "dependencies"}, std::pair{&recipe::tool_dependencies, "tool-dependencies"}}) {
+        nlohmann::json list = nlohmann::json::array();
+        for (recipe_dependency const& d : v.*deps) list.push_back(dependency_json(d));
+        j[key] = std::move(list);
+    }
+    nlohmann::json source;
+    source["git"] = e.recipe_source.git;
+    source["commit"] = e.recipe_source.commit;
+    source["tag"] = string_or_null(e.recipe_source.tag);
+    source["path"] = string_or_null(e.recipe_source.path);
+    j["recipe-source"] = std::move(source);
+    j["recipe-sha256"] = e.recipe_sha256;
+    return j;
+}
+
+std::string time_text(toml::date_time const& t)
+{
+    std::ostringstream text;
+    text << t;
+    return text.str();
+}
+
+// otok info --format json for a recipe (cli-json.md 4.2): from its index entries, `list` newest first.
+result<nlohmann::json> recipe_json(recipe_id const& id, std::string const& index_name, recipe_index& idx, std::vector<index_entry const*> list,
+    recipe_status const& status, std::span<target_info const* const> targets)
+{
+    index_entry const& newest = *newest_stable(list);
+    recipe const& r = newest.projection;
+    nlohmann::json j;
+    j["id"] = id.str();
+    j["index"] = index_name;
+    j["library"] = r.library;
+    j["description"] = r.description;
+    j["license"] = r.license_text;
+    j["keywords"] = r.keywords;
+    nlohmann::json state;
+    state["deprecated"] = status.deprecated ? nlohmann::json(status.deprecated_reason) : nlohmann::json(nullptr);
+    state["in-favor-of"] = status.in_favor_of ? nlohmann::json(status.in_favor_of->str()) : nlohmann::json(nullptr);
+    state["transferred-from"] = status.transferred_from ? nlohmann::json(status.transferred_from->str()) : nlohmann::json(nullptr);
+    j["status"] = std::move(state);
+
+    // newest version first, within one newest revision first, then by variant (cli-json.md 4.2.1)
+    auto order = idx.order(r.library);
+    if (!order) return std::unexpected{order.error()};
+    std::ranges::stable_sort(list, [&](index_entry const* a, index_entry const* b) {
+        auto const c = order->compare(*a->projection.version, *b->projection.version);
+        if (c != std::partial_ordering::equivalent) return c == std::partial_ordering::greater;
+        if (a->projection.revision != b->projection.revision) return a->projection.revision > b->projection.revision;
+        return a->projection.variant < b->projection.variant;
+    });
+    auto availability = idx.availability();
+    if (!availability) return std::unexpected{availability.error()};
+    nlohmann::json versions = nlohmann::json::array();
+    for (index_entry const* e : list) {
+        recipe const& v = e->projection;
+        nlohmann::json item;
+        item["version"] = v.version->str();
+        item["revision"] = v.revision;
+        item["variant"] = v.variant;
+        item["channel"] = v.channel == release_channel::prerelease ? "prerelease" : "stable";
+        item["published"] = e->published ? nlohmann::json(time_text(*e->published)) : nlohmann::json(nullptr);
+        auto found = idx.advisories_of(e->id, v.variant, v.library, *v.version, v.revision);
+        if (!found) return std::unexpected{found.error()};
+        std::ranges::sort(*found, {}, &candidate_advisory::id);
+        nlohmann::json advisories = nlohmann::json::array();
+        for (candidate_advisory const& a : *found) {
+            nlohmann::json one;
+            one["id"] = a.id;
+            one["severity"] = std::string{severity_name(a.severity)};
+            one["summary"] = a.summary;
+            one["unknown"] = a.unknown;
+            advisories.push_back(std::move(one));
+        }
+        item["advisories"] = std::move(advisories);
+        nlohmann::json unavailable(nullptr);
+        if (unavailable_version const* u = (*availability)->find(e->id, v.version->str() + "-r" + std::to_string(v.revision))) {
+            unavailable = nlohmann::json::object();
+            unavailable["since"] = time_text(u->since);
+            unavailable["inputs"] = u->inputs;
+        }
+        item["unavailable"] = std::move(unavailable);
+        versions.push_back(std::move(item));
+    }
+    j["versions"] = std::move(versions);
+
+    // "<variant>/<version>-r<revision>.toml" (index.md 3.2)
+    nlohmann::json unreadable = nlohmann::json::array();
+    for (unreadable_entry const& u : idx.unreadable(id)) {
+        std::size_t const slash = u.file.find('/');
+        std::string const name = u.file.substr(slash + 1, u.file.size() - slash - 1 - std::string_view{".toml"}.size());
+        std::size_t const r_at = name.rfind("-r");
+        nlohmann::json item;
+        item["variant"] = u.file.substr(0, slash);
+        item["version"] = name.substr(0, r_at);
+        item["revision"] = r_at == std::string::npos ? nlohmann::json(nullptr) : nlohmann::json(std::stoll(name.substr(r_at + 2)));
+        item["reason"] = u.reason;
+        unreadable.push_back(std::move(item));
+    }
+    j["unreadable"] = std::move(unreadable);
+
+    // every variant of the newest version, each at its newest revision, by name (cli-json.md 4.2.2)
+    std::map<std::string, index_entry const*> variants;
+    for (index_entry const* e : list) {
+        if (e->projection.version->str() != r.version->str()) continue;
+        auto& v = variants[e->projection.variant];
+        if (!v || e->projection.revision > v->projection.revision) v = e;
+    }
+    j["version"] = r.version->str();
+    nlohmann::json described = nlohmann::json::array();
+    for (auto const& [name, e] : variants) described.push_back(variant_json(*e, targets));
+    j["variants"] = std::move(described);
+    return j;
+}
+
+// otok info: a recipe of the index, or the recipes of a library (docs/PLAN.md decision 45; cli-json.md 4).
 int info(parsed_command const& cmd, command_context& ctx)
 {
+    auto const json = json_requested(cmd, ctx);
+    if (!json) return 1;
     std::string const& name = cmd.arguments.front();
-    std::optional<manifest> m;
-    if (!manifest_here(ctx, m)) return 1;
-    auto s = open_index(cmd, ctx, m ? &*m : nullptr);
-    if (!s) return 1;
-    auto const failed = [&](error const& e) {
-        ctx.err << "error: " << e.message << "\n";
-        return 1;
+    diagnostics diags;
+    nlohmann::json body;
+    body["library"] = nullptr;
+    body["recipes"] = nullptr;
+    body["recipe"] = nullptr;
+    std::size_t reported = 0;
+    auto const flush = [&] {  // the text output: what is not printed yet
+        auto const items = diags.items();
+        for (; reported < items.size(); ++reported) ctx.err << format(items[reported]) << "\n";
     };
+    auto const done = [&] {
+        if (*json) return print_json(ctx, "info", diags, std::move(body));
+        flush();
+        return diags.has_errors() ? 1 : 0;
+    };
+    auto const failed = [&](error const& e) {
+        diags.error({}, e.message);
+        body["library"] = nullptr;
+        body["recipes"] = nullptr;
+        body["recipe"] = nullptr;
+        return done();
+    };
+    std::optional<manifest> m;
+    if (!manifest_here(ctx, m, diags)) return done();
+    auto s = open_index(cmd, ctx, m ? &*m : nullptr, diags);
+    if (!s) return done();
 
     auto const id = parse_recipe_id(name);
     if (!id) {
@@ -1910,17 +2201,26 @@ int info(parsed_command const& cmd, command_context& ctx)
         auto indexes = all_indexes(*s);
         if (!indexes) return failed(indexes.error());
         bool const named = indexes->size() > 1;
-        std::vector<std::vector<std::string>> rows;
+        std::vector<std::pair<std::string, recipe_summary>> found;  // index → recipe
         for (auto const& [index_name, idx] : *indexes) {
             auto summaries = idx->summaries();
             if (!summaries) return failed(summaries.error());
             for (recipe_summary const& r : *summaries) {
-                if (r.library != name) continue;
-                if (named) rows.push_back({r.id.str(), index_name, version_text(r), r.description});
-                else rows.push_back({r.id.str(), version_text(r), r.description});
+                if (r.library == name) found.emplace_back(index_name, r);
             }
         }
-        if (rows.empty()) return failed(error{"no recipe of " + std::string{named ? "the indexes" : "the index"} + " builds " + in_quotes(name)});
+        if (found.empty()) return failed(error{"no recipe of " + std::string{named ? "the indexes" : "the index"} + " builds " + in_quotes(name)});
+        if (*json) {
+            body["library"] = name;
+            body["recipes"] = summaries_json(std::move(found));
+            return done();
+        }
+        flush();
+        std::vector<std::vector<std::string>> rows;
+        for (auto const& [index_name, r] : found) {
+            if (named) rows.push_back({r.id.str(), index_name, version_text(r), r.description});
+            else rows.push_back({r.id.str(), version_text(r), r.description});
+        }
         ctx.out << "recipes of " << in_quotes(name) << ":\n";
         print_columns(rows, ctx.out);
         return 0;
@@ -1933,6 +2233,13 @@ int info(parsed_command const& cmd, command_context& ctx)
     if (!list) return failed(list.error());
     auto status = idx.status(*id);
     if (!status) return failed(status.error());
+    if (*json) {
+        auto described = recipe_json(*id, where->name, idx, *list, *status, ctx.targets);
+        if (!described) return failed(described.error());
+        body["recipe"] = std::move(*described);
+        return done();
+    }
+    flush();
     index_entry const& newest = *newest_stable(*list);
     recipe const& r = newest.projection;
     std::ostream& out = ctx.out;
@@ -1944,7 +2251,10 @@ int info(parsed_command const& cmd, command_context& ctx)
     if (status->transferred_from) out << "transferred from: " << status->transferred_from->str() << "\n";
     out << "versions:\n";
     auto availability = idx.availability();
-    if (!availability) return failed(availability.error());
+    if (!availability) {
+        ctx.err << "error: " << availability.error().message << "\n";
+        return 1;
+    }
     std::vector<std::vector<std::string>> rows;
     for (index_entry const* e : *list) {
         auto found = idx.advisories_of(e->id, e->projection.variant, e->projection.library, *e->projection.version, e->projection.revision);
@@ -2091,7 +2401,7 @@ int audit(parsed_command const& cmd, command_context& ctx)
         || std::ranges::any_of(lock->tool_packages, [](locked_package const& p) { return p.kind == locked_package::recipe_kind::index; });
     std::unique_ptr<index_session> s;
     if (any_index) {
-        s = open_index(cmd, ctx, &*m);
+        s = open_index(cmd, ctx, &*m, diags);
         if (!s) {
             report(diags, ctx.err);
             return 1;
@@ -2819,6 +3129,29 @@ int index_probe(parsed_command const& cmd, command_context& ctx)
     return 0;
 }
 
+// otok index-reproject (index.md 3.1, docs/PLAN.md decision 141): the entries of a checkout of the index made anew from
+// their recipe trees when the projection changed before the first release; a maintainer commits and pushes the result.
+int index_reproject(parsed_command const& cmd, command_context& ctx)
+{
+    auto tools = open_index_tools(ctx);
+    if (!tools) return 1;
+    index_reproject_settings settings;
+    settings.root = cmd.arguments.empty() ? ctx.project_dir : ctx.project_dir / path_from_utf8(cmd.arguments.front());
+    settings.targets = ctx.targets;
+    settings.cache = &*tools->cache;
+    settings.git = &tools->git;
+    auto done = reproject_index(settings);
+    if (!done) {
+        ctx.err << "error: " << done.error().message << "\n";
+        return 1;
+    }
+    for (std::string const& file : done->rewritten) ctx.out << "made anew: " << file << "\n";
+    for (std::string const& why : done->failures) ctx.err << "error: " << why << "\n";
+    ctx.out << done->entries << (done->entries == 1 ? " entry, " : " entries, ") << done->rewritten.size() << " made anew, "
+            << done->failures.size() << " left as they are\n";
+    return done->failures.empty() ? 0 : 1;
+}
+
 // The commit of a clean checkout of the index, which index-view and index-catalog generate from.
 result<std::string> clean_checkout_commit(git_tool const& git, std::filesystem::path const& root, std::filesystem::path const& log)
 {
@@ -2921,8 +3254,8 @@ std::span<command_spec const> command_specs()
         {"why", "LIBRARY", "Show who requires a library and who asked for each of its option values", {profile_option, offline_option}, 1, 1},
         {"audit", "", "Check otok.lock against the advisories of the index, [policy] and deprecated recipes (exit 1 on a withdrawn or security advisory or a refused license)", {offline_option}, 0, 0},
         {"outdated", "", "List, for each locked library, the version update would choose and the newest of its recipe", {profile_option, offline_option}, 0, 0},
-        {"search", "TEXT...", "Find recipes of the index by id, library, description or keyword", {offline_option}, 1, any_number},
-        {"info", "RECIPE|LIBRARY", "Show the versions, options and dependencies of a recipe of the index, or the recipes of a library", {offline_option}, 1, 1},
+        {"search", "TEXT...", "Find recipes of the index by id, library, description or keyword", {offline_option, format_option}, 1, any_number},
+        {"info", "RECIPE|LIBRARY", "Show the versions, options and dependencies of a recipe of the index, or the recipes of a library", {offline_option, format_option}, 1, 1},
         {"metadata", "", "Print the resolved graph, the targets and where each library lands, as JSON for IDEs and scripts", {profile_option, offline_option}, 0, 0},
         {"clean", "", "Remove the cache of this machine, or the selected parts of it",
             {{"downloads", 0, "", "Remove downloaded files"}, {"sources", 0, "", "Remove unpacked sources and git repositories"},
@@ -2951,6 +3284,8 @@ std::span<command_spec const> command_specs()
             0, 1},
         {"index-probe", "[DIR]", "Probe the inputs of every version of a checkout of the index into availability.toml (for index maintainers)",
             {{"output", 0, "FILE", "Write it elsewhere"}}, 0, 1},
+        {"index-reproject", "[DIR]", "Make every entry of a checkout of the index anew from its recipe tree, when the projection changed (for index maintainers)",
+            {}, 0, 1},
         {"index-view", "[DIR]", "Generate the HTTPS view of a checkout of the index (for index maintainers)",
             {{"output", 0, "DIR", "Where the view is written: its files go to DIR/index/"}}, 0, 1},
         {"index-catalog", "[DIR]", "Generate the catalog site of a checkout of the index, beside its view (for index maintainers)",
@@ -2978,6 +3313,7 @@ int run_command(parsed_command const& command, command_context& ctx)
     if (command.command == "publish") return publish(command, ctx);
     if (command.command == "index-check") return index_check(command, ctx);
     if (command.command == "index-probe") return index_probe(command, ctx);
+    if (command.command == "index-reproject") return index_reproject(command, ctx);
     if (command.command == "index-view") return index_view(command, ctx);
     if (command.command == "index-catalog") return index_catalog(command, ctx);
     if (command.command == "help") return help(command, ctx);

@@ -24,6 +24,7 @@ them and their text may be published with the documentation; their examples may 
 | [cache-key.md](cache-key.md) | build cache keys | — |
 | [cache.md](cache.md) | the cache directory: layout, entries, locks | otok |
 | [metadata.md](metadata.md) | the JSON of `otok metadata` — the project for IDEs and scripts | otok |
+| [cli-json.md](cli-json.md) | `--format json` — what commands print, for scripts and agents | otok |
 
 Status: draft. Until the first public release the formats may change without bumping their
 version numbers; from then on every change bumps them (1.4).

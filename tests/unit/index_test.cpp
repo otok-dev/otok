@@ -152,7 +152,8 @@ TEST(index_entry, reads_the_example_of_the_format_document)
     EXPECT_EQ(e->projection.revision, 1);
     EXPECT_EQ(e->recipe_source.git, "https://github.com/apotocki/openssl-iosx");
     EXPECT_EQ(e->recipe_source.path, "otok");
-    EXPECT_EQ(e->projection.options.size(), 3u);
+    ASSERT_EQ(e->projection.options.size(), 3u);
+    EXPECT_FALSE(e->projection.options[0].doc.empty());
     ASSERT_EQ(e->projection.dependencies.size(), 1u);
     EXPECT_EQ(e->projection.dependencies[0].default_recipe.str(), "apotocki/zlib");
     EXPECT_TRUE(e->projection.products.empty());
@@ -178,7 +179,7 @@ TEST(index_entry, projects_a_recipe)
     ASSERT_NE(resource, nullptr);
     EXPECT_EQ((*resource)["name"].value_or(std::string{}), "data");
     EXPECT_FALSE(resource->contains("dest"));
-    EXPECT_FALSE(p["options"]["zlib"].as_table()->contains("doc"));
+    EXPECT_EQ(p["options"]["zlib"]["doc"].value_or(std::string{}), "Use zlib.");
     EXPECT_TRUE(p["options"]["zlib"]["additive"].value_or(false));
     EXPECT_EQ(p["deps"]["zlib"]["when"]["option"].value_or(std::string{}), "zlib");
     EXPECT_EQ(p["toolchains"]["cmake"]["default-recipe"].value_or(std::string{}), "p/cmake");
@@ -203,7 +204,7 @@ TEST(index_entry, writes_and_reads_an_entry)
     EXPECT_EQ(e->projection.name, "a-recipe");
     EXPECT_EQ(e->projection.linkage, (std::vector<std::string>{"static", "dynamic"}));
     ASSERT_EQ(e->projection.options.size(), 1u);
-    EXPECT_TRUE(e->projection.options[0].doc.empty());
+    EXPECT_EQ(e->projection.options[0].doc, "Use zlib.");
     ASSERT_EQ(e->projection.resources.size(), 1u);
     EXPECT_EQ(e->projection.resources[0].name, "data");
     ASSERT_EQ(e->projection.toolchains.size(), 1u);
@@ -251,10 +252,25 @@ TEST(index_entry, refuses_keys_the_projection_leaves_out)
     diagnostics d;
     EXPECT_FALSE(parse_index_entry(text + "homepage = \"https://example.com\"\n", "entry.toml", targets, d));
     EXPECT_FALSE(d.items().empty());
+}
 
-    d = {};
-    EXPECT_FALSE(parse_index_entry(replaced(text, "additive = true", "additive = true\ndoc = \"Use zlib.\""), "entry.toml", targets, d));
-    EXPECT_NE(messages(d).find("'doc'"), std::string::npos) << messages(d);
+// index.md 3, 3.1: an entry made before the projection kept option docs is read without them, until it is made anew
+TEST(index_entry, reads_an_entry_without_option_docs)
+{
+    std::string const text = write_index_entry(projection_of(recipe_text()), test_recipe_source(), hex64, published);
+    diagnostics d;
+    auto e = parse_index_entry(replaced(text, "doc = \"Use zlib.\"\n", ""), "entry.toml", targets, d);
+    ASSERT_TRUE(e.has_value()) << messages(d);
+    ASSERT_EQ(e->projection.options.size(), 1u);
+    EXPECT_TRUE(e->projection.options[0].doc.empty());
+}
+
+TEST(index_entry, refuses_an_empty_option_doc)
+{
+    std::string const text = write_index_entry(projection_of(recipe_text()), test_recipe_source(), hex64, published);
+    diagnostics d;
+    EXPECT_FALSE(parse_index_entry(replaced(text, "doc = \"Use zlib.\"", "doc = \"\""), "entry.toml", targets, d));
+    EXPECT_NE(messages(d).find("'doc' in options.zlib must not be empty"), std::string::npos) << messages(d);
 }
 
 TEST(index_library, reads_the_scheme)

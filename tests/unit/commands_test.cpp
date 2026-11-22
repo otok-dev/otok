@@ -1016,6 +1016,78 @@ TEST_F(commands, checks_advisories_and_queries_the_index)
     EXPECT_EQ(run({"info", "p/zz"}), 1);
     EXPECT_NE(err.str().find("the index has no recipe 'p/zz'"), std::string::npos) << err.str();
 
+    // the queries as JSON (cli-json.md 3, 4)
+    ASSERT_EQ(run({"search", "TEST", "--format", "json"}), 0) << err.str();
+    EXPECT_EQ(err.str(), "");
+    auto j = nlohmann::json::parse(out.str());
+    EXPECT_EQ(j["format"], 1);
+    EXPECT_EQ(j["command"], "search");
+    EXPECT_EQ(j["diagnostics"], nlohmann::json::array());
+    EXPECT_EQ(j["query"], "TEST");
+    ASSERT_EQ(j["recipes"].size(), 2u);
+    EXPECT_EQ(j["recipes"][0], nlohmann::json::parse(R"({"id": "p/a", "index": "default", "library": "a", "description": "Test.",
+        "keywords": [], "version": "1.1", "targets": ["apple"]})"));
+    EXPECT_EQ(j["recipes"][1]["id"], "p/b");
+    ASSERT_EQ(run({"search", "zzz", "--format", "json"}), 0) << err.str();
+    EXPECT_EQ(nlohmann::json::parse(out.str())["recipes"], nlohmann::json::array());
+
+    ASSERT_EQ(run({"info", "b", "--format", "json"}), 0) << err.str();
+    j = nlohmann::json::parse(out.str());
+    EXPECT_EQ(j["library"], "b");
+    EXPECT_EQ(j["recipes"][0]["id"], "p/b");
+    EXPECT_TRUE(j["recipe"].is_null());
+
+    ASSERT_EQ(run({"info", "p/a", "--format", "json"}), 0) << err.str();
+    j = nlohmann::json::parse(out.str());
+    EXPECT_TRUE(j["library"].is_null());
+    EXPECT_TRUE(j["recipes"].is_null());
+    nlohmann::json const& a = j["recipe"];
+    EXPECT_EQ(a["id"], "p/a");
+    EXPECT_EQ(a["license"], "MIT");
+    EXPECT_EQ(a["status"], nlohmann::json::parse(R"({"deprecated": null, "in-favor-of": null, "transferred-from": null})"));
+    ASSERT_EQ(a["versions"].size(), 2u);
+    EXPECT_EQ(a["versions"][0]["version"], "1.1");
+    EXPECT_EQ(a["versions"][0]["variant"], "apple");
+    EXPECT_EQ(a["versions"][0]["channel"], "stable");
+    EXPECT_EQ(a["versions"][0]["advisories"], nlohmann::json::parse(R"([{"id": "2026-0001", "severity": "withdrawn",
+        "summary": "Builds the wrong thing.", "unknown": []}])"));
+    EXPECT_TRUE(a["versions"][0]["unavailable"].is_null());
+    EXPECT_EQ(a["versions"][1]["unavailable"], nlohmann::json::parse(R"({"since": "2026-10-26T03:00:00Z",
+        "inputs": ["source https://example.com/a.tar.gz"]})"));
+    EXPECT_EQ(a["version"], "1.1");
+    ASSERT_EQ(a["variants"].size(), 1u);
+    nlohmann::json const& v = a["variants"][0];
+    EXPECT_EQ(v["variant"], "apple");
+    EXPECT_EQ(v["target"], "apple");
+    EXPECT_EQ(v["linkage"], nlohmann::json::parse(R"(["static"])"));
+    EXPECT_TRUE(v["c-standard"].is_null());
+    EXPECT_EQ(v["dependencies"], nlohmann::json::parse(R"([{"library": "b", "programs": [], "version": ">= 1", "default-recipe": "p/b",
+        "prerelease": false, "requires-options": {"shared": true}, "linkage": null, "export": false, "toolchains": [],
+        "from-dependency": false, "when": null}])"));
+    EXPECT_EQ(v["recipe-source"]["path"], "a");
+    EXPECT_EQ(v["recipe-sha256"].get<std::string>().size(), 64u);
+
+    ASSERT_EQ(run({"info", "p/b", "--format", "json"}), 0) << err.str();
+    j = nlohmann::json::parse(out.str());
+    EXPECT_EQ(j["recipe"]["status"]["deprecated"], "unmaintained");
+    EXPECT_EQ(j["recipe"]["status"]["in-favor-of"], "q/b");
+    EXPECT_EQ(j["recipe"]["variants"][0]["options"], nlohmann::json::parse(R"([
+        {"name": "level", "type": "int", "values": [], "default": 1, "additive": false, "doc": "d"},
+        {"name": "shared", "type": "bool", "values": [], "default": false, "additive": false, "doc": "d"}])"));
+
+    // a failure: the command's keys null, the error among the diagnostics, not on standard error
+    EXPECT_EQ(run({"info", "p/zz", "--format", "json"}), 1);
+    EXPECT_EQ(err.str(), "");
+    j = nlohmann::json::parse(out.str());
+    EXPECT_TRUE(j["recipe"].is_null());
+    ASSERT_EQ(j["diagnostics"].size(), 1u);
+    EXPECT_EQ(j["diagnostics"][0]["severity"], "error");
+    EXPECT_NE(j["diagnostics"][0]["message"].get<std::string>().find("the index has no recipe 'p/zz'"), std::string::npos) << out.str();
+    EXPECT_TRUE(j["diagnostics"][0]["file"].is_null());
+    EXPECT_EQ(run({"search", "x", "--format", "xml"}), 1);
+    EXPECT_EQ(out.str(), "");
+    EXPECT_EQ(err.str(), "error: --format must be 'text' or 'json', not 'xml'\n");
+
     // the same through the HTTPS view of the index (index.md 8)
     std::filesystem::path const site = upstream.path() / "site";
     EXPECT_EQ(run({"index-view", index_arg, "--output", path_to_utf8(site)}), 1);

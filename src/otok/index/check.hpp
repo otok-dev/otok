@@ -100,4 +100,25 @@ struct index_probe_result
 // availability.toml for versions still missing something.
 result<index_probe_result> probe_index(index_probe_settings const& settings);
 
+struct index_reproject_settings
+{
+    std::filesystem::path root;        // a checkout of the index
+    std::span<target_info const* const> targets;
+    cache_store* cache = nullptr;      // the recipe trees are fetched into it
+    git_tool const* git = nullptr;
+};
+
+struct index_reproject_result
+{
+    std::size_t entries = 0;           // entries read
+    std::vector<std::string> rewritten;  // their files, "recipes/<publisher>/<name>/<variant>/<version>-r<revision>.toml"
+    std::vector<std::string> failures;   // why an entry was left as it is
+};
+
+// Makes every entry of the index anew from its recipe tree (index.md 3.1, docs/PLAN.md decision 141): an entry whose
+// projection differs from that of its tree's recipe.toml is written again with it, keeping its recipe-source,
+// recipe-sha256 and published. An entry whose tree cannot be fetched or does not hash to its recipe-sha256 is left as it
+// is, and said so in `failures`.
+result<index_reproject_result> reproject_index(index_reproject_settings const& settings);
+
 }

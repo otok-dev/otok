@@ -578,3 +578,44 @@ TEST_F(index_check, probes_the_inputs_of_every_version)
     // a GET of the first byte is tried after a HEAD
     EXPECT_NE(std::ranges::find(asked, "GET " + archive_url), asked.end());
 }
+
+// index.md 3.1, docs/PLAN.md decision 141: entries made before the projection kept option docs, made anew from their trees
+TEST_F(index_check, makes_the_entries_anew_from_their_recipe_trees)
+{
+    dir.write("recipes/c/recipe.toml", recipe_toml("c", "1.0", archive_url, archive_sha)
+        + "[options.fast]\ntype = \"bool\"\ndefault = false\ndoc = \"Build for speed.\"\n");
+    run(dir.path() / "recipes", {"add", "."});
+    run(dir.path() / "recipes", {"commit", "-q", "-m", "c"});
+    recipes_commit = run(dir.path() / "recipes", {"rev-parse", "HEAD"});
+
+    std::string const current = entry_of("c", "p", now);
+    ASSERT_NE(current.find("doc = \"Build for speed.\"\n"), std::string::npos) << current;
+    dir.write("index/recipes/p/a/native/1.0-r1.toml", entry_of("a", "p", now));
+    dir.write("index/recipes/p/c/native/1.0-r1.toml", replace_in(current, "doc = \"Build for speed.\"\n", ""));
+    std::string missing = entry_of("b", "p", now);
+    missing.replace(missing.find(recipes_commit), 40, std::string(40, 'a'));  // a commit the repository does not have
+    dir.write("index/recipes/p/b/native/1.0-r1.toml", missing);
+
+    index_reproject_settings s;
+    s.root = index();
+    s.targets = targets;
+    s.cache = &*cache;
+    s.git = &*git;
+    auto done = reproject_index(s);
+    ASSERT_TRUE(done.has_value()) << done.error().message;
+    EXPECT_EQ(done->entries, 3u);
+    EXPECT_EQ(done->rewritten, std::vector<std::string>{"recipes/p/c/native/1.0-r1.toml"});
+    // the entry as it is published now: its recipe-source, recipe-sha256 and published kept
+    EXPECT_EQ(read_file(index() / "recipes/p/c/native/1.0-r1.toml").value_or("?"), current);
+    ASSERT_EQ(done->failures.size(), 1u);
+    EXPECT_NE(done->failures[0].find("cannot fetch the recipe p/b native 1.0 (r1)"), std::string::npos) << done->failures[0];
+    EXPECT_EQ(read_file(index() / "recipes/p/b/native/1.0-r1.toml").value_or("?"), missing);
+
+    // made anew, nothing is left to make
+    std::filesystem::remove_all(index() / "recipes/p/b");
+    done = reproject_index(s);
+    ASSERT_TRUE(done.has_value()) << done.error().message;
+    EXPECT_EQ(done->entries, 2u);
+    EXPECT_TRUE(done->rewritten.empty());
+    EXPECT_TRUE(done->failures.empty());
+}

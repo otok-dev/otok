@@ -71,8 +71,9 @@ A private index uses the same format.
 
 ## 3. Version entries
 
-`recipes/<publisher>/<name>/<variant>/<version>-r<revision>.toml`. Never edited or deleted after it is merged;
-withdrawal is an advisory (common 1.6). Index CI accepts an entry only after fetching its
+`recipes/<publisher>/<name>/<variant>/<version>-r<revision>.toml`. Never edited or deleted after it is merged, but
+made anew from its own recipe tree when the projection changes before the first release (3.1); withdrawal is an
+advisory (common 1.6). Index CI accepts an entry only after fetching its
 `recipe-source` itself and finding the same `recipe-sha256` and copied fields there.
 
 A recipe id has a variant per target and way of building (`recipe-toml.md` 6.1), each with its own revisions:
@@ -110,15 +111,18 @@ build-on = ["macos/xcode"]
 [options.no-deprecated]
 type = "bool"
 default = false
+doc = "Leave out the deprecated APIs (no-deprecated)."
 
 [options.features]
 type = "list"
 values = ["no-legacy", "no-quic", "no-engine"]
 default = []
+doc = "Features to leave out of the build."
 
 [options.zlib]
 type = "bool"
 default = false
+doc = "Compression of TLS records with zlib."
 additive = true
 
 [deps.zlib]
@@ -144,7 +148,7 @@ xcode = ">= 16"
 An entry says nothing of a build: `otok publish` builds the recipe as the publisher's own check, and whatever a
 publisher wrote of it would be taken on trust. Marks of builds, if an index has a CI
 that builds published recipes, are records of their own, written by that CI.
-| `[tool]`, `[platforms]`, `[options.*]`, `[deps.*]`, `[tool-deps.*]`, `[toolchains]`, `[<target>]` (`[apple]`, …) | the same tables | Copied, except option `doc` strings (the catalog reads them from the recipe). |
+| `[tool]`, `[platforms]`, `[options.*]`, `[deps.*]`, `[tool-deps.*]`, `[toolchains]`, `[<target>]` (`[apple]`, …) | the same tables | Copied, option `doc` strings too: `otok info` shows what each option does without fetching the recipe tree. An entry made before the projection kept them has none until it is made anew (3.1); otok reads it all the same. |
 
 Not copied: `[vars]`, `[[product]]`, `[cmake.*]`, `[publish]`, `[metadata]`, `name` (it is in `recipe`), `homepage`,
 `documentation`, `license-files` — they matter for building and for the catalog, both of which read the
@@ -162,8 +166,8 @@ the same one:
   left absent (no defaults are filled in);
 - `source`: the keys `url`, `sha256`, `mirrors`, `git`, `commit`, `tag`, `submodules` of `[source]`;
   `[[resource]]`: `name` and the same keys of each resource, in the recipe's order;
-- the tables of the last row copied whole, with `doc` removed from every option; a table of a target otok does not
-  know is copied as well (3.2), so that an older otok projects a newer one's recipe as that otok did.
+- the tables of the last row copied whole; a table of a target otok does not know is copied as well (3.2), so that an
+  older otok projects a newer one's recipe as that otok did.
 
 Two projections are equal when they hold the same keys with the same values (TOML types included), in
 any order and layout. otok reads an entry as a recipe without products: the resolver needs nothing
@@ -173,6 +177,12 @@ otherwise: an index that misstates a recipe's dependencies or options is caught 
 
 Two versions of one library that are equal in its scheme, or whose file names differ only in case,
 cannot both be published.
+
+Until the first public release (README 1.4) the projection may change. An index then makes its entries anew rather
+than publishing every recipe again: `otok index-reproject` rewrites each entry whose projection differs from that of
+its recipe tree, fetched at its `recipe-source`, keeping `recipe-source`, `recipe-sha256` and `published`, and refuses
+an entry whose tree no longer hashes to its `recipe-sha256`. Versions, revisions and the locks naming them stay valid:
+the tree is the one they pinned. An index maintainer commits the result and pushes it to the default branch.
 
 ### 3.2 Entries for a newer otok
 

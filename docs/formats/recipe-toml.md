@@ -278,7 +278,7 @@ A typed build parameter set by the user.
 |---|---|---|
 | `type` | `"bool"`, `"int"`, `"string"`, `"enum"`, `"list"`, `"file"` | — (required) |
 | `default` | value of the type | — (required, except for `file`, which takes none: no file). Must itself be valid. |
-| `doc` | string | — (required). Shown in the catalog and in error messages. |
+| `doc` | string | — (required). Shown in the catalog, by `otok info` and in error messages; copied into the index entry (`index.md` 3). |
 | `values` | array of strings | Required for `enum` (allowed values); optional for `list` (allowed elements; without it, any strings). |
 | `additive` | boolean | Default `false`. Only for `bool` and `list` (8.1). |
 

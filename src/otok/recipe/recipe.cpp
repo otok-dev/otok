@@ -695,7 +695,8 @@ std::optional<option_schema> recipe_reader::option_entry(toml_table& options, st
         ok = false;
     }
 
-    if (auto doc = entry_ ? std::nullopt : t->string("doc", need::required)) {
+    // an index entry has it (index.md 3) unless it was made before the projection kept it, and not yet made anew (3.1)
+    if (auto doc = t->string("doc", entry_ ? need::optional : need::required)) {
         if (doc->empty()) t->error(t->position("doc"), t->describe("doc") + " must not be empty");
         o.doc = std::move(*doc);
     } else if (!entry_) {

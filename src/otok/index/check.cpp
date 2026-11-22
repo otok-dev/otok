@@ -866,4 +866,50 @@ result<index_probe_result> probe_index(index_probe_settings const& s)
     return out;
 }
 
+result<index_reproject_result> reproject_index(index_reproject_settings const& s)
+{
+    if (!s.cache || !s.git) return fail("making the entries anew needs the cache and git");
+    index_reproject_result out;
+    recipe_index idx{s.root, s.targets, index_reading::ci};
+    auto ids = idx.recipe_ids();
+    if (!ids) return std::unexpected{ids.error()};
+    for (recipe_id const& id : *ids) {
+        auto entries = idx.entries(id);
+        if (!entries) return std::unexpected{entries.error()};
+        for (index_entry const& e : **entries) {
+            ++out.entries;
+            std::string const file = "recipes/" + id.str() + "/" + e.file();
+            std::string const label = id.str() + " " + e.projection.variant + " " + e.projection.version->str() + " (r"
+                + std::to_string(e.projection.revision) + ")";
+            auto tree = fetch_recipe_tree(label, e.projection.library, e.recipe_source, e.recipe_sha256, *s.cache, *s.git);
+            if (!tree) {
+                out.failures.push_back(tree.error().message);
+                continue;
+            }
+            auto content = read_file(*tree / "recipe.toml");
+            if (!content) {
+                out.failures.push_back(label + ": " + content.error().message);
+                continue;
+            }
+            diagnostics diags;
+            auto doc = toml_document::parse(*content, "recipe.toml", diags);
+            if (!doc) {
+                out.failures.push_back("the recipe.toml of " + label + " is invalid:" + messages(diags));
+                continue;
+            }
+            toml::table const projection = recipe_projection(doc->table(), id.publisher, s.targets);
+            if (projection == *e.table) continue;
+            // what otok reads back must be the entry it would publish now (index.md 3.1)
+            std::string const text = write_index_entry(projection, e.recipe_source, e.recipe_sha256, e.published);
+            if (!parse_index_entry(text, file, s.targets, diags, index_reading::ci)) {
+                out.failures.push_back("the entry " + file + " made anew is invalid:" + messages(diags));
+                continue;
+            }
+            if (auto ok = write_file_atomic(s.root / path_from_utf8(file), text); !ok) return std::unexpected{ok.error()};
+            out.rewritten.push_back(file);
+        }
+    }
+    return out;
+}
+
 }

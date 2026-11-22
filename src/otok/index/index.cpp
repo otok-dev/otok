@@ -110,11 +110,7 @@ toml::table recipe_projection(toml::table const& recipe_toml, std::string_view p
         static constexpr std::string_view left_out[] = {"recipe", "source", "resource", "vars", "product", "cmake", "publish", "metadata"};
         if (n.is_table() && std::ranges::none_of(left_out, [&](std::string_view k) { return k == key.str(); })) copy_node(out, key.str(), n);
     }
-    if (toml::table* options = out["options"].as_table()) {
-        for (auto& [name, option] : *options) {
-            if (toml::table* o = option.as_table()) o->erase("doc");
-        }
-    }
+    // option `doc` strings stay, for `otok info` (docs/PLAN.md decision 141)
     return out;
 }
 
