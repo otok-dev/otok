@@ -611,6 +611,12 @@ otok publish … --format json
 as they happen, then `end` with the exit code. Errors and warnings are `diagnostic` events; the progress for people
 stays on standard error.
 
+With `--dry-run --no-build` it is a check: each recipe is fetched back from its remote, read, given its entry and
+compared with the index as a publication does before it builds, and nothing is built or published. A recipe that
+cannot be published is an error `diagnostic` whose `file` is its `recipe.toml` (absolute), and the others are
+checked all the same; the check ends with `publication` `"checked"`, its exit code 1 when a recipe was refused. A
+publication refuses before anything, every refused recipe said the same way.
+
 ```text
 {"command":"publish","event":"start","format":1,"otok":"0.6.0"}
 {"checkout":false,"event":"index","index":"https://github.com/otok-dev/index","publisher":"apotocki"}
@@ -633,13 +639,14 @@ stays on standard error.
 | `limit` | `key` (of `index.toml`, `index.md` 2; counted as 9.2 says), `limit`, `recent` (the publisher's entries published in the last 24 hours), `pending` (its entries in other open pull requests), `pending-requests` (their numbers), `adding`, `exceeded`, `passes-at` (when the limit lets these entries in by waiting, a time; `null` when it does now or waiting does not help) | Before anything is built, when the index counts the entries of this publisher: a pull request with entries to add, by one who cannot push to the index. When it is exceeded, an error follows (with `--dry-run` a warning). |
 | `build` | `build` (its number, from 1), `state`: `"queued"`, `"building"`, `"built"` or `"failed"`; `recipe`, `library`, `variant`, `version`, `revision`, `target`, `platforms` (those it builds), `environment` (`"linux/gcc"`), `options` (the option set of a `[[publish.check]]`, an object of option values; `null` for the defaults), `seconds` (how long it took, for `"built"` and `"failed"`; else `null`) | Each build of a recipe: one per environment of the recipe this machine has and per option set (`DESIGN` 7.4). All are `"queued"` first, then they build at once (one after another with `-vv`). |
 | `slice`, `skipped`, `linkage-fallback`, `standard`, `diagnostic` | as in 9, with `build`, the number of the build they belong to | What the install of a build reports (its other events are of the temporary project it builds in and are left out). A failed slice is a `slice` event with `state` `"failed"`, its log and hint, then the build's error `diagnostic`. |
-| `publication` | `state` (below), `entries` (the entries it adds, or would add with `--dry-run`), `published` (the entries the index had already), `pull-request` (`number`, `url`, `branch`, `reused`: whether an open pull request of the branch was updated, `last-check`: what index CI said of it before this update, `{ verdict, reasons }` as `index-check` gives them, else `null`; `null` but for `"pull-request"`), `registered` (the publisher this pull request registers, `{ publisher, account }` with the GitHub account; else `null`) | At the end, when nothing failed. |
-| `diagnostic` | as 2.1 | An error or a warning of the publication itself; without `build`. A failed build ends the publication with one. |
+| `publication` | `state` (below), `entries` (the entries it adds, or would add with `--dry-run`), `published` (the entries the index had already), `pull-request` (`number`, `url`, `branch`, `reused`: whether an open pull request of the branch was updated, `last-check`: what index CI said of it before this update, `{ verdict, reasons }` as `index-check` gives them, else `null`; `null` but for `"pull-request"`), `registered` (the publisher this pull request registers, `{ publisher, account }` with the GitHub account; else `null`) | At the end, when nothing failed; for a check, also when recipes were refused. |
+| `diagnostic` | as 2.1 | An error or a warning of the publication itself; without `build`. A recipe that cannot be published is one with its `recipe.toml` as `file`; a failed build ends the publication with one. |
 | `text` | `text` | As in 9. |
 | `end` | `exit` | Last: the exit code. |
 
 `state` of `publication`:
 
+- `"checked"`: checked, nothing built or published (`--dry-run --no-build`);
 - `"dry-run"`: built, nothing published (`--dry-run`);
 - `"published-already"`: every recipe's entry is in the index already;
 - `"pull-request"`: the entries are proposed in a pull request on GitHub, which index CI checks and merges;

@@ -3093,7 +3093,8 @@ int run_publish(parsed_command const& cmd, command_context& ctx)
     std::ostream& out = ctx.events ? none : ctx.out;
     bool const build = !cmd.flag("no-build");
     bool const dry_run = cmd.flag("dry-run");
-    if (dry_run && !build) return error("--dry-run builds the recipe and publishes nothing, so it cannot go with --no-build");
+    // --dry-run --no-build: the recipes checked as a publication checks them, nothing built or published (cli-json.md 10)
+    bool const check = dry_run && !build;
 
     diagnostics diags;
     auto config = load_config(ctx.env, diags);
@@ -3178,40 +3179,52 @@ int run_publish(parsed_command const& cmd, command_context& ctx)
     }
     std::string const remote = cmd.value("remote").value_or("origin");
     std::vector<publish_recipe> recipes;
-    for (std::filesystem::path const& dir : dirs) {
+    std::size_t refused_recipes = 0;
+    // a recipe that cannot be published: an error of its recipe.toml (cli-json.md 10), the others checked all the same
+    auto const check_recipe = [&](std::filesystem::path const& dir) -> std::optional<publish_recipe> {
+        auto const refused = [&](std::string message) -> std::optional<publish_recipe> {
+            otok::diagnostic d;
+            d.level = severity::error;
+            d.message = std::move(message);
+            d.where.file = absolute_path(dir / "recipe.toml");
+            if (ctx.events) ctx.events->report(d);
+            else ctx.err << format(d) << "\n";
+            return std::nullopt;
+        };
         publish_recipe p;
         p.dir = dir;
-        std::string const where = "'" + path_to_utf8(dir) + "'";
+        std::string const where = "'" + absolute_path(dir) + "'";
         auto prefix = git_line({"rev-parse", "--show-prefix"}, dir);
-        if (!prefix) return error(where + " is not in a git checkout: " + prefix.error().message);
+        if (!prefix) return refused(where + " is not in a git checkout: " + prefix.error().message);
         auto status = git_line({"status", "--porcelain", "--", "."}, dir);
-        if (!status) return error(status.error().message);
-        if (!status->empty()) return error("the recipe directory " + where + " has changes that are not committed:\n" + *status);
+        if (!status) return refused(status.error().message);
+        if (!status->empty()) return refused("the recipe directory " + where + " has changes that are not committed:\n" + *status);
         auto commit = git_line({"rev-parse", "HEAD"}, dir);
-        if (!commit) return error(commit.error().message);
+        if (!commit) return refused(commit.error().message);
         auto url = git_line({"remote", "get-url", remote}, dir);
-        if (!url) return error("the checkout of " + where + " has no remote " + in_quotes(remote) + ": " + url.error().message);
+        if (!url) return refused("the checkout of " + where + " has no remote " + in_quotes(remote) + ": " + url.error().message);
         p.source.type = locked_location::kind::git;
         p.source.git = *url;
         p.source.commit = *commit;
         if (!prefix->empty()) p.source.path = prefix->substr(0, prefix->find_last_not_of('/') + 1);
         auto tree = cache->git_directory(p.source.git, p.source.commit, "", p.source.path, *git);
-        if (!tree) return error("cannot fetch " + p.source.commit + " from " + in_quotes(remote) + " (is it pushed?): " + tree.error().message);
+        if (!tree) return refused("cannot fetch " + p.source.commit + " from " + in_quotes(remote) + " (is it pushed?): " + tree.error().message);
         p.tree = *tree;
         // checked as it will be published, before anything is built
         auto addition = make_index_entry(p.tree, p.source, publisher, std::nullopt, ctx.targets);
-        if (!addition) return error(addition.error().message);
-        auto loaded = load_recipe(p.tree, ctx.targets, diags);
+        if (!addition) return refused(addition.error().message);
+        diagnostics recipe_diags;
+        auto loaded = load_recipe(p.tree, ctx.targets, recipe_diags);
         if (!loaded) {
-            report(diags, ctx);
-            return 1;
+            report(recipe_diags, ctx);
+            return std::nullopt;
         }
         p.r = std::make_shared<recipe const>(std::move(*loaded));
         if (!checkout) {
-            if (auto refused = non_https_locations(p.source, *p.r); !refused.empty()) {
+            if (auto locations = non_https_locations(p.source, *p.r); !locations.empty()) {
                 std::string list;
-                for (std::string const& r : refused) list += "\n  " + r;
-                return error(addition->label + ": an index on GitHub takes https locations only:" + list);
+                for (std::string const& r : locations) list += "\n  " + r;
+                return refused(addition->label + ": an index on GitHub takes https locations only:" + list);
             }
         }
         // the same entry in the index: published already (DESIGN 7.4)
@@ -3220,25 +3233,31 @@ int run_publish(parsed_command const& cmd, command_context& ctx)
             std::filesystem::path const file = index_dir / path_from_utf8(addition->entry_path);
             if (std::filesystem::exists(file, ec)) {
                 auto text = read_file(file);
-                if (!text) return error(text.error().message);
+                if (!text) return refused(text.error().message);
                 existing = std::move(*text);
             }
         } else if (github) {
             auto text = github->file(addition->entry_path);
-            if (!text) return error(text.error().message);
+            if (!text) return refused(text.error().message);
             existing = std::move(*text);
         }
         if (existing) {
             auto same = same_index_entry(*existing, addition->entry_text, addition->entry_path, ctx.targets);
-            if (!same) return error(same.error().message);
+            if (!same) return refused(same.error().message);
             if (!*same) {
-                return error("the index has " + addition->entry_path + " already, published differently; entries never change, so publish a new revision instead");
+                return refused("the index has " + addition->entry_path + " already, published differently; entries never change, so publish a new revision instead");
             }
             p.published = true;
         }
         p.addition = std::move(*addition);
-        recipes.push_back(std::move(p));
+        return p;
+    };
+    for (std::filesystem::path const& dir : dirs) {
+        if (auto p = check_recipe(dir)) recipes.push_back(std::move(*p));
+        else ++refused_recipes;
     }
+    // every refusal said; a publication goes no further, a check (--dry-run --no-build) says what it found of the others
+    if (refused_recipes > 0 && !check) return 1;
 
     for (publish_recipe const& p : recipes) {
         nlohmann::json source;
@@ -3340,7 +3359,7 @@ int run_publish(parsed_command const& cmd, command_context& ctx)
             }
             if (environments.empty()) return error(p.addition->label + ": this machine has none of the environments it builds in:" + missing);
             std::vector<option_values const*> sets{nullptr};
-            for (option_values const& check : p.r->publish_checks) sets.push_back(&check);
+            for (option_values const& options : p.r->publish_checks) sets.push_back(&options);
             for (build_environment const& e : environments) {
                 for (option_values const* options : sets) {
                     auto project = make_publish_project(*p.r, p.source, **target, e, options);
@@ -3471,6 +3490,12 @@ int run_publish(parsed_command const& cmd, command_context& ctx)
             {"pull-request", std::move(pull_request)}, {"registered", std::move(registered)}});
         return 0;
     };
+    if (check) {
+        for (publish_recipe const& p : recipes) out << p.addition->label << (p.published ? " is published already\n" : " can be published\n");
+        out << (refused_recipes == 0 ? "checked; nothing is built or published\n" : "checked; nothing is built or published; some recipes cannot be published\n");
+        publication("checked");
+        return refused_recipes == 0 ? 0 : 1;
+    }
     if (dry_run) {
         out << "built; --dry-run publishes nothing\n";
         return publication("dry-run");
@@ -3864,7 +3889,7 @@ std::span<command_spec const> command_specs()
                 {"publisher", 0, "NAME", "The publisher the recipe is published under (default on GitHub: the token's account)"},
                 {"remote", 0, "NAME", "The git remote users fetch the recipe from (default: origin)"},
                 {"all", 0, "", "Every recipe of the checkout; those published already are skipped"},
-                {"dry-run", 0, "", "Build, and publish nothing"}, {"no-build", 0, "", "Add the entry without building the recipe"},
+                {"dry-run", 0, "", "Build, and publish nothing; with --no-build, only check the recipes as a publication would"}, {"no-build", 0, "", "Add the entry without building the recipe"},
                 {"no-push", 0, "", "With a checkout of the index: commit the entry, but do not push"},
                 verbose_option,
                 keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option, jobs_option, stream_format_option}, 0, any_number},

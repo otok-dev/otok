@@ -845,11 +845,37 @@ TEST_F(commands, installs_recipes_from_the_index)
     EXPECT_EQ(run({"publish", "--dry-run", "--index", index_arg, "--publisher", "p", path_to_utf8(recipes / "a")}), 1);
     EXPECT_NE(err.str().find("p/a 1.0-r1 (apple): this otok cannot build for 'apple' on this machine"),
         std::string::npos) << err.str();
-    EXPECT_EQ(run({"publish", "--dry-run", "--no-build", "--index", index_arg}), 1);
-    EXPECT_NE(err.str().find("--dry-run builds the recipe and publishes nothing, so it cannot go with --no-build"), std::string::npos) << err.str();
+    // --dry-run --no-build: a check, which builds nothing, so the machine need not build the recipes' target (cli-json.md 10)
+    ASSERT_EQ(run({"publish", "--dry-run", "--no-build", "--index", index_arg, "--publisher", "p", path_to_utf8(recipes / "a"), path_to_utf8(recipes / "b")}), 0)
+        << err.str();
+    EXPECT_EQ(out.str(), "p/a 1.0-r1 (apple) is published already\np/b 2.0-r1 (apple) is published already\nchecked; nothing is built or published\n");
     upstream.write("recipes/a/notes.txt", "not committed\n");
     EXPECT_EQ(run({"publish", "--no-build", "--index", index_arg, "--publisher", "p", path_to_utf8(recipes / "a")}), 1);
     EXPECT_NE(err.str().find("has changes that are not committed"), std::string::npos) << err.str();
+    // a recipe that cannot be published: an error of its recipe.toml; a check goes on with the others
+    std::string const recipe_a = path_to_utf8(std::filesystem::absolute(recipes / "a" / "recipe.toml").lexically_normal().generic_u8string());
+    EXPECT_EQ(run({"publish", "--dry-run", "--no-build", "--index", index_arg, "--publisher", "p", path_to_utf8(recipes / "a"), path_to_utf8(recipes / "b")}), 1);
+    EXPECT_EQ(err.str().find(recipe_a + ": error: the recipe directory '"), 0u) << err.str();
+    EXPECT_EQ(out.str(), "p/b 2.0-r1 (apple) is published already\nchecked; nothing is built or published; some recipes cannot be published\n");
+    EXPECT_EQ(run({"publish", "--dry-run", "--no-build", "--index", index_arg, "--publisher", "p", path_to_utf8(recipes / "a"), path_to_utf8(recipes / "b"),
+                  "--format", "json"}), 1);
+    std::vector<nlohmann::json> events;
+    {
+        std::istringstream lines{out.str()};
+        for (std::string line; std::getline(lines, line);) events.push_back(nlohmann::json::parse(line));
+    }
+    std::string names;
+    for (nlohmann::json const& e : events) names += e["event"].get<std::string>() + (e.contains("state") ? ":" + e["state"].get<std::string>() : "") + " ";
+    EXPECT_EQ(names, "start index diagnostic recipe publication:checked end ") << out.str();
+    ASSERT_GE(events.size(), 6u);
+    EXPECT_EQ(events[2]["file"], recipe_a);
+    EXPECT_NE(events[2]["message"].get<std::string>().find("has changes that are not committed"), std::string::npos) << events[2];
+    EXPECT_EQ(events[3]["recipe"], "p/b");
+    EXPECT_EQ(events[4]["published"], (nlohmann::json{"recipes/p/b/apple/2.0-r1.toml"}));
+    EXPECT_EQ(events[5], nlohmann::json::parse(R"({"event": "end", "exit": 1})"));
+    // a publication refuses before anything: every refusal said, nothing built
+    EXPECT_EQ(run({"publish", "--no-build", "--index", index_arg, "--publisher", "p", path_to_utf8(recipes / "a"), path_to_utf8(recipes / "b")}), 1);
+    EXPECT_EQ(out.str(), "");
     std::filesystem::remove(recipes / "a" / "notes.txt");
 
     project.write("otok.toml", "[otok]\nformat = 1\n[apple]\nplatforms = [\"ios\"]\ndeployment = { ios = \"15.0\" }\n"
