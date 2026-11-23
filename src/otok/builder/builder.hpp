@@ -90,14 +90,15 @@ struct announcements
     }
 };
 
-// A slice as it starts building, is built, or is found in the cache: for `--format json` (cli-json.md 9).
+// A slice as it starts building, is built, is found in the cache, or fails: for `--format json` (cli-json.md 9).
 struct slice_event
 {
     enum class kind
     {
         building,
         built,
-        cached
+        cached,
+        failed
     };
     kind state = kind::building;
     std::string library, id, version;
@@ -105,8 +106,12 @@ struct slice_event
     bool tool = false;
     bool build_tools = false;
     slice_spec spec;
-    double seconds = 0;  // built: how long it took
+    double seconds = 0;  // built or failed: how long it took
     std::string dev;     // the working trees of otok.dev.toml it was built from; empty: none
+    // failed: the error, the log kept in failed/ (cache.md 7.1; empty: none), what the user can do (empty: nothing known)
+    std::string message;
+    std::filesystem::path log;
+    std::string hint;
 };
 
 struct build_settings

@@ -116,8 +116,10 @@ options, linkage and products.
 ## When something fails
 
 - Read `diagnostics` (or the `diagnostic` events): the message says what is wrong and usually what to do.
-- A failed build: `otok log <library> --list --format json` → `logs[]`, newest first, with `file`, `failed`,
-  `slice`; read the newest `file` with `failed: true` (its end has the compiler's or the build system's error).
+- A failed build: the `slice` event with `state: "failed"` names its `log` (the file kept in the cache; its end has the
+  compiler's or the build system's error) and a `hint` when otok knows what to do (otok 0.5.36 or later). Before that,
+  or later on: `otok log <library> --list --format json` → `logs[]`, newest first, with `file`, `failed`, `slice`; read
+  the newest `file` with `failed: true`.
   `otok log <library>` prints the newest log itself.
 - `otok install -v` shows the commands each build runs; `--keep-build-dirs` keeps the whole work directory of a failed
   build in the cache.

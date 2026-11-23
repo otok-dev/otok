@@ -54,8 +54,8 @@
 
 namespace otok {
 
-// The events of install, update and fetch with --format json (cli-json.md 9): one JSON object per line on standard output,
-// from the threads of the builds too.
+// The events of install, update, fetch and publish with --format json (cli-json.md 9, 10): one JSON object per line on
+// standard output, from the threads of the builds too.
 class json_lines
 {
 public:
@@ -64,8 +64,24 @@ public:
     {
     }
 
+    // The events of a build of otok publish (cli-json.md 10): those of `kept` given to `parent` with the keys of `added`.
+    json_lines(json_lines& parent, nlohmann::json added, std::set<std::string> kept)
+        : out_{nullptr}
+        , parent_{&parent}
+        , added_(std::move(added))
+        , kept_{std::move(kept)}
+    {
+    }
+
     void emit(nlohmann::json const& event)
     {
+        if (parent_) {
+            if (!kept_.contains(event.value("event", ""))) return;
+            nlohmann::json with(event);
+            for (auto const& [key, value] : added_.items()) with[key] = value;
+            parent_->emit(with);
+            return;
+        }
         std::lock_guard lock{mutex_};
         out_ << event.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) << "\n" << std::flush;
     }
@@ -94,6 +110,9 @@ public:
 private:
     std::mutex mutex_;
     std::ostream out_;
+    json_lines* parent_ = nullptr;
+    nlohmann::json added_;
+    std::set<std::string> kept_;
 };
 
 namespace {
@@ -142,7 +161,7 @@ option_spec const build_profile_option{"profile", 0, "NAME", "Fetch (and build) 
 option_spec const locked_option{"locked", 0, "", "Fail if otok.lock is missing or would change (for CI)"};
 option_spec const offline_option{"offline", 0, "", "Use only the cache: download and fetch nothing"};
 option_spec const format_option{"format", 0, "text|json", "Print for people (text, the default) or one JSON document for scripts and agents (json; docs/formats/cli-json.md)"};
-option_spec const stream_format_option{"format", 0, "text|json", "Print for people (text, the default) or JSON lines, one event per line, for scripts and agents (json; docs/formats/cli-json.md 9)"};
+option_spec const stream_format_option{"format", 0, "text|json", "Print for people (text, the default) or JSON lines, one event per line, for scripts and agents (json; docs/formats/cli-json.md)"};
 option_spec const frozen_option{"frozen", 0, "", "--locked and --offline together"};
 option_spec const allow_advisory_option{"allow-advisory", 0, "ID,...", "Install versions with these withdrawn or security advisories all the same"};
 // What a build shows (docs/PLAN.md decision 59).
@@ -172,6 +191,12 @@ bool locked(parsed_command const& cmd)
 std::string in_quotes(std::string_view s)
 {
     return "'" + std::string{s} + "'";
+}
+
+// A path as the JSON documents give it: absolute, with / (cli-json.md 2).
+std::string absolute_path(std::filesystem::path const& p)
+{
+    return path_to_utf8(std::filesystem::absolute(p).lexically_normal().generic_u8string());
 }
 
 void report(diagnostics const& diags, std::ostream& err)
@@ -1125,11 +1150,16 @@ bool build_project(parsed_command const& cmd, project& p, lock_file const& lock,
     settings.announced = ctx.announced;
     if (ctx.events) {
         settings.on_slice = [&ctx](slice_event const& e) {
-            char const* const state = e.state == slice_event::kind::building ? "building" : e.state == slice_event::kind::built ? "built" : "cached";
+            using k = slice_event::kind;
+            char const* const state = e.state == k::building ? "building" : e.state == k::built ? "built" : e.state == k::cached ? "cached" : "failed";
+            bool const failed = e.state == k::failed;
             emit(ctx, "slice", {{"state", state}, {"library", e.library}, {"id", e.id}, {"version", e.version}, {"revision", e.revision},
                 {"tool", e.tool}, {"build-tools", e.build_tools}, {"slice", slice_name(e.spec)}, {"configuration", e.spec.configuration},
-                {"seconds", e.state == slice_event::kind::built ? nlohmann::json(std::round(e.seconds * 10) / 10) : nlohmann::json(nullptr)},
-                {"dev", e.dev.empty() ? nlohmann::json(nullptr) : nlohmann::json(e.dev)}});
+                {"seconds", e.state == k::built || failed ? nlohmann::json(std::round(e.seconds * 10) / 10) : nlohmann::json(nullptr)},
+                {"dev", e.dev.empty() ? nlohmann::json(nullptr) : nlohmann::json(e.dev)},
+                {"message", failed ? nlohmann::json(e.message) : nlohmann::json(nullptr)},
+                {"log", failed && !e.log.empty() ? nlohmann::json(absolute_path(e.log)) : nlohmann::json(nullptr)},
+                {"hint", failed && !e.hint.empty() ? nlohmann::json(e.hint.starts_with("hint: ") ? e.hint.substr(6) : e.hint) : nlohmann::json(nullptr)}});
         };
     }
     if (ctx.display) {
@@ -1539,11 +1569,6 @@ nlohmann::json string_or_null(std::string const& s)
     return s.empty() ? nlohmann::json(nullptr) : nlohmann::json(s);
 }
 
-std::string absolute_path(std::filesystem::path const& p)
-{
-    return path_to_utf8(std::filesystem::absolute(p).lexically_normal().generic_u8string());
-}
-
 int metadata(parsed_command const& cmd, command_context& ctx)
 {
     diagnostics diags;
@@ -1865,13 +1890,9 @@ int licenses(parsed_command const&, command_context& ctx)
     return 0;
 }
 
-// A file's time in UTC, RFC 3339 to the second (cli-json.md 2).
-std::string file_time_text(std::filesystem::file_time_type time)
+// A time in UTC, RFC 3339 to the second (cli-json.md 2).
+std::string sys_time_text(std::chrono::sys_seconds at)
 {
-    // by the distance from now: file_clock::to_sys is not in every standard library yet
-    auto const system = std::chrono::system_clock::now()
-        + std::chrono::duration_cast<std::chrono::system_clock::duration>(time - std::filesystem::file_time_type::clock::now());
-    auto const at = std::chrono::floor<std::chrono::seconds>(system);
     auto const day = std::chrono::floor<std::chrono::days>(at);
     std::chrono::year_month_day const ymd{day};
     std::chrono::hh_mm_ss const hms{at - day};
@@ -1880,6 +1901,15 @@ std::string file_time_text(std::filesystem::file_time_type time)
         static_cast<unsigned>(ymd.day()), static_cast<int>(hms.hours().count()), static_cast<int>(hms.minutes().count()),
         static_cast<int>(hms.seconds().count()));
     return text;
+}
+
+// A file's time in UTC, RFC 3339 to the second (cli-json.md 2).
+std::string file_time_text(std::filesystem::file_time_type time)
+{
+    // by the distance from now: file_clock::to_sys is not in every standard library yet
+    auto const system = std::chrono::system_clock::now()
+        + std::chrono::duration_cast<std::chrono::system_clock::duration>(time - std::filesystem::file_time_type::clock::now());
+    return sys_time_text(std::chrono::floor<std::chrono::seconds>(system));
 }
 
 // otok log: the logs of a library's builds kept in the cache (docs/PLAN.md decision 59); no project needed.
@@ -3020,22 +3050,54 @@ result<std::vector<std::filesystem::path>> checkout_recipes(git_tool const& git,
     return dirs;
 }
 
+// A build of otok publish as cli-json.md 10 gives it, without `state` and `seconds`.
+nlohmann::json publish_build_json(std::size_t number, recipe const& r, std::string_view publisher, std::string_view target,
+    std::vector<std::string> const& platforms, build_environment const& environment, option_values const* options)
+{
+    nlohmann::json j;
+    j["event"] = "build";
+    j["build"] = number;
+    j["recipe"] = std::string{publisher} + "/" + r.name;
+    j["library"] = r.library;
+    j["variant"] = r.variant;
+    j["version"] = r.version->str();
+    j["revision"] = r.revision;
+    j["target"] = std::string{target};
+    j["platforms"] = platforms;
+    j["environment"] = environment.text();
+    j["options"] = nullptr;
+    if (options) {
+        j["options"] = nlohmann::json::object();
+        for (auto const& [name, value] : *options) j["options"][name] = option_json(value.value);
+    }
+    return j;
+}
+
 // otok publish (DESIGN 7.4, docs/PLAN.md decisions 44, 46): recipes committed and pushed in a git checkout,
 // built from a fresh fetch, then added to the index through a pull request on GitHub or a checkout of it.
-int publish(parsed_command const& cmd, command_context& ctx)
+int run_publish(parsed_command const& cmd, command_context& ctx)
 {
     auto const error = [&ctx](std::string const& message) {
-        ctx.err << "error: " << message << "\n";
+        if (ctx.events) {
+            otok::diagnostic d;
+            d.level = severity::error;
+            d.message = message;
+            ctx.events->report(d);
+        } else {
+            ctx.err << "error: " << message << "\n";
+        }
         return 1;
     };
+    // what the text says on standard output; with --format json the events say it (cli-json.md 10)
+    std::ostream none{nullptr};
+    std::ostream& out = ctx.events ? none : ctx.out;
     bool const build = !cmd.flag("no-build");
     bool const dry_run = cmd.flag("dry-run");
     if (dry_run && !build) return error("--dry-run builds the recipe and publishes nothing, so it cannot go with --no-build");
-    if (!progress_valid(cmd, ctx)) return 1;
 
     diagnostics diags;
     auto config = load_config(ctx.env, diags);
-    report(diags, ctx.err);
+    report(diags, ctx);
     if (!config || !apply_jobs(cmd, ctx, *config)) return 1;
     cache_notices notices{
         .waiting = [&ctx](std::string const& what) { ctx.err << "note: " << what << "\n"; },
@@ -3100,6 +3162,8 @@ int publish(parsed_command const& cmd, command_context& ctx)
         publisher = lowercase(*login);
     }
 
+    emit(ctx, "index", {{"index", checkout ? absolute_path(index_dir) : repository}, {"checkout", checkout}, {"publisher", publisher}});
+
     // the recipes, fetched back from their remotes: what users will fetch, which also shows they were pushed
     std::vector<std::filesystem::path> dirs;
     if (cmd.flag("all")) {
@@ -3139,7 +3203,7 @@ int publish(parsed_command const& cmd, command_context& ctx)
         if (!addition) return error(addition.error().message);
         auto loaded = load_recipe(p.tree, ctx.targets, diags);
         if (!loaded) {
-            report(diags, ctx.err);
+            report(diags, ctx);
             return 1;
         }
         p.r = std::make_shared<recipe const>(std::move(*loaded));
@@ -3174,6 +3238,16 @@ int publish(parsed_command const& cmd, command_context& ctx)
         }
         p.addition = std::move(*addition);
         recipes.push_back(std::move(p));
+    }
+
+    for (publish_recipe const& p : recipes) {
+        nlohmann::json source;
+        source["git"] = p.source.git;
+        source["commit"] = p.source.commit;
+        source["path"] = string_or_null(p.source.path);
+        emit(ctx, "recipe", {{"recipe", publisher + "/" + p.r->name}, {"library", p.r->library}, {"variant", p.r->variant},
+            {"version", p.r->version->str()}, {"revision", p.r->revision}, {"entry", p.addition->entry_path}, {"source", std::move(source)},
+            {"published", p.published}});
     }
 
     // the index's limit of entries per publisher, before anything is built (DESIGN 7.4, index.md 9.2): a pull request's, which
@@ -3212,10 +3286,13 @@ int publish(parsed_command const& cmd, command_context& ctx)
         auto dir = index_checkout(repository, "", *cache, &reader);
         if (!dir) return error(dir.error().message);
         l = publication_limit_of(*dir, publisher, l, std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
+        emit(ctx, "limit", {{"key", l.key}, {"limit", l.limit}, {"recent", l.recent}, {"pending", l.pending},
+            {"pending-requests", l.pending_requests}, {"adding", l.adding}, {"exceeded", l.exceeded()},
+            {"passes-at", l.passes_at ? nlohmann::json(sys_time_text(*l.passes_at)) : nlohmann::json(nullptr)}});
         if (l.exceeded()) {
             std::string const text = publication_limit_text(publisher, l);
             if (!dry_run) return error(text + "; nothing is built");
-            ctx.err << "warning: " << text << "\n";
+            warn(ctx, text);
         }
     }
 
@@ -3245,6 +3322,7 @@ int publish(parsed_command const& cmd, command_context& ctx)
             std::filesystem::path dir;
             bool tool = false;          // a tool recipe, in [tool-deps] (publish_project::tool)
             int result = 0;
+            nlohmann::json event;       // its `build` event (cli-json.md 10), without `state` and `seconds`
         };
         std::vector<publish_build> builds;
         for (publish_recipe& p : recipes) {
@@ -3277,8 +3355,14 @@ int publish(parsed_command const& cmd, command_context& ctx)
                         text += " with {" + values + "}";
                         label += " with {" + values + "}";
                     }
-                    ctx.out << "building " << text << "\n";
-                    builds.push_back({text, label, project->manifest, cache->tmp() / ("publish-" + std::to_string(builds.size() + 1)), project->tool, 0});
+                    out << "building " << text << "\n";
+                    nlohmann::json event = publish_build_json(builds.size() + 1, *p.r, publisher, (*target)->name, project->platforms, e, options);
+                    nlohmann::json queued(event);
+                    queued["state"] = "queued";
+                    queued["seconds"] = nullptr;
+                    emit(ctx, "build", std::move(queued));
+                    builds.push_back({text, label, project->manifest, cache->tmp() / ("publish-" + std::to_string(builds.size() + 1)), project->tool, 0,
+                        std::move(event)});
                 }
             }
         }
@@ -3292,19 +3376,43 @@ int publish(parsed_command const& cmd, command_context& ctx)
             if (ctx.terminal.live && cmd.value("progress").value_or("auto") == "auto") live = progress_display::terminal{.utf8 = ctx.terminal.utf8};
             // what the builds write, line by line, each thread's apart; on a live terminal all of it above the slices
             progress_display err_lines{ctx.err, std::move(live)};
-            progress_display out_lines{ctx.out, std::nullopt};
+            progress_display out_lines{out, std::nullopt};
             std::ostream sub_err{&err_lines.lines()};
             std::ostream summary{err_lines.live() ? &err_lines.lines() : &out_lines.lines()};
             // what the installs of the temporary projects sum up (their lock, inputs, slices, output) is not this command's
             std::ostream nothing{nullptr};
             announcements announced;
             auto const run_build = [&](publish_build& b) {
+                // its events (cli-json.md 10): those of its slices, the choices of its install, its errors and warnings
+                std::optional<json_lines> events;
+                if (ctx.events) {
+                    events.emplace(*ctx.events, nlohmann::json{{"build", b.event["build"]}},
+                        std::set<std::string>{"slice", "skipped", "linkage-fallback", "standard", "diagnostic"});
+                }
+                auto const started = std::chrono::steady_clock::now();
+                auto const said = [&](char const* state, bool ended) {
+                    if (!ctx.events) return;
+                    nlohmann::json j(b.event);
+                    j["state"] = state;
+                    std::chrono::duration<double> const took = std::chrono::steady_clock::now() - started;
+                    j["seconds"] = ended ? nlohmann::json(std::round(took.count() * 10) / 10) : nlohmann::json(nullptr);
+                    ctx.events->emit(j);
+                };
+                said("building", false);
                 std::error_code removed;
                 std::filesystem::remove_all(b.dir, removed);
                 std::filesystem::create_directories(b.dir, removed);
                 if (auto ok = write_file_atomic(b.dir / "otok.toml", b.manifest); !ok) {
-                    sub_err << "error: " << ok.error().message << "\n";
+                    if (events) {
+                        otok::diagnostic d;
+                        d.level = severity::error;
+                        d.message = ok.error().message;
+                        events->report(d);
+                    } else {
+                        sub_err << "error: " << ok.error().message << "\n";
+                    }
                     b.result = 1;
+                    said("failed", true);
                     return;
                 }
                 command_context sub{b.dir, ctx.targets, nullptr, nothing, sub_err, env};
@@ -3320,6 +3428,7 @@ int publish(parsed_command const& cmd, command_context& ctx)
                 sub.display = &err_lines;
                 sub.jobs = one_at_a_time ? nullptr : &broker;
                 sub.cache = &*cache;
+                if (events) sub.events = &*events;
                 parsed_command install;
                 install.command = "install";
                 // what the build shows, as asked
@@ -3330,8 +3439,8 @@ int publish(parsed_command const& cmd, command_context& ctx)
                     }
                 }
                 if (auto jobs = cmd.value("jobs")) install.values.emplace("jobs", *jobs);
-                auto const started = std::chrono::steady_clock::now();
                 b.result = install_pipeline(install, sub, true, {}, false);
+                said(b.result == 0 ? "built" : "failed", true);
                 if (b.result == 0) summary << "built " << b.text << " (" << detail::elapsed_text(std::chrono::steady_clock::now() - started) << ")\n";
                 std::filesystem::remove_all(b.dir, removed);
             };
@@ -3354,17 +3463,25 @@ int publish(parsed_command const& cmd, command_context& ctx)
         if (failures > 0) return error(std::string{failures == 1 ? "the build of " : "the builds of "} + failed + " failed; nothing is published");
 
     }
-    if (dry_run) {
-        ctx.out << "built; --dry-run publishes nothing\n";
+    // what became of the publication (cli-json.md 10)
+    nlohmann::json added_entries = nlohmann::json::array(), published_entries = nlohmann::json::array();
+    for (publish_recipe const& p : recipes) (p.published ? published_entries : added_entries).push_back(p.addition->entry_path);
+    auto const publication = [&](char const* state, nlohmann::json pull_request = nullptr, nlohmann::json registered = nullptr) {
+        emit(ctx, "publication", {{"state", state}, {"entries", added_entries}, {"published", published_entries},
+            {"pull-request", std::move(pull_request)}, {"registered", std::move(registered)}});
         return 0;
+    };
+    if (dry_run) {
+        out << "built; --dry-run publishes nothing\n";
+        return publication("dry-run");
     }
 
     std::vector<publish_recipe const*> fresh;
     for (publish_recipe const& p : recipes) {
-        if (p.published) ctx.out << p.addition->label << " is published already\n";
+        if (p.published) out << p.addition->label << " is published already\n";
         else fresh.push_back(&p);
     }
-    if (fresh.empty()) return 0;
+    if (fresh.empty()) return publication("published-already");
     std::string title;
     {
         std::vector<publication_entry> entries;
@@ -3389,17 +3506,17 @@ int publish(parsed_command const& cmd, command_context& ctx)
             if (!added) return error(added.error().message);
             add.push_back(p->addition->entry_path);
             add.push_back(p->addition->library_path);
-            ctx.out << "added " << p->addition->entry_path << "\n";
+            out << "added " << p->addition->entry_path << "\n";
         }
         if (auto ok = git_line(add, index_dir); !ok) return error(ok.error().message);
         if (auto ok = git_line({"commit", "-q", "-m", title}, index_dir); !ok) return error(ok.error().message);
         if (cmd.flag("no-push")) {
-            ctx.out << "committed to the index; push it to publish\n";
-            return 0;
+            out << "committed to the index; push it to publish\n";
+            return publication("committed");
         }
         if (auto ok = git_line({"push", "-q"}, index_dir); !ok) return error("cannot push the index (pull, then publish again): " + ok.error().message);
-        ctx.out << "pushed to the index\n";
-        return 0;
+        out << "pushed to the index\n";
+        return publication("pushed");
     }
 
     std::vector<github_file> files;
@@ -3419,6 +3536,7 @@ int publish(parsed_command const& cmd, command_context& ctx)
     std::string const publisher_path = "publishers/" + publisher + ".toml";
     auto registered = github->file(publisher_path);
     if (!registered) return error(registered.error().message);
+    nlohmann::json registration_json = nullptr;
     if (!*registered) {
         auto account = github->account();
         if (!account) return error("cannot read the GitHub account of the token, to register the publisher " + in_quotes(publisher) + ": " + account.error().message);
@@ -3426,14 +3544,17 @@ int publish(parsed_command const& cmd, command_context& ctx)
         registration.github_id = account->id;
         files.push_back({publisher_path, write_publisher(registration)});
         tail += "\n\nRegisters the publisher " + in_quotes(publisher) + " for the GitHub account " + account->login + ".";
-        ctx.out << "registering the publisher " << in_quotes(publisher) << " for the GitHub account " << account->login
+        out << "registering the publisher " << in_quotes(publisher) << " for the GitHub account " << account->login
                 << ": an index maintainer accepts the name by merging the pull request\n";
+        registration_json = {{"publisher", publisher}, {"account", account->login}};
     }
     std::string const body = publication_body("Published with otok " + std::string{build_info::version} + ":\n", lines, tail + "\n");
-    auto pr = github->propose(publish_branch_of(publisher, fresh), title, body, files);
+    std::string const branch = publish_branch_of(publisher, fresh);
+    auto pr = github->propose(branch, title, body, files);
     if (!pr) return error(pr.error().message);
-    ctx.out << (pr->reused ? "updated the pull request " : "opened the pull request ") << pr->url << "\n";
+    out << (pr->reused ? "updated the pull request " : "opened the pull request ") << pr->url << "\n";
     // what its last check said (index.md 9): the check of this update takes minutes, so the comment is still the earlier one's
+    nlohmann::json last_check = nullptr;
     if (pr->reused && pr->number > 0) {
         if (auto comments = github->bot_comments(pr->number)) {
             for (auto it = comments->rbegin(); it != comments->rend(); ++it) {
@@ -3442,18 +3563,54 @@ int publish(parsed_command const& cmd, command_context& ctx)
                 auto const j = nlohmann::json::parse(*summary, nullptr, false);
                 std::string const verdict = j.value("verdict", "");
                 std::string const said = verdict == "auto" ? "passed" : verdict == "maintainer" ? "waited for an index maintainer" : "was refused";
-                ctx.out << "its last check, before this update: it " << said << (verdict == "auto" ? "\n" : ":\n");
+                out << "its last check, before this update: it " << said << (verdict == "auto" ? "\n" : ":\n");
+                nlohmann::json reasons = nlohmann::json::array();
                 if (j.contains("reasons") && j["reasons"].is_array()) {
                     for (auto const& r : j["reasons"]) {
-                        if (r.is_string()) ctx.out << "  " << r.get<std::string>() << "\n";
+                        if (!r.is_string()) continue;
+                        out << "  " << r.get<std::string>() << "\n";
+                        reasons.push_back(r);
                     }
                 }
+                last_check = {{"verdict", verdict}, {"reasons", std::move(reasons)}};
                 break;
             }
         }
     }
-    ctx.out << "index CI checks it, then merges it or says in it why not: follow the publication at " << pr->url << "\n";
-    return 0;
+    out << "index CI checks it, then merges it or says in it why not: follow the publication at " << pr->url << "\n";
+    return publication("pull-request",
+        {{"number", pr->number}, {"url", pr->url}, {"branch", branch}, {"reused", pr->reused}, {"last-check", std::move(last_check)}},
+        std::move(registration_json));
+}
+
+// otok publish, as text or as JSON lines (cli-json.md 10).
+int publish(parsed_command const& cmd, command_context& ctx)
+{
+    if (!progress_valid(cmd, ctx)) return 1;
+    auto const json = json_requested(cmd, ctx);
+    if (!json) return 1;
+    if (!*json) return run_publish(cmd, ctx);
+    json_lines events{ctx.out.rdbuf()};
+    events.emit({{"event", "start"}, {"format", cli_json_format}, {"otok", std::string{build_info::version}}, {"command", "publish"}});
+    int code = 1;
+    {
+        text_lines texts{events};
+        struct restore
+        {
+            command_context& ctx;
+            std::streambuf* out;
+            ~restore()
+            {
+                ctx.out.rdbuf(out);
+                ctx.events = nullptr;
+            }
+        } const restored{ctx, ctx.out.rdbuf(&texts)};
+        ctx.events = &events;
+        code = run_publish(cmd, ctx);
+        texts.finish();
+    }
+    events.emit({{"event", "end"}, {"exit", code}});
+    return code;
 }
 
 // The machine settings, the cache and git of the index commands.
@@ -3710,7 +3867,7 @@ std::span<command_spec const> command_specs()
                 {"dry-run", 0, "", "Build, and publish nothing"}, {"no-build", 0, "", "Add the entry without building the recipe"},
                 {"no-push", 0, "", "With a checkout of the index: commit the entry, but do not push"},
                 verbose_option,
-                keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option, jobs_option}, 0, any_number},
+                keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option, jobs_option, stream_format_option}, 0, any_number},
         {"agent-skill", "", "Write the skill for coding agents (SKILL.md: how to use otok) into the project's .claude/skills/otok/",
             {{"user", 0, "", "Into ~/.claude/skills/ instead, for every project of this user"},
                 {"dir", 0, "DIR", "Into DIR/otok/ instead: the skills directory of another agent"},

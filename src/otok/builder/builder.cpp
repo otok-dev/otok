@@ -286,9 +286,9 @@ void relocate_pkg_config(fs::path const& prefix)
 }
 
 // Keeps what a failed build leaves for inspection in `failed/<name>-<time>/` (cache.md 7.1): the whole work
-// directory, or its log only, with the key it was built for. What to add to the message.
+// directory, or its log only, with the key it was built for. What to add to the message; the kept log in `kept_log`.
 std::string keep_failure(cache_store const& cache, fs::path const& work, fs::path const& log, std::string const& key, std::string const& name,
-    bool whole, bool remove_work = true)
+    bool whole, bool remove_work = true, fs::path* kept_log = nullptr)
 {
     std::error_code ec;
     // a second failure within the second: "-2"
@@ -299,6 +299,7 @@ std::string keep_failure(cache_store const& cache, fs::path const& work, fs::pat
         rename_path(work, kept, ec);
         if (!ec) {
             std::ofstream{long_path(kept / "key.txt"), std::ios::binary} << key;
+            if (kept_log) *kept_log = kept / log.filename();
             return "\nthe work directory is kept in '" + slashed(kept) + "'";
         }
     }
@@ -308,6 +309,7 @@ std::string keep_failure(cache_store const& cache, fs::path const& work, fs::pat
     if (remove_work) fs::remove_all(long_path(work), ec);
     if (!copied) return "";
     std::ofstream{long_path(kept / "key.txt"), std::ios::binary} << key;
+    if (kept_log) *kept_log = kept / log.filename();
     return "\nthe whole log is in '" + slashed(kept / log.filename()) + "'";
 }
 
@@ -1698,10 +1700,19 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
     }
 
     // for --format json (cli-json.md 9)
-    auto const report_slice = [&](slice_event::kind state, double seconds) {
+    auto const report_slice = [&](slice_event::kind state, double seconds, std::string message = {}, fs::path log = {}, std::string hint = {}) {
         if (!settings_.on_slice) return;
         settings_.on_slice({state, p.library, p.id, rec.version->str(), rec.revision, tool, building_tools, spec, seconds,
-            dev ? inputs.dev->label : std::string{}});
+            dev ? inputs.dev->label : std::string{}, std::move(message), std::move(log), std::move(hint)});
+    };
+    // a failure once the slice has started building, with what `failed` below kept of it
+    fs::path failed_log;
+    std::string failed_hint;
+    std::optional<std::chrono::steady_clock::time_point> building_since;
+    auto const failure = [&](std::unexpected<error> e) {
+        std::chrono::duration<double> const took = building_since ? std::chrono::steady_clock::now() - *building_since : std::chrono::duration<double>{};
+        report_slice(slice_event::kind::failed, took.count(), e.error().message, failed_log, failed_hint);
+        return e;
     };
     std::error_code ec;
     if (!dev && fs::exists(out.entry, ec)) {
@@ -1767,7 +1778,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
                 if (slice_needs(name)) needed.emplace_back(found.program.parent_path(), "the toolchain '" + name + "' ('" + path_to_utf8(found.program) + "')");
             }
         }
-        if (auto ok = check_sandbox_reads(needed); !ok) return fail(label + " for " + slice_label(spec) + ": " + ok.error().message);
+        if (auto ok = check_sandbox_reads(needed); !ok) return failure(fail(label + " for " + slice_label(spec) + ": " + ok.error().message));
     }
     // before the first sandboxed process, the slices that come meanwhile waiting, so the check counts its own processes;
     // once for the builders running together (otok publish), whose checks would only repeat and disturb each other
@@ -1789,6 +1800,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         }
     }
     auto const started = std::chrono::steady_clock::now();
+    building_since = started;
     fs::path const work = dev ? out.entry : work_root_ / work_name;
     auto const build = [&](fs::path const& staging) -> result<void> {
         // a dev slice keeps source/ and build/ while the rest of its key stays (otok-dev-toml.md 4)
@@ -1831,9 +1843,10 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
             std::string const tail = log_tail(log, 30);
             // the tail was just shown as it came
             if (!tail.empty() && !shown_log) message += "\nthe end of the log:\n" + tail;
-            if (std::string const hint = failure_hint(log); !hint.empty()) message += "\n" + hint;
+            failed_hint = failure_hint(log);
+            if (!failed_hint.empty()) message += "\n" + failed_hint;
             // a dev slice's work directory stays as the failure left it
-            message += keep_failure(cache_, work, log, text, work_name, settings_.keep_build_dirs && !dev, !dev);
+            message += keep_failure(cache_, work, log, text, work_name, settings_.keep_build_dirs && !dev, !dev, &failed_log);
             return fail(label + " for " + slice_label(spec) + ": " + message);
         };
         // the AppContainer's entry given while the work directory is empty, so what is made in it inherits the entry: given
@@ -2412,15 +2425,15 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
     } else {
         if (auto ensured = cache_.ensure(out.entry, "building " + label + " for " + slice_label(spec), build); !ensured) made = std::unexpected{ensured.error()};
     }
-    if (!made) return std::unexpected{made.error()};
+    if (!made) return failure(std::unexpected{made.error()});
     if (dev) {
         // dependents see it by its output (cache-key.md 3)
         auto hash = tree_hash(out.entry / "prefix", tree_links::record);
-        if (!hash) return fail(label + " for " + slice_label(spec) + ": cannot hash its output: " + hash.error().message);
+        if (!hash) return failure(fail(label + " for " + slice_label(spec) + ": cannot hash its output: " + hash.error().message));
         out.key = "dev:" + *hash;
     }
     auto result = read_result(out.entry);
-    if (!result) return std::unexpected{result.error()};
+    if (!result) return failure(std::unexpected{result.error()});
     out.output = std::move(*result);
     std::chrono::duration<double> const took = std::chrono::steady_clock::now() - started;
     char seconds[32];

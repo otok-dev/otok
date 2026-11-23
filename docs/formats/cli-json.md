@@ -6,7 +6,7 @@ Commands that report something print it for people by default: columns, sections
 `--format json` they print one JSON document instead, which scripts, IDEs and coding agents read without parsing that
 layout, and which says everything the text says. `otok metadata` (`metadata.md`) is JSON always and stays as it is.
 
-This document defines the rules common to every command (1, 2) and the document of each command (3 to 9). Commands not
+This document defines the rules common to every command (1, 2) and the document of each command (3 to 10). Commands not
 listed here do not take `--format`.
 
 ## 1. The option
@@ -572,8 +572,8 @@ of 1 and 2 hold for each event; in place of the keys of 2, the stream begins wit
 {"command":"install","event":"start","format":1,"otok":"0.6.0"}
 {"changes":["added zlib 1.3.2 (r3)"],"event":"lock","state":"created"}
 {"event":"inputs","resources":0,"sources":1}
-{"build-tools":false,"configuration":"release","dev":null,"event":"slice","id":"zlib","library":"zlib","revision":3,"seconds":null,"slice":"linux-x86_64","state":"building","tool":false,"version":"1.3.2"}
-{"build-tools":false,"configuration":"release","dev":null,"event":"slice","id":"zlib","library":"zlib","revision":3,"seconds":12.4,"slice":"linux-x86_64","state":"built","tool":false,"version":"1.3.2"}
+{"build-tools":false,"configuration":"release","dev":null,"event":"slice","hint":null,"id":"zlib","library":"zlib","log":null,"message":null,"revision":3,"seconds":null,"slice":"linux-x86_64","state":"building","tool":false,"version":"1.3.2"}
+{"build-tools":false,"configuration":"release","dev":null,"event":"slice","hint":null,"id":"zlib","library":"zlib","log":null,"message":null,"revision":3,"seconds":12.4,"slice":"linux-x86_64","state":"built","tool":false,"version":"1.3.2"}
 {"cached":0,"count":1,"event":"slices"}
 {"copied":14,"dir":"Otok","event":"output","removed":0,"target":"linux","unchanged":0}
 {"event":"end","exit":0}
@@ -592,7 +592,7 @@ of waiting and fetching); errors and warnings are `diagnostic` events instead.
 | `inputs` | `sources`, `resources`: how many are in the cache | Once the inputs are fetched (or found in the cache). |
 | `skipped` | `target`, `reason` | A target table this machine does not build (`otok-toml.md` 4.9). |
 | `linkage-fallback` | `package` (its id in `otok.lock`), `linkage`, `reason` | A library built with another linkage than its target table prefers (`otok-toml.md` 5). |
-| `slice` | `state`: `"building"`, `"built"` or `"cached"`; `library`, `id` (as in 5), `version`, `revision`, `tool`, `build-tools` (the `build_tools` entry of its recipe), `slice` (`"linux-x86_64"`, `"headers"`), `configuration`, `seconds` (the build's, for `"built"`; else `null`), `dev` (the working trees of `otok.dev.toml` it was built from, as the text names them; else `null`) | Each slice, as it starts building, is built (`seconds` to a tenth), or is found in the cache. A slice that fails is an error `diagnostic`. |
+| `slice` | `state`: `"building"`, `"built"`, `"cached"` or `"failed"`; `library`, `id` (as in 5), `version`, `revision`, `tool`, `build-tools` (the `build_tools` entry of its recipe), `slice` (`"linux-x86_64"`, `"headers"`), `configuration`, `seconds` (how long it built, to a tenth, for `"built"` and `"failed"`; else `null`), `dev` (the working trees of `otok.dev.toml` it was built from, as the text names them; else `null`); for `"failed"`, else `null`: `message` (the error, as the text prints it), `log` (the log kept in `failed/`, `cache.md` 7.1; `null` when none could be kept or the failure came before the build had one), `hint` (what the user can do about a cause otok recognizes, as the text prints it after `hint: `; `null` when none is known) | Each slice, as it starts building, is built, is found in the cache, or fails. A slice that fails is also an error `diagnostic`, which comes after it. |
 | `slices` | `count`, `cached` | Once every slice is there. |
 | `output` | `target`, `dir` (the output as `otok.toml` writes it), `copied`, `unchanged`, `removed` (files) | Each output written. |
 | `tools` | `dir`, `copied`, `unchanged`, `removed` | The tools output written (`otok-toml.md` 7.1). |
@@ -600,3 +600,50 @@ of waiting and fetching); errors and warnings are `diagnostic` events instead.
 | `diagnostic` | as 2.1 | An error or a warning. Those of the slices and the outputs come as they are found; those otok gathers while it checks the project and the lock (and the failures of slices) come together before `end`. |
 | `text` | `text` | A line of standard output not made into an event (see above). |
 | `end` | `exit` | Last: the exit code. |
+
+## 10. `otok publish`
+
+```text
+otok publish … --format json
+```
+
+`otok publish` builds for minutes too, and prints JSON lines as 9 does: `start` (`command` `"publish"`), the events below
+as they happen, then `end` with the exit code. Errors and warnings are `diagnostic` events; the progress for people
+stays on standard error.
+
+```text
+{"command":"publish","event":"start","format":1,"otok":"0.6.0"}
+{"checkout":false,"event":"index","index":"https://github.com/otok-dev/index","publisher":"apotocki"}
+{"entry":"recipes/apotocki/zlib/linux/1.3.2-r3.toml","event":"recipe","library":"zlib","published":false,"recipe":"apotocki/zlib","revision":3,"source":{"commit":"5c7d…","git":"https://github.com/otok-dev/recipes.git","path":"recipes/zlib/1.3"},"variant":"linux","version":"1.3.2"}
+{"adding":1,"event":"limit","exceeded":false,"key":"review-entries-per-day","limit":5,"passes-at":null,"pending":0,"pending-requests":[],"recent":0}
+{"build":1,"environment":"linux/gcc","event":"build","library":"zlib","options":null,"platforms":["linux"],"recipe":"apotocki/zlib","revision":3,"seconds":null,"state":"queued","target":"linux","variant":"linux","version":"1.3.2"}
+{"build":1,"environment":"linux/gcc","event":"build","library":"zlib","options":null,"platforms":["linux"],"recipe":"apotocki/zlib","revision":3,"seconds":null,"state":"building","target":"linux","variant":"linux","version":"1.3.2"}
+{"build":1,"build-tools":false,"configuration":"release","dev":null,"event":"slice","hint":null,"id":"zlib","library":"zlib","log":null,"message":null,"revision":3,"seconds":null,"slice":"linux-x86_64","state":"building","tool":false,"version":"1.3.2"}
+{"build":1,"build-tools":false,"configuration":"release","dev":null,"event":"slice","hint":null,"id":"zlib","library":"zlib","log":null,"message":null,"revision":3,"seconds":12.4,"slice":"linux-x86_64","state":"built","tool":false,"version":"1.3.2"}
+{"build":1,"environment":"linux/gcc","event":"build","library":"zlib","options":null,"platforms":["linux"],"recipe":"apotocki/zlib","revision":3,"seconds":14.1,"state":"built","target":"linux","variant":"linux","version":"1.3.2"}
+{"entries":["recipes/apotocki/zlib/linux/1.3.2-r3.toml"],"event":"publication","published":[],"pull-request":{"branch":"publish/apotocki/zlib-linux-1.3.2-r3","last-check":null,"number":412,"reused":false,"url":"https://github.com/otok-dev/index/pull/412"},"registered":null,"state":"pull-request"}
+{"event":"end","exit":0}
+```
+
+| `event` | Keys | When |
+|---|---|---|
+| `start` | as in 9, `command` `"publish"` | First. |
+| `index` | `index` (the repository on GitHub, or the checkout of the index as an absolute path), `checkout` (whether it is a checkout), `publisher` | Once the index and the publisher are known. |
+| `recipe` | `recipe` (the recipe id it is published under, `"<publisher>/<name>"`), `library`, `variant`, `version`, `revision`, `entry` (the path of its entry in the index, `index.md` 3), `source` (`git`, `commit`, `path`: where users fetch it; `path` `null` for a recipe at the root of its repository), `published` (whether the index has this entry already, the same: nothing to add) | Each recipe, once it is fetched back from its remote and checked, before anything is built. |
+| `limit` | `key` (of `index.toml`, `index.md` 2; counted as 9.2 says), `limit`, `recent` (the publisher's entries published in the last 24 hours), `pending` (its entries in other open pull requests), `pending-requests` (their numbers), `adding`, `exceeded`, `passes-at` (when the limit lets these entries in by waiting, a time; `null` when it does now or waiting does not help) | Before anything is built, when the index counts the entries of this publisher: a pull request with entries to add, by one who cannot push to the index. When it is exceeded, an error follows (with `--dry-run` a warning). |
+| `build` | `build` (its number, from 1), `state`: `"queued"`, `"building"`, `"built"` or `"failed"`; `recipe`, `library`, `variant`, `version`, `revision`, `target`, `platforms` (those it builds), `environment` (`"linux/gcc"`), `options` (the option set of a `[[publish.check]]`, an object of option values; `null` for the defaults), `seconds` (how long it took, for `"built"` and `"failed"`; else `null`) | Each build of a recipe: one per environment of the recipe this machine has and per option set (`DESIGN` 7.4). All are `"queued"` first, then they build at once (one after another with `-vv`). |
+| `slice`, `skipped`, `linkage-fallback`, `standard`, `diagnostic` | as in 9, with `build`, the number of the build they belong to | What the install of a build reports (its other events are of the temporary project it builds in and are left out). A failed slice is a `slice` event with `state` `"failed"`, its log and hint, then the build's error `diagnostic`. |
+| `publication` | `state` (below), `entries` (the entries it adds, or would add with `--dry-run`), `published` (the entries the index had already), `pull-request` (`number`, `url`, `branch`, `reused`: whether an open pull request of the branch was updated, `last-check`: what index CI said of it before this update, `{ verdict, reasons }` as `index-check` gives them, else `null`; `null` but for `"pull-request"`), `registered` (the publisher this pull request registers, `{ publisher, account }` with the GitHub account; else `null`) | At the end, when nothing failed. |
+| `diagnostic` | as 2.1 | An error or a warning of the publication itself; without `build`. A failed build ends the publication with one. |
+| `text` | `text` | As in 9. |
+| `end` | `exit` | Last: the exit code. |
+
+`state` of `publication`:
+
+- `"dry-run"`: built, nothing published (`--dry-run`);
+- `"published-already"`: every recipe's entry is in the index already;
+- `"pull-request"`: the entries are proposed in a pull request on GitHub, which index CI checks and merges;
+- `"committed"`: committed to a checkout of the index, not pushed (`--no-push`);
+- `"pushed"`: committed to a checkout of the index and pushed.
+
+A script follows a publication by its `pull-request`: index CI writes its verdict into the pull request (`index.md` 9).

@@ -789,7 +789,7 @@ TEST_F(builder_test, prints_json_lines)
     EXPECT_TRUE(built["seconds"].is_number()) << built;
     built.erase("seconds");
     EXPECT_EQ(built, nlohmann::json::parse(R"({"event": "slice", "state": "built", "library": "b", "id": "b", "version": "2.0", "revision": 1,
-        "tool": false, "build-tools": false, "slice": ")" + slice + R"(", "configuration": "release", "dev": null})"));
+        "tool": false, "build-tools": false, "slice": ")" + slice + R"(", "configuration": "release", "dev": null, "message": null, "log": null, "hint": null})"));
     EXPECT_EQ(list[7], nlohmann::json::parse(R"({"event": "slices", "count": 2, "cached": 0})"));
     EXPECT_EQ(list[8], nlohmann::json::parse(R"({"event": "output", "target": "native", "dir": "Otok", "copied": )"
         + std::to_string(list[8]["copied"].get<int>()) + R"(, "unchanged": 0, "removed": 0})"));
@@ -805,12 +805,24 @@ TEST_F(builder_test, prints_json_lines)
     ASSERT_EQ(run({"install", "--locked", "--format", "json"}), 0) << err.str();
     EXPECT_EQ(events()[1], nlohmann::json::parse(R"({"event": "lock", "state": "up-to-date", "changes": []})"));
 
-    // a failed build: its error as a diagnostic, before the end
-    write_recipe("b", "2.0", "function build(slice)\n    error('no luck')\nend\n", options_of_b + "[options.extra]\ntype = \"bool\"\ndefault = true\ndoc = \"d\"\n");
+    // a failed build: the slice failed, with its log and a hint, then its error as a diagnostic, before the end
+    write_recipe("b", "2.0", "function build(slice)\n    otok.log('CMake Error: file CREATE_LINK cannot symlink \"a\" to \"b\": A required privilege is not held by the client.')\n"
+        "    error('no luck')\nend\n", options_of_b + "[options.extra]\ntype = \"bool\"\ndefault = true\ndoc = \"d\"\n");
     EXPECT_EQ(run({"install", "--format", "json"}), 1);
     list = events();
     ASSERT_GE(list.size(), 3u);
     EXPECT_EQ(list.back(), nlohmann::json::parse(R"({"event": "end", "exit": 1})"));
+    auto const failed_slice = std::ranges::find_if(list, [](nlohmann::json const& e) { return e["event"] == "slice" && e["state"] == "failed"; });
+    ASSERT_NE(failed_slice, list.end()) << names(list);
+    EXPECT_EQ((*failed_slice)["library"], "b");
+    EXPECT_TRUE((*failed_slice)["seconds"].is_number()) << *failed_slice;
+    EXPECT_NE((*failed_slice)["message"].get<std::string>().find("b/build.lua:3: no luck"), std::string::npos) << *failed_slice;
+    EXPECT_EQ((*failed_slice)["hint"].get<std::string>().find("the build was refused a privilege, most likely that of making a symbolic link"), 0u)
+        << *failed_slice;
+    std::string const kept_log = (*failed_slice)["log"].get<std::string>();
+    EXPECT_EQ(kept_log.find((cache.path() / "failed").generic_string()), 0u) << kept_log;
+    EXPECT_TRUE(kept_log.ends_with("/build.log")) << kept_log;
+    EXPECT_NE(read_file(std::filesystem::path{kept_log}).value_or("?").find("CREATE_LINK"), std::string::npos) << kept_log;
     nlohmann::json const& failure = list[list.size() - 2];
     EXPECT_EQ(failure["event"], "diagnostic");
     EXPECT_EQ(failure["severity"], "error");
@@ -2597,12 +2609,72 @@ TEST_F(builder_test, publishes_what_it_built)
     EXPECT_EQ(run({"publish", "--index", index_arg, "--dry-run", "recipes/a"}), 1);
     EXPECT_EQ(err.str(), "error: --dry-run with a checkout of the index needs --publisher NAME\n");
 
+    // --format json: JSON lines (cli-json.md 10)
+    auto const events = [&] {
+        std::vector<nlohmann::json> list;
+        std::istringstream lines{out.str()};
+        for (std::string line; std::getline(lines, line);) {
+            auto j = nlohmann::json::parse(line, nullptr, false);
+            EXPECT_FALSE(j.is_discarded()) << line;
+            list.push_back(std::move(j));
+        }
+        return list;
+    };
+    auto const names = [](std::vector<nlohmann::json> const& list) {
+        std::string text;
+        for (nlohmann::json const& e : list) {
+            text += e.value("event", "?") + (e.contains("state") ? ":" + e["state"].get<std::string>() : "")
+                + (e.contains("build") ? "@" + std::to_string(e["build"].get<int>()) : "") + " ";
+        }
+        return text;
+    };
+    std::string const slice = "native-" + machine_arch();
+    ASSERT_EQ(run({"publish", "--index", index_arg, "--publisher", "p", "--all", "--format", "json"}), 0) << err.str();
+    auto list = events();
+    EXPECT_EQ(names(list), "start index recipe recipe publication:published-already end ");
+    EXPECT_EQ(list[1], nlohmann::json::parse(R"({"event": "index", "index": ")" + path_to_utf8(std::filesystem::absolute(index).lexically_normal().generic_u8string()) + R"(", "checkout": true, "publisher": "p"})"));
+    nlohmann::json recipe_a = list[2];
+    ASSERT_TRUE(recipe_a["source"].is_object()) << recipe_a;
+    EXPECT_EQ(recipe_a["source"]["path"], "recipes/a");
+    recipe_a.erase("source");
+    EXPECT_EQ(recipe_a, nlohmann::json::parse(R"({"event": "recipe", "recipe": "p/a", "library": "a", "variant": "native", "version": "1.0",
+        "revision": 1, "entry": "recipes/p/a/native/1.0-r1.toml", "published": true})"));
+    EXPECT_EQ(list[4], nlohmann::json::parse(R"({"event": "publication", "state": "published-already", "entries": [],
+        "published": ["recipes/p/a/native/1.0-r1.toml", "recipes/p/b/native/2.0-r1.toml"], "pull-request": null, "registered": null})"));
+
+    ASSERT_EQ(run({"publish", "--index", index_arg, "--publisher", "p", "--dry-run", "recipes/a", "--format", "json"}), 0) << err.str();
+    list = events();
+    EXPECT_EQ(names(list), "start index recipe build:queued@1 build:building@1 slice:cached@1 slice:cached@1 build:built@1 publication:dry-run end ")
+        << out.str();
+    nlohmann::json build = list[4];
+    EXPECT_EQ(build["environment"].get<std::string>().ends_with("/cc"), true) << build;
+    build.erase("environment");
+    EXPECT_EQ(build, nlohmann::json::parse(R"({"event": "build", "state": "building", "build": 1, "recipe": "p/a", "library": "a",
+        "variant": "native", "version": "1.0", "revision": 1, "target": "native", "platforms": ["native"], "options": null, "seconds": null})"));
+    EXPECT_TRUE(list[7]["seconds"].is_number()) << list[7];
+    EXPECT_EQ(list[5]["slice"], slice);
+    EXPECT_EQ(list[8]["entries"], nlohmann::json::array());
+
     // a failed build publishes nothing
     write_recipe("a", "1.1", "function build(slice, options, deps)\n    error('broken')\nend\n");
     git_in(project.path(), {"commit", "-q", "-am", "a 1.1"});
     EXPECT_EQ(run({"publish", "--index", index_arg, "--publisher", "p", "recipes/a"}), 1);
     EXPECT_NE(err.str().find("error: the build of p/a 1.1-r1 (native) for native in */cc failed; nothing is published"), std::string::npos) << err.str();
     EXPECT_FALSE(std::filesystem::exists(index / "recipes" / "p" / "a" / "1.1-r1.toml"));
+    // as JSON: the slice failed with its log, the build's error, then the publication's
+    EXPECT_EQ(run({"publish", "--index", index_arg, "--publisher", "p", "recipes/a", "--format", "json"}), 1);
+    list = events();
+    EXPECT_EQ(names(list), "start index recipe build:queued@1 build:building@1 slice:building@1 slice:failed@1 diagnostic@1 "
+                           "build:failed@1 diagnostic end ") << out.str();
+    nlohmann::json const& failed_slice = list[6];
+    EXPECT_EQ(failed_slice["library"], "a");
+    EXPECT_NE(failed_slice["message"].get<std::string>().find("broken"), std::string::npos) << failed_slice;
+    EXPECT_TRUE(failed_slice["log"].is_string()) << failed_slice;
+    EXPECT_EQ(failed_slice["hint"], nullptr);
+    EXPECT_NE(list[9]["message"].get<std::string>().find("the build of p/a 1.1-r1 (native) for native in */cc failed; nothing is published"),
+        std::string::npos) << list[9];
+    EXPECT_EQ(list.back(), nlohmann::json::parse(R"({"event": "end", "exit": 1})"));
+    EXPECT_EQ(err.str().find("error:"), std::string::npos) << err.str();
 }
 
 // ---- the work directories of dev slices (otok-dev-toml.md 4)
