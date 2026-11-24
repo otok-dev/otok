@@ -3264,9 +3264,12 @@ int run_publish(parsed_command const& cmd, command_context& ctx)
         source["git"] = p.source.git;
         source["commit"] = p.source.commit;
         source["path"] = string_or_null(p.source.path);
+        // where it builds and the programs of a tool recipe, spelt as otok info spells them (cli-json.md 4.2.2)
+        nlohmann::json build_on = nlohmann::json::array();
+        for (build_environment const& b : p.r->build_on) build_on.push_back(b.text());
         emit(ctx, "recipe", {{"recipe", publisher + "/" + p.r->name}, {"library", p.r->library}, {"variant", p.r->variant},
             {"version", p.r->version->str()}, {"revision", p.r->revision}, {"entry", p.addition->entry_path}, {"source", std::move(source)},
-            {"published", p.published}});
+            {"published", p.published}, {"build-on", std::move(build_on)}, {"programs", p.r->programs}});
     }
 
     // the index's limit of entries per publisher, before anything is built (DESIGN 7.4, index.md 9.2): a pull request's, which

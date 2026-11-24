@@ -2638,7 +2638,7 @@ TEST_F(builder_test, publishes_what_it_built)
     EXPECT_EQ(recipe_a["source"]["path"], "recipes/a");
     recipe_a.erase("source");
     EXPECT_EQ(recipe_a, nlohmann::json::parse(R"({"event": "recipe", "recipe": "p/a", "library": "a", "variant": "native", "version": "1.0",
-        "revision": 1, "entry": "recipes/p/a/native/1.0-r1.toml", "published": true})"));
+        "revision": 1, "entry": "recipes/p/a/native/1.0-r1.toml", "published": true, "build-on": ["*/cc"], "programs": []})"));
     EXPECT_EQ(list[4], nlohmann::json::parse(R"({"event": "publication", "state": "published-already", "entries": [],
         "published": ["recipes/p/a/native/1.0-r1.toml", "recipes/p/b/native/2.0-r1.toml"], "pull-request": null, "registered": null})"));
 

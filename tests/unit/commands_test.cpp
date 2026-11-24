@@ -804,6 +804,58 @@ void normalize(nlohmann::json& j, std::string const& dir)
 }
 
 // The example of metadata.md, read from the document itself, is what otok prints for it.
+// The recipe event of a check says where each recipe builds and the programs of a tool recipe (cli-json.md 10): a library
+// recipe, a tool recipe and one built anywhere with the NDK.
+TEST_F(commands, publish_check_gives_build_on_and_programs)
+{
+    auto git = find_git(current_environment());
+    if (!git) GTEST_SKIP() << "git is not in PATH";
+    targets = all_targets;
+    auto const git_in = [&](std::filesystem::path const& dir, std::vector<std::string> args) {
+        std::vector<std::string> full{"-c", "user.name=otok test", "-c", "user.email=test@otok.invalid", "-c", "core.autocrlf=false"};
+        full.insert(full.end(), args.begin(), args.end());
+        auto done = run_git(*git, full, dir, upstream.path() / "setup.log");
+        EXPECT_TRUE(done.has_value()) << (done ? "" : done.error().message);
+    };
+    auto const replaced = [](std::string text, std::string const& from, std::string const& to) {
+        return text.replace(text.find(from), from.size(), to);
+    };
+    std::string const apple = "supported = [\"ios\", \"iossim\", \"macosx\"]\nbuild-on = [\"macos/xcode\"]\n";
+    upstream.write("recipes/a/recipe.toml", recipe_of("a", "1.0", privacy));
+    upstream.write("recipes/a/PrivacyInfo.xcprivacy", privacy_manifest);
+    upstream.write("recipes/d/recipe.toml", replaced(recipe_toml("d", "1.0", source_of("b")), apple, "supported = [\"android\"]\nbuild-on = [\"*/ndk\"]\n"));
+    upstream.write("recipes/t/recipe.toml",
+        "[recipe]\napi = 1\nlibrary = \"t\"\nname = \"t\"\nversion = \"1.0\"\nrevision = 1\nlicense = \"MIT\"\n"
+        "license-files = [\"LICENSE\"]\ndescription = \"Test.\"\n[tool]\nprograms = [\"t\", \"t-config\"]\n[source]\n" + source_of("c")
+        + "[platforms]\nsupported = [\"linux\"]\nbuild-on = [\"linux/gcc\"]\n");
+    std::filesystem::path const recipes = upstream.path() / "recipes";
+    git_in(recipes, {"init", "-q"});
+    git_in(recipes, {"add", "."});
+    git_in(recipes, {"commit", "-q", "-m", "recipes"});
+    git_in(recipes, {"remote", "add", "origin", file_url(recipes)});
+    upstream.write("index/index.toml", "format = 1\n");
+    std::filesystem::path const index = upstream.path() / "index";
+    git_in(index, {"init", "-q"});
+    git_in(index, {"add", "."});
+    git_in(index, {"commit", "-q", "-m", "index"});
+
+    ASSERT_EQ(run({"publish", "--dry-run", "--no-build", "--index", path_to_utf8(index), "--publisher", "p", path_to_utf8(recipes / "a"),
+                  path_to_utf8(recipes / "d"), path_to_utf8(recipes / "t"), "--format", "json"}), 0) << err.str() << out.str();
+    std::map<std::string, nlohmann::json> found;
+    std::istringstream lines{out.str()};
+    for (std::string line; std::getline(lines, line);) {
+        nlohmann::json e = nlohmann::json::parse(line);
+        if (e["event"] == "recipe") found.emplace(e["library"].get<std::string>(), std::move(e));
+    }
+    ASSERT_EQ(found.size(), 3u) << out.str();
+    EXPECT_EQ(found["a"]["build-on"], nlohmann::json::parse(R"(["macos/xcode"])"));
+    EXPECT_EQ(found["a"]["programs"], nlohmann::json::array());
+    EXPECT_EQ(found["d"]["build-on"], nlohmann::json::parse(R"(["*/ndk"])"));
+    EXPECT_EQ(found["d"]["programs"], nlohmann::json::array());
+    EXPECT_EQ(found["t"]["build-on"], nlohmann::json::parse(R"(["linux/gcc"])"));
+    EXPECT_EQ(found["t"]["programs"], nlohmann::json::parse(R"(["t", "t-config"])"));
+}
+
 // docs/PLAN.md decision 44: recipes published into a git index with `publish --no-build`, then installed
 // from it.
 TEST_F(commands, installs_recipes_from_the_index)
