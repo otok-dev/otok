@@ -215,6 +215,28 @@ result<std::optional<std::vector<std::string>>> files_of_checkout(std::optional<
     return files;
 }
 
+// A working tree of otok.dev.toml copied to `to` (made anew): what git does not ignore in a checkout, else all of it; files
+// with their times, so that a kept build directory sees unchanged files as unchanged (otok-dev-toml.md 4).
+result<void> copy_working_tree(std::optional<git_tool> const& git, fs::path const& from, fs::path const& to, fs::path const& log)
+{
+    std::error_code ec;
+    fs::remove_all(long_path(to), ec);
+    auto files = files_of_checkout(git, from, log);
+    if (!files) return std::unexpected{files.error()};
+    if (!*files) return copy_tree(from, to);
+    for (std::string const& name : **files) {
+        fs::path const source = from / path_from_utf8(name);
+        fs::path const target = to / path_from_utf8(name);
+        if (!fs::is_regular_file(long_path(source), ec)) continue;  // deleted but still listed, or a directory
+        fs::create_directories(long_path(target.parent_path()), ec);
+        fs::copy_file(long_path(source), long_path(target), fs::copy_options::overwrite_existing, ec);
+        if (ec) return fail("cannot copy '" + slashed(source) + "': " + ec.message());
+        fs::last_write_time(long_path(target), fs::last_write_time(long_path(source), ec), ec);
+    }
+    fs::create_directories(long_path(to), ec);
+    return {};
+}
+
 // Writes a file unless it has the text already: a kept work directory's build tool sees it unchanged (otok-dev-toml.md 4).
 void write_if_changed(fs::path const& file, std::string const& text)
 {
@@ -654,16 +676,17 @@ std::vector<kept_log> find_build_logs(cache_store const& cache, std::string cons
     return logs;
 }
 
-std::string meson_machine_file(slice_toolchain const& t, std::map<std::string, std::string> const& host, std::string const& pkg_config,
+result<std::string> meson_machine_file(slice_toolchain const& t, std::map<std::string, std::string> const& host, std::string const& pkg_config,
     std::map<std::string, std::vector<std::string>> const& binaries)
 {
-    auto const quoted = [](std::string const& s) {
-        std::string out = "'";
-        for (char c : s) {
-            if (c == '\'' || c == '\\') out += '\\';
-            out += c;
-        }
-        return out + "'";
+    // Meson's machine files have no escapes: a backslash is itself (C:\VS\cl.exe as it is), and a single quote can only be
+    // inside '''…''', where backslashes are not themselves and which cannot end with a quote. What neither form holds is
+    // refused (meson 1.12.1).
+    std::optional<std::string> unwritable;
+    auto const quoted = [&](std::string const& s) {
+        if (s.find('\'') == std::string::npos) return "'" + s + "'";
+        if (s.find('\\') != std::string::npos || s.ends_with('\'') || s.find("'''") != std::string::npos) unwritable = s;
+        return "'''" + s + "'''";
     };
     auto const array = [&](std::vector<std::string> const& items) {
         std::string out;
@@ -707,6 +730,10 @@ std::string meson_machine_file(slice_toolchain const& t, std::map<std::string, s
         text += "\n[properties]\nneeds_exe_wrapper = true\n\n[host_machine]\n";
         for (auto const& [key, value] : host) text += key + " = " + quoted(value) + "\n";
     }
+    if (unwritable) {
+        return fail("a meson machine file cannot hold '" + *unwritable + "': it has a single quote and a backslash, ends with a quote or "
+            "holds three of them");
+    }
     return text;
 }
 
@@ -735,6 +762,7 @@ void skip_sandbox_exit_checks() noexcept
 
 builder::~builder()
 {
+    join_pushes();
     std::error_code ec;
     fs::remove_all(long_path(work_root_), ec);
     for (fs::path const& d : drives_) virtual_drives::release(d);
@@ -912,6 +940,7 @@ std::expected<std::vector<built_package>, std::vector<error>> builder::build_all
     std::map<std::string, std::size_t> index;                   // slice id → task
     std::map<std::string, std::vector<std::string>> slices_of;  // package key → ids of its build entries
     std::vector<built_package> packages;
+    std::vector<std::pair<std::size_t, resolved_package const*>> delivering;  // packages of recipes that deliver their source (recipe-toml.md 12.1)
     auto const add = [&](slice_task t, std::vector<std::size_t> after) {
         index.emplace(t.id, tasks.size());
         tasks.push_back(std::move(t));
@@ -953,7 +982,7 @@ std::expected<std::vector<built_package>, std::vector<error>> builder::build_all
         // nothing to build: the target packages the patched source (recipe-toml.md 12.1)
         if (p->chosen.recipe->delivers_sources) {
             if (tool) return failed(p->library + ": a recipe that delivers its source cannot be a tool dependency");
-            if (auto ok = prepare_sources(*p, packages.back()); !ok) return failed(ok.error().message);
+            delivering.emplace_back(packages.size() - 1, p);  // prepared once its source is fetched (cache.md 12.2)
             continue;
         }
 
@@ -1070,12 +1099,152 @@ std::expected<std::vector<built_package>, std::vector<error>> builder::build_all
         }
     }
 
+    // The keys of every slice before anything is fetched or built (cache.md 12.2), in the order of the tasks: each after the
+    // ones it needs. A slice whose key cannot be planned fails with the same error when it runs.
+    std::vector<std::optional<slice_plan>> plans(tasks.size());
+    for (std::size_t i = 0; i < tasks.size(); ++i) {
+        slice_task const& t = tasks[i];
+        std::optional<dependency_key> tools;
+        if (!t.tools.empty()) {
+            auto const it = planned_.find(t.tools);
+            if (it == planned_.end()) continue;
+            tools = it->second;
+        }
+        auto plan = plan_slice(*t.p, t.tool, t.spec, t.entry, tools, [&](std::string const& id) -> std::optional<dependency_key> {
+            auto const it = planned_.find(id);
+            return it == planned_.end() ? std::nullopt : std::optional{it->second};
+        });
+        if (!plan) continue;
+        // a dev slice's key comes from its output (otok-dev-toml.md 4): its dependents' are not known before
+        dependency_key const key{plan->hex, plan->defines, plan->known && !plan->dev, plan->local};
+        planned_.insert_or_assign(t.id, key);
+        for (auto const& [alias, spec] : t.aliases) planned_.insert_or_assign(alias, key);
+        plans[i] = std::move(*plan);
+    }
+    // where each comes from: the local cache, a store of the shared build cache, or a build (cache.md 12.2)
+    using where = located_slice::where;
+    std::vector<where> from(tasks.size(), where::build);
+    std::vector<std::string> store_of(tasks.size());
+    std::error_code ec;
+    for (std::size_t i = 0; i < tasks.size(); ++i) {
+        if (!plans[i] || plans[i]->dev || !plans[i]->known) continue;
+        if (fs::exists(long_path(plans[i]->entry), ec)) {
+            from[i] = where::local;
+            continue;
+        }
+        for (build_cache_use const& s : settings_.stores) {
+            auto found = s.store.lookup(plans[i]->hex);
+            if (!found) {
+                say("warning: " + found.error().message);
+                continue;
+            }
+            if (*found) {
+                from[i] = where::store;
+                store_of[i] = s.store.url();
+                break;
+            }
+        }
+    }
+    // the slices needed: those of the target packages, the tools delivered or built for themselves, and what a slice built
+    // here needs; the tools of slices found in a cache are not (cache.md 12.2)
+    std::set<std::string> root_tools;
+    for (auto const& [library, id] : r_.delivered_tools) {
+        if (resolved_package const* dp = r_.find_tool(id)) root_tools.insert(package_key(dp->id, true));
+    }
+    for (dependency const& d : m_.tool_deps) {
+        if (!settings_.tool_roots) break;
+        if (resolved_package const* dp = r_.find_tool(d.library)) root_tools.insert(package_key(dp->id, true));
+    }
+    std::vector<char> needed(tasks.size(), 0);
+    std::vector<std::size_t> pending;
+    for (std::size_t i = 0; i < tasks.size(); ++i) {
+        slice_task const& t = tasks[i];
+        if (t.entry != build_entry::build || (t.tool && !root_tools.contains(package_key(t.p->id, true)))) continue;
+        needed[i] = 1;
+        pending.push_back(i);
+    }
+    while (!pending.empty()) {
+        std::size_t const i = pending.back();
+        pending.pop_back();
+        if (from[i] != where::build) continue;
+        for (std::size_t const j : graph[i].after) {
+            if (needed[j]) continue;
+            needed[j] = 1;
+            pending.push_back(j);
+        }
+    }
+
+    // otok cache status, otok cache push: where each slice comes from, nothing fetched or built
+    if (settings_.locate_only) {
+        std::vector<error> errors;
+        for (std::size_t i = 0; i < tasks.size(); ++i) {
+            slice_task const& t = tasks[i];
+            recipe const& rec = *t.p->chosen.recipe;
+            located_slice l;
+            l.library = t.p->library;
+            l.id = t.p->id;
+            l.version = rec.version->str();
+            l.revision = rec.revision;
+            l.tool = t.tool;
+            l.build_tools = t.entry == build_entry::build_tools;
+            l.spec = t.spec;
+            if (!plans[i]) {
+                // the error of its own plan; one of its build_tools entry is that entry's
+                if (!t.tools.empty() && !planned_.contains(t.tools)) continue;
+                auto again = plan_slice(*t.p, t.tool, t.spec, t.entry, std::nullopt, [&](std::string const& id) -> std::optional<dependency_key> {
+                    auto const it = planned_.find(id);
+                    return it == planned_.end() ? std::nullopt : std::optional{it->second};
+                });
+                if (!again) errors.push_back(again.error());
+                continue;
+            }
+            l.dev = plans[i]->dev || !plans[i]->known;
+            if (!l.dev) l.key = plans[i]->hex;
+            l.entry = plans[i]->entry;
+            l.from = from[i];
+            l.store = store_of[i];
+            l.local_input = plans[i]->local;
+            l.licenses = !l.dev && fs::is_directory(long_path(plans[i]->entry / "licenses"), ec);
+            settings_.locate_only->push_back(std::move(l));
+        }
+        if (!errors.empty()) return failure{std::move(errors)};
+        return std::vector<built_package>{};
+    }
+
+    // the inputs of the slices built here alone (cache.md 12.2), and of the packages whose slices an earlier otok made
+    // without licenses/ (cache.md 7.1) or that deliver their source (recipe-toml.md 12.1), for packaging
+    std::set<std::string> fetching;
+    for (std::size_t i = 0; i < tasks.size(); ++i) {
+        if (needed[i] && from[i] == where::build) fetching.insert(package_key(tasks[i].p->id, tasks[i].tool));
+    }
+    for (built_package const& bp : packages) {
+        if (bp.tool) continue;
+        for (std::string const& id : slices_of[package_key(bp.id, false)]) {
+            std::size_t const i = index.at(id);
+            if (from[i] == where::local && !fs::is_directory(long_path(plans[i]->entry / "licenses"), ec)) fetching.insert(package_key(bp.id, false));
+        }
+    }
+    for (auto const& [d, p] : delivering) fetching.insert(package_key(packages[d].id, false));
+    if (settings_.fetch) {
+        std::lock_guard lock{fetch_mutex_};
+        if (auto ok = settings_.fetch(fetching, inputs_); !ok) return failed(ok.error().message);
+        fetched_.insert(fetching.begin(), fetching.end());
+    }
+    for (built_package& bp : packages) {
+        if (auto const in = inputs_.find(package_key(bp.id, bp.tool)); in != inputs_.end()) bp.source = in->second.source;
+    }
+    for (auto const& [d, p] : delivering) {
+        if (auto ok = prepare_sources(*p, packages[d]); !ok) return failed(ok.error().message);
+    }
+
     // what the toolchains of the slices need outside the cache, readable to the AppContainer before any build starts, not
     // when a slice in the middle comes to it (docs/PLAN.md decision 109); a slice whose toolchain fails says so itself
     if (settings_.isolation == build_isolation::sandbox && settings_.sandbox.kind == host_sandbox::mechanism::appcontainer) {
         // the targets keep what they discover: a profile per task costs little
-        std::vector<std::pair<fs::path, std::string>> needed;
-        for (slice_task const& t : tasks) {
+        std::vector<std::pair<fs::path, std::string>> reads;
+        for (std::size_t i = 0; i < tasks.size(); ++i) {
+            if (!needed[i] || from[i] != where::build) continue;
+            slice_task const& t = tasks[i];
             build_target* target = target_of_slice(targets_, t.spec);
             if (!target) continue;
             result<toolchain_profile> profile = fail("");
@@ -1085,10 +1254,10 @@ std::expected<std::vector<built_package>, std::vector<error>> builder::build_all
             }
             if (!profile) continue;
             for (fs::path const& p : profile->read_paths) {
-                needed.emplace_back(p, "the toolchain of '" + target->info().name + "' (" + profile->description + ")");
+                reads.emplace_back(p, "the toolchain of '" + target->info().name + "' (" + profile->description + ")");
             }
         }
-        if (auto ok = check_sandbox_reads(needed); !ok) return failed(ok.error().message);
+        if (auto ok = check_sandbox_reads(reads); !ok) return failed(ok.error().message);
     }
 
     broker_ = settings_.broker;
@@ -1097,12 +1266,27 @@ std::expected<std::vector<built_package>, std::vector<error>> builder::build_all
         broker_ = own_broker_.get();
     }
     for (auto const& [package, ids] : slices_of) {
-        slices_done_.emplace(package, std::pair<std::size_t, std::size_t>{0, headers_packages_.contains(package) ? 1 : ids.size()});
+        std::set<std::size_t> counted;
+        for (std::string const& id : ids) {
+            if (std::size_t const i = index.at(id); needed[i]) counted.insert(i);
+        }
+        slices_done_.emplace(package, std::pair<std::size_t, std::size_t>{0, counted.size()});
     }
+    // each task once, by the executor when it is needed, or by a slice that finds it needs it (find_built of build_slice)
+    task_of_ = index;
+    task_runs_.clear();
+    task_mutexes_.clear();
     for (std::size_t i = 0; i < tasks.size(); ++i) {
-        graph[i].run = [this, &t = tasks[i]](std::size_t) -> result<void> {
+        task_mutexes_.push_back(std::make_unique<std::mutex>());
+        task_runs_.push_back([this, i, &t = tasks[i]]() -> result<void> {
+            std::lock_guard held{*task_mutexes_[i]};
+            {
+                std::lock_guard lock{mutex_};
+                if (built_.contains(t.id)) return {};
+            }
             built_slice const* tools = nullptr;
             if (!t.tools.empty()) {
+                if (auto ok = ensure_built(t.tools); !ok) return ok;
                 std::lock_guard lock{mutex_};
                 tools = &built_.at(t.tools);
             }
@@ -1117,14 +1301,18 @@ std::expected<std::vector<built_package>, std::vector<error>> builder::build_all
             }
             built_.insert_or_assign(t.id, std::move(*s));
             return {};
-        };
+        });
+        graph[i].run = [this, i, need = needed[i] != 0](std::size_t) -> result<void> { return need ? task_runs_[i]() : result<void>{}; };
     }
     // the output of builds one after another (docs/PLAN.md decision 59); each still has every job of the jobserver
     bool const one_at_a_time = settings_.verbosity >= 2;
     if (one_at_a_time && settings_.jobs > 1) {
         say("note: -vv builds one slice at a time, so that their output does not interleave; each still runs " + std::to_string(settings_.jobs) + " jobs");
     }
-    if (auto errors = run_tasks(graph, *broker_, one_at_a_time ? 1 : std::numeric_limits<std::size_t>::max()); !errors.empty()) {
+    auto errors = run_tasks(graph, *broker_, one_at_a_time ? 1 : std::numeric_limits<std::size_t>::max());
+    task_runs_.clear();  // they refer to `tasks`
+    join_pushes();
+    if (!errors.empty()) {
         // once each: the slices under way when one fails can fail alike (a host without a sandbox fails them all)
         std::set<std::string> seen;
         std::erase_if(errors, [&seen](error const& e) { return !seen.insert(e.message).second; });
@@ -1132,7 +1320,11 @@ std::expected<std::vector<built_package>, std::vector<error>> builder::build_all
     }
 
     for (built_package& bp : packages) {
-        for (std::string const& id : slices_of[package_key(bp.id, bp.tool)]) bp.slices.push_back(built_.at(id));
+        // a tool package that no slice built here needed has none (cache.md 12.2)
+        for (std::string const& id : slices_of[package_key(bp.id, bp.tool)]) {
+            if (auto const it = built_.find(id); it != built_.end()) bp.slices.push_back(it->second);
+        }
+        if (bp.slices.empty()) continue;
         // every slice returns the same libraries (build-lua-api.md 8)
         auto const names = [](built_slice const& x) {
             std::vector<std::string> n;
@@ -1457,8 +1649,125 @@ result<void> builder::prepare_sources(resolved_package const& p, built_package& 
     return {};
 }
 
-result<built_slice> builder::build_slice(resolved_package const& p, bool tool, slice_spec const& spec, build_entry entry,
-    built_slice const* tools)
+namespace {
+
+// The libraries of a slice entry that comes from a store, as the builder checks those it builds (cache.md 12.2): their kinds
+// by the linkage, and what the target checks of them (their architectures).
+result<void> check_stored_libraries(build_output const& out, slice_spec const& spec, build_target& target)
+{
+    if (spec.headers && !out.libraries.empty()) return fail("the headers slice has libraries");
+    for (auto const& [name, lib] : out.libraries) {
+        std::string const what = "the library '" + name + "' (" + slashed(lib) + ")";
+        binary_kind const kind = binary_kind_of(lib);
+        auto const runtime = out.runtimes.find(name);
+        if (spec.linkage == "static") {
+            if (kind != binary_kind::archive || runtime != out.runtimes.end()) return fail(what + " is not a static archive");
+        } else if (runtime != out.runtimes.end()) {
+            if (kind != binary_kind::archive || binary_kind_of(runtime->second) != binary_kind::pe_dll) return fail(what + " is not a DLL with its import library");
+        } else if (kind != binary_kind::archive && kind != binary_kind::elf_shared && kind != binary_kind::macho_dylib) {
+            return fail(what + " is neither a static archive nor a dynamic library");
+        }
+        if (auto ok = target.check_library(lib, spec); !ok) return fail(what + ": " + ok.error().message);
+    }
+    return {};
+}
+
+}
+
+result<void> builder::ensure_inputs(std::string const& package)
+{
+    if (!settings_.fetch) return {};
+    std::lock_guard lock{fetch_mutex_};
+    if (fetched_.contains(package)) return {};
+    if (auto ok = settings_.fetch({package}, inputs_); !ok) return ok;
+    fetched_.insert(package);
+    return {};
+}
+
+result<void> builder::ensure_built(std::string const& id)
+{
+    auto const it = task_of_.find(id);
+    if (it == task_of_.end() || it->second >= task_runs_.size()) return fail("the slice '" + id + "' is not part of this build");
+    return task_runs_[it->second]();
+}
+
+std::optional<std::string> builder::fetch_from_store(std::string const& key, fs::path const& entry, slice_spec const& spec, build_target& target,
+    std::string const& label)
+{
+    for (build_cache_use const& s : settings_.stores) {
+        std::string const& url = s.store.url();
+        auto found = s.store.lookup(key);
+        if (!found) {
+            say("warning: " + label + ": " + found.error().message);
+            continue;
+        }
+        if (!*found) continue;
+        entry_descriptor const d = **found;
+        auto made = cache_.ensure(entry, "taking " + label + " from '" + url + "'", [&](fs::path const& staging) -> result<void> {
+            // under the entry's lock: one process at a time for this key
+            fs::path const archive = cache_.tmp() / (key.substr(0, 32) + ".tar.zst");
+            auto ok = s.store.download(d, archive);
+            if (ok) ok = unpack_entry_archive(archive, staging, key);
+            std::error_code ec;
+            fs::remove(long_path(archive), ec);
+            if (!ok) return ok;
+            auto out = read_result(staging);
+            if (ok && !out) ok = fail(out.error().message);
+            if (ok) ok = check_stored_libraries(*out, spec, target);
+            if (!ok) fs::remove_all(long_path(staging), ec);
+            return ok;
+        });
+        if (made) return url;
+        say("warning: " + label + " from '" + url + "': " + made.error().message + "; not taken");
+    }
+    return std::nullopt;
+}
+
+void builder::push_to_stores(std::string const& key, fs::path const& entry, bool local, std::string const& label)
+{
+    std::vector<build_cache_use const*> to;
+    for (build_cache_use const& s : settings_.stores) {
+        if (s.push && (!local || s.push_local)) to.push_back(&s);
+    }
+    if (to.empty()) return;
+    std::lock_guard lock{push_mutex_};
+    pushes_.emplace_back([this, key, entry, label, to] {
+        fs::path const archive = cache_.tmp() / ("push-" + key.substr(0, 32) + ".tar.zst");
+        auto written = write_entry_archive(entry, archive);
+        std::error_code ec;
+        if (!written) {
+            fs::remove(long_path(archive), ec);
+            say("warning: cannot push " + label + ": " + written.error().message);
+            return;
+        }
+        entry_descriptor const d = describe_push(*written, settings_.pushed_by);
+        for (build_cache_use const* s : to) {
+            auto pushed = s->store.push(key, archive, d);
+            if (!pushed) {
+                say("warning: cannot push " + label + ": " + pushed.error().message);
+            } else if (pushed->other) {
+                say("warning: " + label + " is in '" + s->store.url() + "' already with other contents (pushed by '" + pushed->other->pushed_by
+                    + "' from '" + pushed->other->machine + "'): its build is not reproducible; the first push stays");
+            } else if (pushed->added) {
+                say("pushed " + label + " to '" + s->store.url() + "'");
+            }
+        }
+        fs::remove(long_path(archive), ec);
+    });
+}
+
+void builder::join_pushes()
+{
+    std::vector<std::thread> pushes;
+    {
+        std::lock_guard lock{push_mutex_};
+        pushes.swap(pushes_);
+    }
+    for (std::thread& t : pushes) t.join();
+}
+
+result<builder::slice_plan> builder::plan_slice(resolved_package const& p, bool tool, slice_spec const& spec, build_entry entry,
+    std::optional<dependency_key> const& tools, key_lookup const& find)
 {
     std::size_t const c = settings_.configuration;
     recipe const& rec = *p.chosen.recipe;
@@ -1466,33 +1775,28 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
     std::string const label = (tool ? "tool " : "") + p.library + " " + rec.version->str() + (building_tools ? " (build_tools)" : "");
     locked_package const* locked = locked_of(p, tool);
     if (!locked) return fail(label + " is not in otok.lock");
-    auto const in = inputs_.find(package_key(p.id, tool));
+    std::string const package = package_key(p.id, tool);
+    auto const in = inputs_.find(package);
     if (in == inputs_.end()) return fail(label + ": its inputs were not fetched");
     package_inputs const& inputs = in->second;
 
-    build_target* const target = target_of_slice(targets_, spec);
-    if (!target) return fail(label + ": no target builds platform '" + spec.platform + "'");
-    std::string const os = target->info().name;
-    result<toolchain_profile> profile = fail("");
+    slice_plan plan;
+    plan.target = target_of_slice(targets_, spec);
+    if (!plan.target) return fail(label + ": no target builds platform '" + spec.platform + "'");
+    plan.os = plan.target->info().name;
+    std::string const& os = plan.os;
     {
         // a target may discover its tools on first use
         std::lock_guard lock{mutex_};
-        profile = target->profile(spec);
-        if (profile && described_.emplace(os, profile->description).second
-            && (!settings_.announced || settings_.announced->first(os + ": " + profile->description))) {
-            progress_ << "toolchain of '" << os << "': " << profile->description << "\n" << std::flush;
+        auto profile = plan.target->profile(spec);
+        if (!profile) return fail(label + " for " + slice_label(spec) + ": " + profile.error().message);
+        plan.profile = std::move(*profile);
+        if (described_.emplace(os, plan.profile.description).second
+            && (!settings_.announced || settings_.announced->first(os + ": " + plan.profile.description))) {
+            progress_ << "toolchain of '" << os << "': " << plan.profile.description << "\n" << std::flush;
         }
     }
-    if (!profile) return fail(label + " for " + slice_label(spec) + ": " + profile.error().message);
-
     merged_options const& options = p.configurations[c].options;
-    // a slice this one needs: built before it started (the executor's order)
-    auto const find_built = [&](resolved_package const* dp, bool tool_dep) -> built_slice const* {
-        if (!dp) return nullptr;
-        std::lock_guard lock{mutex_};
-        auto const it = built_.find(slice_id(dp->id, tool_dep, tool_dep ? *tool_slice_ : spec));
-        return it == built_.end() ? nullptr : &it->second;
-    };
 
     // The key (cache-key.md 2, 3); of the headers slice, without what tells the slices of a target apart (cache-key.md 3.2).
     bool const headers = spec.headers;
@@ -1519,93 +1823,101 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
     auto recipe_sha256 = recipe_hash(p, tool);
     if (!recipe_sha256) return fail(label + ": " + recipe_sha256.error().message);
     key["recipe-sha256"] = *recipe_sha256;
+    // a recipe of a path of this machine (cache.md 12.3)
+    plan.local = locked->kind == locked_package::recipe_kind::path;
     key["source"] = source_pin(locked->source);
     // the working trees of otok.dev.toml: `dev`, their contents are the dev slice's business (otok-dev-toml.md 4)
-    bool const dev = inputs.dev.has_value();
-    if (dev && inputs.dev->source) {
-        key["source"] = "dev";
-    } else if (locked->source.type == locked_location::kind::local) {
-        auto hash = tree_hash(inputs.source, tree_links::record);
-        if (!hash) return fail(label + ": cannot hash the source in '" + slashed(inputs.source) + "': " + hash.error().message);
-        key["source"] = "local:" + *hash;
+    plan.dev = inputs.dev.has_value();
+    bool const dev_source = plan.dev && inputs.dev->source;
+    if (dev_source) key["source"] = "dev";
+    if (locked->source.type == locked_location::kind::local || locked->source.type == locked_location::kind::path) plan.local = true;
+    if (!dev_source && locked->source.type == locked_location::kind::local) {
+        std::string hash;
+        {
+            std::lock_guard lock{mutex_};
+            if (auto it = source_hashes_.find(package); it != source_hashes_.end()) hash = it->second;
+        }
+        if (hash.empty()) {
+            auto made = tree_hash(inputs.source, tree_links::record);
+            if (!made) return fail(label + ": cannot hash the source in '" + slashed(inputs.source) + "': " + made.error().message);
+            hash = *made;
+            std::lock_guard lock{mutex_};
+            source_hashes_.emplace(package, hash);
+        }
+        key["source"] = "local:" + hash;
     }
     for (locked_resource const& res : locked->resources) {
         auto const declared = std::ranges::find(rec.resources, res.name, &recipe_resource::name);
         if (declared != rec.resources.end() && declared->when && !condition_holds(*declared->when, options, "", "", arch, environment)) continue;
-        key["resource." + res.name] = dev && inputs.dev->resources.contains(res.name) ? "dev" : source_pin(res.location);
+        key["resource." + res.name] = plan.dev && inputs.dev->resources.contains(res.name) ? "dev" : source_pin(res.location);
     }
     // file options (recipe-toml.md 8.3): their contents in the key, not their paths; a copy for the build
-    std::map<std::string, std::string> option_keys;
-    std::map<std::string, fs::path> option_files;
     for (auto const& [name, value] : options) {
         option_schema const* o = rec.find_option(name);
         if (!o || o->type != option_type::file) {
-            option_keys[name] = format_option_value(value);
+            plan.option_keys[name] = format_option_value(value);
             continue;
         }
         std::string const& path = std::get<std::string>(value);
         if (path.empty()) {
-            option_keys[name] = "none";
+            plan.option_keys[name] = "none";
             continue;
         }
         fs::path const file = project_dir_ / path_from_utf8(path);
         auto hash = sha256_file(file);
         if (!hash) return fail(label + ": the file '" + path + "' of option '" + name + "': " + hash.error().message);
-        option_keys[name] = "sha256:" + *hash;
-        option_files.emplace(name, file);
+        plan.option_keys[name] = "sha256:" + *hash;
+        plan.option_files.emplace(name, file);
     }
-    for (auto const& [name, value] : option_keys) key["option." + name] = value;
+    for (auto const& [name, value] : plan.option_keys) key["option." + name] = value;
     if (!headers) {
-        for (auto const& [name, value] : profile->identity) key["toolchain." + name] = value;
+        for (auto const& [name, value] : plan.profile.identity) key["toolchain." + name] = value;
     }
-    // whether this slice needs a toolchain: one the check found for the package may be for some architectures or
-    // environments only (recipe-toml.md 9.1)
-    auto const slice_needs = [&](std::string const& name) {
-        auto const req = std::ranges::find(rec.toolchains, name, &toolchain_requirement::name);
-        return req == rec.toolchains.end() || !req->when
-            || condition_holds(*req->when, options, os, "", arch, environment);
-    };
-    // the recipe's toolchains as check_toolchains found them (recipe-toml.md 13)
-    chosen_toolchains const* toolchains = nullptr;
+    // the recipe's toolchains as check_toolchains found them (recipe-toml.md 13), those this slice needs: one the check found
+    // for the package may be for some architectures or environments only (recipe-toml.md 9.1)
     if (!rec.toolchains.empty()) {
-        auto const it = settings_.toolchains.find(toolchain_choice_key(os, package_key(p.id, tool)));
+        auto const it = settings_.toolchains.find(toolchain_choice_key(os, package));
         if (it == settings_.toolchains.end()) return fail(label + ": its toolchains were not checked for the target '" + os + "'");
-        toolchains = &it->second;
+        plan.toolchains = &it->second;
         for (auto const& [name, found] : it->second) {
-            if (slice_needs(name)) key["toolchains." + name] = found.version;
+            auto const req = std::ranges::find(rec.toolchains, name, &toolchain_requirement::name);
+            bool const needed = req == rec.toolchains.end() || !req->when || condition_holds(*req->when, options, os, "", arch, environment);
+            if (needed) key["toolchains." + name] = found.version;
         }
     }
-    compile_flags const project = building_tools || headers ? compile_flags{} : project_flags(p.library, tool, os);
-    for (auto const& [name, flags] : {std::pair{"cflags", &project.cflags}, std::pair{"cxxflags", &project.cxxflags},
-             std::pair{"ldflags", &project.ldflags}}) {
+    plan.project = building_tools || headers ? compile_flags{} : project_flags(p.library, tool, os);
+    for (auto const& [name, flags] : {std::pair{"cflags", &plan.project.cflags}, std::pair{"cxxflags", &plan.project.cxxflags},
+             std::pair{"ldflags", &plan.project.ldflags}}) {
         if (!flags->empty()) key[std::string{"flags."} + name] = flags_text(*flags);
     }
     // the standards of the target, as the resolution chose them (otok-toml.md 5.1); a tool dependency's own; build_tools get
     // none, as they get no project flags
-    language_standards standards;
     if (tool && !building_tools) {
         // its own in [tool-deps], else the one of the tools it is linked with (docs/PLAN.md decision 116)
         auto const chosen = r_.tool_standards.find(p.id);
         for (language const l : languages) {
-            standards[l] = standard_of(m_, nullptr, p.library, true, target->info(), l);
-            if (!standards[l] && chosen != r_.tool_standards.end()) standards[l] = chosen->second[l];
+            plan.standards[l] = standard_of(m_, nullptr, p.library, true, plan.target->info(), l);
+            if (!plan.standards[l] && chosen != r_.tool_standards.end()) plan.standards[l] = chosen->second[l];
         }
     } else if (!building_tools && !headers && settings_.configuration < r_.standards.size()) {
         auto const& chosen = r_.standards[settings_.configuration];
-        if (auto it = chosen.find(os); it != chosen.end()) standards = it->second;
+        if (auto it = chosen.find(os); it != chosen.end()) plan.standards = it->second;
     }
     for (language const l : languages) {
-        if (standards[l]) key[std::string{standard_key(l)}] = std::to_string(*standards[l]);
+        if (plan.standards[l]) key[std::string{standard_key(l)}] = std::to_string(*plan.standards[l]);
     }
 
     // the defines of the dependencies' products, which their headers may need (build-lua-api.md 4)
-    std::vector<std::string> inherited;
     auto const add_defines = [](std::vector<std::string>& to, std::vector<std::string> const& from) {
         for (std::string const& d : from) {
             if (std::ranges::find(to, d) == to.end()) to.push_back(d);
         }
     };
-    slice_context slice;
+    auto const take = [&](dependency_key const& d) {
+        plan.known = plan.known && d.known;
+        plan.local = plan.local || d.local;
+        return d.known ? d.key : std::string{"unknown"};
+    };
     for (recipe_dependency const& d : rec.dependencies) {
         if (building_tools) break;  // the tool slice has only the tool dependencies
         if (d.when && !condition_holds(*d.when, options, os, platform)) continue;
@@ -1613,11 +1925,172 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         resolved_package const* dp = tool ? tool_dependency_of(p, d.library) : r_.find(d.library, p.target);
         // the headers slice has those built from a headers slice too (build-lua-api.md 3.5)
         if (headers && (!dp || !headers_packages_.contains(package_key(dp->id, false)))) continue;
+        auto const dep = dp ? find(slice_id(dp->id, tool, tool ? *tool_slice_ : spec)) : std::nullopt;
+        if (!dep) return fail(label + ": its dependency '" + d.library + "' was not built for " + slice_label(spec));
+        key["dep." + d.library] = take(*dep);
+        add_defines(plan.inherited, dep->defines);
+    }
+    for (std::size_t i = 0; i < rec.tool_dependencies.size(); ++i) {
+        recipe_dependency const& d = rec.tool_dependencies[i];
+        if (d.when && !condition_holds(*d.when, options, os, platform, arch, environment)) continue;
+        if (i >= p.tool_edges.size() || p.tool_edges[i].empty()) continue;  // inactive in every configuration resolved
+        resolved_package const* dp = r_.find_tool(p.tool_edges[i]);
+        auto const dep = dp ? find(slice_id(dp->id, true, *tool_slice_)) : std::nullopt;
+        if (!dep) return fail(label + ": its tool dependency '" + p.tool_edges[i] + "' was not built");
+        key["tool." + dp->library] = take(*dep);
+    }
+    if (tools) key["build-tools"] = take(*tools);
+    if (!plan.inherited.empty()) key["defines"] = flags_text(plan.inherited);
+    key["entry"] = building_tools ? "build_tools" : "build";
+    // build.lua sees it (slice.is_tool): a library that is a tool too builds its programs there only (recipe-toml.md 13.2)
+    if (tool) key["tool"] = "true";
+    plan.text = key_text(key);
+    plan.hex = sha256_hex(plan.text);
+    // its own products' defines, as packaging chooses them (recipe-toml.md 11), then its dependencies'
+    for (product const& prod : rec.products) {
+        if (prod.when && !condition_holds(*prod.when, options, os, "")) continue;
+        for (product_define const& d : prod.defines) {
+            if (!d.when || condition_holds(*d.when, options, os, "", {}, nullptr, headers ? std::string{} : spec.linkage)) add_defines(plan.defines, {d.define});
+        }
+    }
+    add_defines(plan.defines, plan.inherited);
+    plan.entry = cache_.root() / "builds" / p.library / (rec.version->str() + "-r" + std::to_string(rec.revision)) / "slices" / plan.hex.substr(0, 32);
+    plan.work_name = p.library + "-" + slice_name(spec) + (spec.configuration == "debug" ? "-debug" : "") + (building_tools ? "-tools" : tool ? "-tool" : "");
+    // a dev slice: built every time in its work directory, kept in dev/, which is its entry (otok-dev-toml.md 4)
+    if (plan.dev) plan.entry = cache_.root() / "dev" / cache_store::project_key(project_dir_) / plan.work_name;
+    return plan;
+}
+
+result<built_slice> builder::build_slice(resolved_package const& p, bool tool, slice_spec const& spec, build_entry entry,
+    built_slice const* tools)
+{
+    std::size_t const c = settings_.configuration;
+    recipe const& rec = *p.chosen.recipe;
+    bool const building_tools = entry == build_entry::build_tools;
+    std::string const label = (tool ? "tool " : "") + p.library + " " + rec.version->str() + (building_tools ? " (build_tools)" : "");
+    auto const in = inputs_.find(package_key(p.id, tool));
+    if (in == inputs_.end()) return fail(label + ": its inputs were not fetched");
+    package_inputs const& inputs = in->second;
+
+    // a slice this one needs: built before it started (the executor's order), or now, when the plan thought it not needed
+    // (cache.md 12.2: the slices of a package found in a cache need nothing of theirs); `dep_failure` the error of building it
+    std::optional<error> dep_failure;
+    auto const find_built = [&](resolved_package const* dp, bool tool_dep) -> built_slice const* {
+        if (!dp) return nullptr;
+        std::string const id = slice_id(dp->id, tool_dep, tool_dep ? *tool_slice_ : spec);
+        {
+            std::lock_guard lock{mutex_};
+            if (auto const it = built_.find(id); it != built_.end()) return &it->second;
+        }
+        if (auto ok = ensure_built(id); !ok) {
+            dep_failure = ok.error();
+            return nullptr;
+        }
+        std::lock_guard lock{mutex_};
+        auto const it = built_.find(id);
+        return it == built_.end() ? nullptr : &it->second;
+    };
+    // the key with those of the slices it needs as they were built (a dev slice's from its output), or as planned
+    // (cache-key.md 3)
+    auto planned = plan_slice(p, tool, spec, entry, tools ? std::optional{dependency_key{tools->key, tools->defines}} : std::nullopt,
+        [&](std::string const& id) -> std::optional<dependency_key> {
+            std::lock_guard lock{mutex_};
+            if (auto const it = built_.find(id); it != built_.end()) return dependency_key{it->second.key, it->second.defines};
+            if (auto const it = planned_.find(id); it != planned_.end() && it->second.known) return it->second;
+            return std::nullopt;
+        });
+    if (!planned) return std::unexpected{planned.error()};
+    slice_plan& plan = *planned;
+    build_target* const target = plan.target;
+    std::string const& os = plan.os;
+    toolchain_profile const* const profile = &plan.profile;
+    merged_options const& options = p.configurations[c].options;
+    bool const headers = spec.headers;
+    std::string const platform = headers ? std::string{} : spec.platform;
+    std::string const arch = headers ? std::string{} : spec.arch;
+    build_environment const* const environment = headers ? nullptr : environment_of(spec);
+    std::map<std::string, std::string> const& option_keys = plan.option_keys;
+    std::map<std::string, fs::path> const& option_files = plan.option_files;
+    language_standards const& standards = plan.standards;
+    compile_flags const& project = plan.project;
+    chosen_toolchains const* const toolchains = plan.toolchains;
+    std::vector<std::string> const& inherited = plan.inherited;
+    std::string const& text = plan.text;
+    std::string const& hex = plan.hex;
+    bool const dev = plan.dev;
+    std::string const& work_name = plan.work_name;
+    // whether this slice needs a toolchain: one the check found for the package may be for some architectures or
+    // environments only (recipe-toml.md 9.1)
+    auto const slice_needs = [&](std::string const& name) {
+        auto const req = std::ranges::find(rec.toolchains, name, &toolchain_requirement::name);
+        return req == rec.toolchains.end() || !req->when
+            || condition_holds(*req->when, options, os, "", arch, environment);
+    };
+
+    built_slice out;
+    out.spec = spec;
+    out.key = hex;
+    out.option_keys = option_keys;
+    out.defines = plan.defines;
+    out.entry = plan.entry;
+    // for --format json (cli-json.md 9)
+    auto const report_slice = [&](slice_event::kind state, double seconds, std::string message = {}, fs::path log = {}, std::string hint = {},
+                                  std::string from = {}) {
+        if (!settings_.on_slice) return;
+        settings_.on_slice({state, p.library, p.id, rec.version->str(), rec.revision, tool, building_tools, spec, seconds,
+            dev ? inputs.dev->label : std::string{}, std::move(from), std::move(message), std::move(log), std::move(hint)});
+    };
+    // a failure once the slice has started building, with what `failed` below kept of it
+    fs::path failed_log;
+    std::string failed_hint;
+    std::optional<std::chrono::steady_clock::time_point> building_since;
+    auto const failure = [&](std::unexpected<error> e) {
+        std::chrono::duration<double> const took = building_since ? std::chrono::steady_clock::now() - *building_since : std::chrono::duration<double>{};
+        report_slice(slice_event::kind::failed, took.count(), e.error().message, failed_log, failed_hint);
+        return e;
+    };
+    std::error_code ec;
+    if (!dev && fs::exists(out.entry, ec)) {
+        auto result = read_result(out.entry);
+        if (result) {
+            out.output = std::move(*result);
+            out.cached = true;
+            cache_.mark_used(out.entry);
+            report_slice(slice_event::kind::cached, 0);
+            say(label + " " + slice_label(spec) + ": cached" + slice_done(p.id, tool, entry));
+            return out;
+        }
+        // damaged (by an older otok, or by hand): removed and built again (cache.md 6.2)
+        say("warning: " + result.error().message + "; building it again");
+        auto gone = cache_.discard(out.entry, "removing the damaged " + label + " for " + slice_label(spec),
+            [](fs::path const& entry) { return !read_result(entry); });
+        if (!gone) return std::unexpected{gone.error()};
+    }
+    // from a store of the shared build cache, which the plan found holding it (cache.md 12.2)
+    if (!dev && plan.known && !settings_.stores.empty()) {
+        if (auto const from = fetch_from_store(hex, out.entry, spec, *target, label + " for " + slice_label(spec))) {
+            if (auto result = read_result(out.entry)) {
+                out.output = std::move(*result);
+                out.cached = true;
+                report_slice(slice_event::kind::cached, 0, {}, {}, {}, *from);
+                say(label + " " + slice_label(spec) + ": from " + *from + slice_done(p.id, tool, entry));
+                return out;
+            }
+        }
+    }
+    // built here: with its inputs (cache.md 12.2)
+    if (auto ok = ensure_inputs(package_key(p.id, tool)); !ok) return fail(label + ": " + ok.error().message);
+
+    slice_context slice;
+    for (recipe_dependency const& d : rec.dependencies) {
+        if (building_tools) break;  // the tool slice has only the tool dependencies
+        if (d.when && !condition_holds(*d.when, options, os, platform)) continue;
+        resolved_package const* dp = tool ? tool_dependency_of(p, d.library) : r_.find(d.library, p.target);
+        if (headers && (!dp || !headers_packages_.contains(package_key(dp->id, false)))) continue;
         built_slice const* dep = find_built(dp, tool);
+        if (dep_failure) return std::unexpected{*dep_failure};
         if (!dep || !dp) return fail(label + ": its dependency '" + d.library + "' was not built for " + slice_label(spec));
-        key["dep." + d.library] = dep->key;
         slice.deps.emplace(d.library, dependency_of(*dep, *dp, c));
-        add_defines(inherited, dep->defines);
     }
     // the programs of toolchains their recipes built (recipe-toml.md 13.1, 13.2): name → program; scripts among them → their interpreter
     std::map<std::string, fs::path> built_toolchains;
@@ -1628,8 +2101,8 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         if (i >= p.tool_edges.size() || p.tool_edges[i].empty()) continue;  // inactive in every configuration resolved
         resolved_package const* dp = r_.find_tool(p.tool_edges[i]);
         built_slice const* dep = find_built(dp, true);
+        if (dep_failure) return std::unexpected{*dep_failure};
         if (!dep || !dp) return fail(label + ": its tool dependency '" + p.tool_edges[i] + "' was not built");
-        key["tool." + dp->library] = dep->key;
         if (d.programs.empty()) {
             slice.tool_deps.emplace(dp->library, dependency_of(*dep, *dp, c));
             continue;
@@ -1669,68 +2142,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
     }
     fs::path const script = inputs.recipe_dir / "build.lua";
     std::string const script_label = p.library + "/build.lua";
-    if (tools) {
-        key["build-tools"] = tools->key;
-        slice.tools_prefix = builds_drive_.empty() ? tools->entry / "prefix" : virtual_drives::to_virtual(tools->entry / "prefix");
-    }
-    if (!inherited.empty()) key["defines"] = flags_text(inherited);
-    key["entry"] = building_tools ? "build_tools" : "build";
-    // build.lua sees it (slice.is_tool): a library that is a tool too builds its programs there only (recipe-toml.md 13.2)
-    if (tool) key["tool"] = "true";
-    std::string const text = key_text(key);
-    std::string const hex = sha256_hex(text);
-    built_slice out;
-    out.spec = spec;
-    out.key = hex;
-    out.option_keys = option_keys;
-    // its own products' defines, as packaging chooses them (recipe-toml.md 11), then its dependencies'
-    for (product const& prod : rec.products) {
-        if (prod.when && !condition_holds(*prod.when, options, os, "")) continue;
-        for (product_define const& d : prod.defines) {
-            if (!d.when || condition_holds(*d.when, options, os, "", {}, nullptr, headers ? std::string{} : spec.linkage)) add_defines(out.defines, {d.define});
-        }
-    }
-    add_defines(out.defines, inherited);
-    out.entry = cache_.root() / "builds" / p.library / (rec.version->str() + "-r" + std::to_string(rec.revision)) / "slices" / hex.substr(0, 32);
-    std::string const work_name = p.library + "-" + slice_name(spec) + (spec.configuration == "debug" ? "-debug" : "") + (building_tools ? "-tools" : tool ? "-tool" : "");
-    // a dev slice: built every time in its work directory, kept in dev/, which is its entry (otok-dev-toml.md 4)
-    if (dev) {
-        std::string const project_key = cache_store::project_key(project_dir_);
-        out.entry = cache_.root() / "dev" / project_key / work_name;
-    }
-
-    // for --format json (cli-json.md 9)
-    auto const report_slice = [&](slice_event::kind state, double seconds, std::string message = {}, fs::path log = {}, std::string hint = {}) {
-        if (!settings_.on_slice) return;
-        settings_.on_slice({state, p.library, p.id, rec.version->str(), rec.revision, tool, building_tools, spec, seconds,
-            dev ? inputs.dev->label : std::string{}, std::move(message), std::move(log), std::move(hint)});
-    };
-    // a failure once the slice has started building, with what `failed` below kept of it
-    fs::path failed_log;
-    std::string failed_hint;
-    std::optional<std::chrono::steady_clock::time_point> building_since;
-    auto const failure = [&](std::unexpected<error> e) {
-        std::chrono::duration<double> const took = building_since ? std::chrono::steady_clock::now() - *building_since : std::chrono::duration<double>{};
-        report_slice(slice_event::kind::failed, took.count(), e.error().message, failed_log, failed_hint);
-        return e;
-    };
-    std::error_code ec;
-    if (!dev && fs::exists(out.entry, ec)) {
-        auto result = read_result(out.entry);
-        if (result) {
-            out.output = std::move(*result);
-            out.cached = true;
-            cache_.mark_used(out.entry);
-            report_slice(slice_event::kind::cached, 0);
-            say(label + " " + slice_label(spec) + ": cached" + slice_done(p.id, tool, entry));
-            return out;
-        }
-        // damaged (by an older otok, or by hand): removed and built again (cache.md 6.2)
-        say("warning: " + result.error().message + "; building it again");
-        auto gone = cache_.discard(out.entry, "removing the damaged " + label + " for " + slice_label(spec),
-            [](fs::path const& entry) { return !read_result(entry); });
-        if (!gone) return std::unexpected{gone.error()};
-    }
+    if (tools) slice.tools_prefix = builds_drive_.empty() ? tools->entry / "prefix" : virtual_drives::to_virtual(tools->entry / "prefix");
 
     // on a terminal the slice is shown below the lines while it builds (docs/PLAN.md decision 59); with -vv this heads its output
     report_slice(slice_event::kind::building, 0);
@@ -1879,6 +2291,16 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
             auto const r = inputs.resources.find(res.name);
             if (r == inputs.resources.end()) return failed("the resource '" + res.name + "' was not fetched");
             if (!res.dest) {
+                // a working tree of otok.dev.toml: a copy in the work directory, which the sandbox reads, the user's tree being
+                // closed to it
+                if (dev && inputs.dev->resources.contains(res.name)) {
+                    fs::path const copy = base / "resources" / path_from_utf8(res.name);
+                    if (auto ok = copy_working_tree(settings_.git, r->second, copy, log); !ok) {
+                        return failed("cannot copy the resource '" + res.name + "': " + ok.error().message);
+                    }
+                    resources.emplace(res.name, copy);
+                    continue;
+                }
                 resources.emplace(res.name, builds_drive_.empty() ? r->second : virtual_drives::to_virtual(r->second));
                 continue;
             }
@@ -2129,9 +2551,10 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
             }
             slice.meson_file = base / "meson.ini";
             auto const pkg_config = slice.toolchains.find("pkg-config");
-            write_if_changed(slice.meson_file,
-                meson_machine_file(slice.toolchain, profile->meson_host, pkg_config == slice.toolchains.end() ? "" : path_to_utf8(pkg_config->second),
-                    profile->meson_binaries));
+            auto const machine_file = meson_machine_file(slice.toolchain, profile->meson_host,
+                pkg_config == slice.toolchains.end() ? "" : path_to_utf8(pkg_config->second), profile->meson_binaries);
+            if (!machine_file) return failed(machine_file.error().message);
+            write_if_changed(slice.meson_file, *machine_file);
             slice.meson_cross = !profile->meson_host.empty();
             if (auto const system = profile->meson_host.find("system"); system != profile->meson_host.end()) slice.meson_system = system->second;
             slice.meson_options = profile->meson_options;
@@ -2410,6 +2833,15 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         if (ec) return failed("cannot move the prefix into the cache: " + ec.message());
         std::ofstream{long_path(staging / "result.toml"), std::ios::binary} << *result_text;
         std::ofstream{long_path(staging / "key.txt"), std::ios::binary} << text;
+        // the license files, so that packaging needs no source (cache.md 7.1, 12)
+        fs::create_directories(long_path(staging / "licenses"), ec);
+        for (license_entry const& file : rec.license_files) {
+            fs::path const to = staging / "licenses" / path_from_utf8(file.path);
+            fs::create_directories(long_path(to.parent_path()), ec);
+            fs::path const from = (file.in_recipe ? inputs.recipe_dir : inputs.source) / path_from_utf8(file.path);
+            fs::copy_file(long_path(from), long_path(to), fs::copy_options::overwrite_existing, ec);
+            if (ec) return failed("cannot copy the license file '" + file.path + "': " + ec.message());
+        }
         follow.reset();
         fs::copy_file(long_path(log), long_path(staging / "build.log"), ec);
         fs::remove_all(long_path(work), ec);
@@ -2442,6 +2874,17 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
     report_slice(slice_event::kind::built, took.count());
     say("built " + label + " for " + slice_label(spec) + (dev ? " (dev: " + inputs.dev->label + ")" : std::string{}) + " (" + seconds + " s)"
         + slice_done(p.id, tool, entry));
+    // to the stores that take it (cache.md 12.3): never a dev slice or one depending on a dev slice, whose key the plan
+    // could not know
+    if (!dev && !settings_.stores.empty()) {
+        std::string const own = headers ? headers_slice_id(p.id) : slice_id(p.id, tool, spec, entry);
+        std::optional<dependency_key> mine;
+        {
+            std::lock_guard lock{mutex_};
+            if (auto const it = planned_.find(own); it != planned_.end()) mine = it->second;
+        }
+        if (mine && mine->known && mine->key == hex) push_to_stores(hex, out.entry, mine->local, label + " for " + slice_label(spec));
+    }
     return out;
 }
 

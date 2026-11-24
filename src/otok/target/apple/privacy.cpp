@@ -43,13 +43,23 @@ category = "NSPrivacyAccessedAPICategoryUserDefaults"
 classes = ["NSUserDefaults"]
 )";
 
-// A value of an XML property list: what the check reads of it.
+struct plist_entry;
+
+// A value of an XML property list: what the check reads of it. Its entries are no std::pair holding it: a pair of an
+// incomplete type is not allowed, and clang with libstdc++ 15 refuses it where result<plist_value> asks whether the
+// value can be constructed (a vector of one is allowed).
 struct plist_value
 {
     enum class kind { dict, array, string, other } type = kind::other;
     std::string text;
-    std::vector<std::pair<std::string, plist_value>> entries;
-    std::vector<plist_value> items;
+    std::vector<plist_entry> entries;  // of a dictionary
+    std::vector<plist_value> items;    // of an array
+};
+
+struct plist_entry
+{
+    std::string key;
+    plist_value value;
 };
 
 // A reader of XML property lists: elements, text with the five entities and character references,
@@ -206,7 +216,7 @@ private:
                 }
                 auto value = read_value();
                 if (!value) return value;
-                v.entries.emplace_back(std::move(name), std::move(*value));
+                v.entries.push_back({std::move(name), std::move(*value)});
             }
             if (auto ok = close_tag("dict"); !ok) return std::unexpected{ok.error()};
         } else if (t->name == "array") {

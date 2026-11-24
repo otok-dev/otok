@@ -109,8 +109,11 @@ The description has the form of 3, with the names:
 
 Directory names again use the first 32 hex digits. A package entry holds what the target's output
 generator made of the slices, laid out as it goes into the project, `licenses/` with the recipe's
-`license-files` copied from the source (whose hash is in the slice keys), `data/` with the files
-`build` returned as `data` (`build-lua-api.md` 8), and `key.txt`. For `linux`, `windows` and `android`
+`license-files` (whose source and recipe are in the slice keys), `data/` with the files
+`build` returned as `data` (`build-lua-api.md` 8), and `key.txt`. The license files come from `licenses/` of a slice
+entry of the package (`cache.md` 7.1), the same in each, or from the source for a slice entry of an earlier otok
+without it, so a package whose slices all come from a shared store (`cache.md` 12) needs no source. For `linux`,
+`windows` and `android`
 that is `include/`, `lib/`, `bin/` and `debug/` as each lays them out (`otok-toml.md` 4.1, 4.7, 4.8) and `otok-package.toml`
 naming their files (`otok-toml.md` 4.11), for Apple one XCFramework per library output name (and one of its headers for a dynamic library, `otok-toml.md` 4.10),
 `shims/`, `wrappers/` and `undefined-symbols/` (`otok-toml.md` 4, 4.4). Product `defines` and option values are written into
@@ -130,3 +133,7 @@ An entry is written to a temporary directory and renamed into place when complet
 build never leaves a half-written entry. Concurrent otok processes building the same key wait for
 each other through a lock file next to the entry. `otok clean` removes entries; garbage collection of
 entries unused for a long time is described with the cache module.
+
+Slice entries may come from the stores of an organization (`cache.md` 12), which hold them under the full 64 hex
+digits of the key. Since nothing machine-specific enters a key (5), a key computed on two machines names the same
+build; what makes a hit there likely is the same toolchains, whose versions are in the key (2).

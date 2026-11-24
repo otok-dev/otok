@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -54,6 +55,9 @@ struct http_exchange
     std::vector<std::string> headers;
     std::string body;
     std::size_t max_body = static_cast<std::size_t>(-1);  // a longer reply stops there: truncated
+    std::filesystem::path upload{};     // the body read from this file instead (a PUT of a large file); empty: `body`
+    std::filesystem::path download{};   // the reply's body written to this file instead, whatever its status; empty: in the reply
+    bool follow_redirects = true;       // false: a redirect is the reply (a PUT must not be sent elsewhere)
 };
 
 struct http_reply
@@ -85,5 +89,9 @@ std::span<std::filesystem::path const> known_ca_bundles();
 
 // `file:///C:/dir/a%20b.tar.gz` for a local path (tests, `file://` sources of local recipes).
 std::string file_url(std::filesystem::path const& path);
+
+// The path of a `file:` URL of this machine (`file:///C:/dir/a%20b`, `file://localhost/srv/x`), percent-decoded; nothing for
+// another URL, one naming another host or a bad escape.
+std::optional<std::filesystem::path> file_url_path(std::string_view url);
 
 }

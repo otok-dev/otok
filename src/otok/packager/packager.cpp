@@ -355,10 +355,22 @@ result<std::vector<packaged>> package_all(resolution const& r, std::size_t confi
                     if (ec) return fail("cannot create '" + slashed(staging) + "': " + ec.message());
                     if (auto ok = target->make_package(mine, rec, pk.products, staging); !ok) return fail("packaging " + label + ": " + ok.error().message);
                     if (auto ok = package_data(mine.slices, staging / "data"); !ok) return fail("packaging " + label + ": " + ok.error().message);
+                    // from licenses/ of a slice entry, the same in each (cache.md 7.1); a slice of an earlier otok has none, and
+                    // its package's source was fetched for them
+                    fs::path licensed;
+                    for (built_slice const& s : mine.slices) {
+                        if (fs::is_directory(long_path(s.entry / "licenses"), ec)) {
+                            licensed = s.entry / "licenses";
+                            break;
+                        }
+                    }
                     for (license_entry const& file : rec.license_files) {
                         fs::path const to = staging / "licenses" / path_from_utf8(file.path);
                         fs::create_directories(long_path(to.parent_path()), ec);
-                        fs::path const from = (file.in_recipe ? bp.recipe_dir : bp.source) / path_from_utf8(file.path);
+                        if (licensed.empty() && !file.in_recipe && bp.source.empty()) {
+                            return fail("packaging " + label + ": the source with the license file '" + file.path + "' was not fetched");
+                        }
+                        fs::path const from = (!licensed.empty() ? licensed : file.in_recipe ? bp.recipe_dir : bp.source) / path_from_utf8(file.path);
                         fs::copy_file(long_path(from), long_path(to), fs::copy_options::overwrite_existing, ec);
                         if (ec) return fail("packaging " + label + ": cannot copy the license file '" + file.path + "': " + ec.message());
                     }

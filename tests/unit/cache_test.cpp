@@ -11,6 +11,7 @@
 #include <cwctype>
 #include <fstream>
 #include <future>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -19,7 +20,10 @@
 #include <archive.h>
 #include <archive_entry.h>
 
+#include "otok/cache/shared.hpp"
 #include "otok/cache/store.hpp"
+#include "otok/core/build_info.hpp"
+#include "otok/fetch/archive.hpp"
 #include "otok/core/file_lock.hpp"
 #include "otok/core/fs.hpp"
 #include "otok/core/process.hpp"
@@ -952,4 +956,245 @@ TEST(cache, collects_unused_entries)
     auto everything = cache.collect_garbage({}, 0, false);
     ASSERT_TRUE(everything) << everything.error().message;
     EXPECT_EQ(everything->entries, fresh.size());
+}
+
+// The shared build cache (cache.md 12): the archive of a slice entry, the descriptors, a directory store.
+namespace {
+
+// A slice entry as the builder leaves it, build.log too.
+void write_slice_entry(test::temp_dir const& dir, std::string const& key_text)
+{
+    dir.write("entry/key.txt", key_text);
+    dir.write("entry/result.toml", "headers = \"include\"\n");
+    dir.write("entry/prefix/include/z.h", "int z;\n");
+    dir.write("entry/prefix/lib/libz.a", "!<arch>\n");
+    dir.write("entry/licenses/LICENSE", "The license.\n");
+    dir.write("entry/build.log", "the log\n");
+}
+
+}
+
+TEST(shared_cache, entry_archives_are_the_same_for_the_same_entry)
+{
+    test::temp_dir dir;
+    write_slice_entry(dir, "library = z\n");
+    auto first = write_entry_archive(dir.path() / "entry", dir.path() / "1.tar.zst");
+    ASSERT_TRUE(first) << first.error().message;
+    // later times and another order of creation give the same bytes
+    std::filesystem::last_write_time(dir.path() / "entry" / "prefix" / "lib" / "libz.a", std::filesystem::file_time_type::clock::now());
+    auto second = write_entry_archive(dir.path() / "entry", dir.path() / "2.tar.zst");
+    ASSERT_TRUE(second) << second.error().message;
+    EXPECT_EQ(first->sha256, second->sha256);
+    EXPECT_EQ(first->size, std::filesystem::file_size(dir.path() / "1.tar.zst"));
+    EXPECT_EQ(sha256_file(dir.path() / "1.tar.zst").value_or("?"), first->sha256);
+
+    // what it holds: the entry without build.log, sorted, one time, no owners
+    std::vector<std::string> names;
+    std::unique_ptr<archive, decltype(&archive_read_free)> in{archive_read_new(), &archive_read_free};
+    archive_read_support_filter_zstd(in.get());
+    archive_read_support_format_tar(in.get());
+    ASSERT_EQ(archive_read_open_filename(in.get(), path_to_utf8(dir.path() / "1.tar.zst").c_str(), 16384), ARCHIVE_OK);
+    archive_entry* entry = nullptr;
+    while (archive_read_next_header(in.get(), &entry) == ARCHIVE_OK) {
+        names.push_back(archive_entry_pathname(entry));
+        EXPECT_EQ(archive_entry_mtime(entry), archive_time);
+        EXPECT_EQ(archive_entry_uid(entry), 0);
+        char const* const owner = archive_entry_uname(entry);
+        EXPECT_EQ(std::string{owner ? owner : ""}, "");
+        EXPECT_EQ(archive_entry_perm(entry), archive_entry_filetype(entry) == AE_IFDIR ? 0755 : 0644);
+    }
+    EXPECT_EQ(names, (std::vector<std::string>{"key.txt", "licenses/", "licenses/LICENSE", "prefix/", "prefix/include/", "prefix/include/z.h",
+        "prefix/lib/", "prefix/lib/libz.a", "result.toml"}));
+
+    // unpacked again: checked against the key its key.txt hashes to
+    auto const key = sha256_hex("library = z\n");
+    auto unpacked = unpack_entry_archive(dir.path() / "1.tar.zst", dir.path() / "back", key);
+    ASSERT_TRUE(unpacked) << unpacked.error().message;
+    EXPECT_EQ(read_file(dir.path() / "back" / "prefix" / "include" / "z.h").value_or("?"), "int z;\n");
+    EXPECT_FALSE(std::filesystem::exists(dir.path() / "back" / "build.log"));
+    auto wrong = unpack_entry_archive(dir.path() / "1.tar.zst", dir.path() / "wrong", sha256_hex("library = y\n"));
+    ASSERT_FALSE(wrong);
+    EXPECT_NE(wrong.error().message.find("the key.txt of the archive is not that of the slice"), std::string::npos) << wrong.error().message;
+    EXPECT_FALSE(std::filesystem::exists(dir.path() / "wrong"));
+}
+
+TEST(shared_cache, descriptors)
+{
+    entry_descriptor d{std::string(64, 'b'), 42, "ci", "build-07", "0.6.0", "2026-11-24T10:15:00Z"};
+    std::string const text = descriptor_text(d);
+    EXPECT_EQ(text, "format = 1\narchive = \"" + std::string(64, 'b') + "\"\nsize = 42\npushed-by = \"ci\"\nmachine = \"build-07\"\notok = \"0.6.0\"\n"
+        "time = 2026-11-24T10:15:00Z\n");
+    auto back = read_descriptor(text + "later = \"a key of a newer otok\"\n", "ac/x");
+    ASSERT_TRUE(back) << back.error().message;
+    EXPECT_EQ(back->archive, d.archive);
+    EXPECT_EQ(back->size, 42u);
+    EXPECT_EQ(back->pushed_by, "ci");
+    EXPECT_EQ(back->machine, "build-07");
+    EXPECT_EQ(back->time, "2026-11-24T10:15:00Z");
+
+    auto newer = read_descriptor("format = 2\n", "ac/x");
+    ASSERT_FALSE(newer);
+    EXPECT_EQ(newer.error().message, "the descriptor ac/x has the format 2, which this otok does not read");
+    auto bad = read_descriptor("format = 1\narchive = \"abc\"\nsize = 1\n", "ac/x");
+    ASSERT_FALSE(bad);
+    EXPECT_EQ(bad.error().message, "the descriptor ac/x has no 'archive' of 64 hex digits");
+}
+
+TEST(shared_cache, directory_store)
+{
+    test::temp_dir dir, root;
+    write_slice_entry(dir, "library = z\n");
+    std::string const key = sha256_hex("library = z\n");
+    std::string const url = file_url(root.path());
+    auto store = shared_store::open(url);
+    ASSERT_TRUE(store) << store.error().message;
+    EXPECT_EQ(store->url(), url);
+    auto missing = store->lookup(key);
+    ASSERT_TRUE(missing) << missing.error().message;
+    EXPECT_FALSE(missing->has_value());
+
+    auto archive = write_entry_archive(dir.path() / "entry", dir.path() / "a.tar.zst");
+    ASSERT_TRUE(archive) << archive.error().message;
+    entry_descriptor const d = describe_push(*archive, "me");
+    EXPECT_EQ(d.otok, std::string{build_info::version});
+    auto pushed = store->push(key, dir.path() / "a.tar.zst", d);
+    ASSERT_TRUE(pushed) << pushed.error().message;
+    EXPECT_TRUE(pushed->added);
+    EXPECT_TRUE(std::filesystem::exists(root.path() / "cas" / archive->sha256));
+    EXPECT_TRUE(std::filesystem::is_empty(root.path() / "tmp"));
+    // again: there already, the same contents
+    pushed = store->push(key, dir.path() / "a.tar.zst", d);
+    ASSERT_TRUE(pushed) << pushed.error().message;
+    EXPECT_FALSE(pushed->added);
+    EXPECT_FALSE(pushed->other.has_value());
+    // other contents under the key: told, the first push staying
+    entry_descriptor other = d;
+    other.archive = std::string(64, 'c');
+    dir.write("other.tar.zst", "other");
+    pushed = store->push(key, dir.path() / "other.tar.zst", other);
+    ASSERT_TRUE(pushed) << pushed.error().message;
+    ASSERT_TRUE(pushed->other.has_value());
+    EXPECT_EQ(pushed->other->archive, archive->sha256);
+
+    auto found = store->lookup(key);
+    ASSERT_TRUE(found && found->has_value());
+    EXPECT_EQ((*found)->archive, archive->sha256);
+    EXPECT_EQ((*found)->pushed_by, "me");
+    auto got = store->download(**found, dir.path() / "got.tar.zst");
+    ASSERT_TRUE(got) << got.error().message;
+    EXPECT_EQ(sha256_file(dir.path() / "got.tar.zst").value_or("?"), archive->sha256);
+    // a damaged archive is not taken
+    dir.write("junk", "junk");
+    std::filesystem::copy_file(dir.path() / "junk", root.path() / "cas" / archive->sha256, std::filesystem::copy_options::overwrite_existing);
+    auto damaged = store->download(**found, dir.path() / "bad.tar.zst");
+    ASSERT_FALSE(damaged);
+    EXPECT_NE(damaged.error().message.find("does not have the SHA-256 and size its descriptor names"), std::string::npos) << damaged.error().message;
+    EXPECT_FALSE(std::filesystem::exists(dir.path() / "bad.tar.zst"));
+
+    // only directories of this machine
+    auto none = shared_store::open(file_url(root.path() / "none"));
+    ASSERT_FALSE(none);
+    EXPECT_NE(none.error().message.find("is not a directory"), std::string::npos) << none.error().message;
+}
+
+TEST(shared_cache, file_url_paths)
+{
+    test::temp_dir dir;
+    auto const back = file_url_path(file_url(dir.path() / "a b%"));
+    ASSERT_TRUE(back.has_value());
+    EXPECT_EQ(*back, std::filesystem::absolute(dir.path() / "a b%"));
+    EXPECT_EQ(file_url_path("file://localhost/srv/x"), std::optional{path_from_utf8("/srv/x")});
+    EXPECT_EQ(file_url_path("file:///C:/dir"), std::optional{path_from_utf8("C:/dir")});
+    EXPECT_FALSE(file_url_path("file://host/share").has_value());
+    EXPECT_FALSE(file_url_path("file:///a%2").has_value());
+    EXPECT_FALSE(file_url_path("https://x/y").has_value());
+}
+
+TEST(shared_cache, files_move_once)
+{
+    test::temp_dir dir;
+    dir.write("first", "1");
+    dir.write("second", "2");
+    auto moved = move_file_if_absent(dir.path() / "first", dir.path() / "name");
+    ASSERT_TRUE(moved) << moved.error().message;
+    EXPECT_TRUE(*moved);
+    EXPECT_FALSE(std::filesystem::exists(dir.path() / "first"));
+    moved = move_file_if_absent(dir.path() / "second", dir.path() / "name");
+    ASSERT_TRUE(moved) << moved.error().message;
+    EXPECT_FALSE(*moved);
+    EXPECT_EQ(read_file(dir.path() / "name").value_or("?"), "1");
+    EXPECT_TRUE(std::filesystem::exists(dir.path() / "second"));
+}
+
+// An HTTP store (cache.md 12.4): GET, HEAD and PUT with If-None-Match: *, the bearer token, a store that fails asked no more
+TEST(shared_cache, http_store)
+{
+    test::temp_dir dir;
+    write_slice_entry(dir, "library = z\n");
+    std::string const key = sha256_hex("library = z\n");
+    test::fake_http_store server{"https://cache.example.com/team", "secret"};
+    auto store = shared_store::open("https://cache.example.com/team/", "secret", server.transport());
+    ASSERT_TRUE(store) << store.error().message;
+    auto missing = store->lookup(key);
+    ASSERT_TRUE(missing) << missing.error().message;
+    EXPECT_FALSE(missing->has_value());
+
+    auto archive = write_entry_archive(dir.path() / "entry", dir.path() / "a.tar.zst");
+    ASSERT_TRUE(archive) << archive.error().message;
+    entry_descriptor const d = describe_push(*archive, "me");
+    auto pushed = store->push(key, dir.path() / "a.tar.zst", d);
+    ASSERT_TRUE(pushed) << pushed.error().message;
+    EXPECT_TRUE(pushed->added);
+    auto files = server.files();
+    EXPECT_EQ(files["cas/" + archive->sha256], read_file(dir.path() / "a.tar.zst").value_or("?"));
+    EXPECT_EQ(files["ac/" + key], descriptor_text(d));
+    EXPECT_FALSE(std::filesystem::exists(dir.path() / "a.tar.zst.ac"));
+
+    // again: the descriptor there, nothing sent; other contents told
+    std::size_t const before = server.requests().size();
+    pushed = store->push(key, dir.path() / "a.tar.zst", d);
+    ASSERT_TRUE(pushed) << pushed.error().message;
+    EXPECT_FALSE(pushed->added);
+    EXPECT_EQ(server.requests().size(), before + 1);  // its GET alone
+    entry_descriptor other = d;
+    other.archive = std::string(64, 'c');
+    pushed = store->push(key, dir.path() / "a.tar.zst", other);
+    ASSERT_TRUE(pushed && pushed->other.has_value());
+    EXPECT_EQ(pushed->other->archive, archive->sha256);
+
+    // an archive there already is not sent again
+    std::string const second = sha256_hex("library = y\n");
+    pushed = store->push(second, dir.path() / "a.tar.zst", d);
+    ASSERT_TRUE(pushed) << pushed.error().message;
+    auto const requests = server.requests();
+    EXPECT_EQ(std::ranges::count(requests, "PUT https://cache.example.com/team/cas/" + archive->sha256), 1);
+    EXPECT_EQ(std::ranges::count(requests, "PUT https://cache.example.com/team/ac/" + second), 1);
+
+    auto found = store->lookup(key);
+    ASSERT_TRUE(found && found->has_value());
+    auto got = store->download(**found, dir.path() / "got.tar.zst");
+    ASSERT_TRUE(got) << got.error().message;
+    EXPECT_EQ(sha256_file(dir.path() / "got.tar.zst").value_or("?"), archive->sha256);
+    server.set("cas/" + archive->sha256, "junk");
+    auto damaged = store->download(**found, dir.path() / "bad.tar.zst");
+    ASSERT_FALSE(damaged);
+    EXPECT_NE(damaged.error().message.find("does not have the SHA-256 and size its descriptor names"), std::string::npos) << damaged.error().message;
+
+    // without the token: refused, and the store asked no more in this command
+    auto anonymous = shared_store::open("https://cache.example.com/team", "", server.transport());
+    ASSERT_TRUE(anonymous);
+    auto refused = anonymous->lookup(key);
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().message, "the build cache 'https://cache.example.com/team': GET ac/" + key
+        + ": HTTP status 401; it is not asked again in this command");
+    auto quiet = anonymous->lookup(key);
+    ASSERT_TRUE(quiet) << quiet.error().message;
+    EXPECT_FALSE(quiet->has_value());
+    // a server that cannot be reached: the same; the token is in no message
+    server.set_failing(true);
+    auto unreachable = shared_store::open("https://cache.example.com/team", "secret", server.transport());
+    auto failed = unreachable->lookup(key);
+    ASSERT_FALSE(failed);
+    EXPECT_NE(failed.error().message.find("connection refused; it is not asked again in this command"), std::string::npos) << failed.error().message;
+    EXPECT_EQ(failed.error().message.find("secret"), std::string::npos);
 }

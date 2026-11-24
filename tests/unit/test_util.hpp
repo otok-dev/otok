@@ -6,7 +6,11 @@
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <algorithm>
 #include <fstream>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <string>
@@ -211,5 +215,81 @@ inline http_reply http_answer(long status, std::string body)
     reply.body = std::move(body);
     return reply;
 }
+
+
+// An HTTP store of the shared build cache in memory (cache.md 12.4): GET, HEAD and PUT with If-None-Match: * of the paths
+// under `base`, answered only with the bearer `token` when it has one. Shared by the copies of its transport.
+class fake_http_store
+{
+public:
+    explicit fake_http_store(std::string base, std::string token = {}) : state_{std::make_shared<state>()}
+    {
+        state_->base = std::move(base);
+        state_->token = std::move(token);
+    }
+
+    http_transport transport() const
+    {
+        return [s = state_](http_exchange const& e) -> result<http_reply> {
+            std::lock_guard lock{s->m};
+            s->requests.push_back(e.method + " " + e.url);
+            if (s->failing) return fail("connection refused");
+            if (!e.url.starts_with(s->base + "/")) return http_answer(404, "");
+            if (!s->token.empty() && std::ranges::find(e.headers, "Authorization: Bearer " + s->token) == e.headers.end()) return http_answer(401, "");
+            std::string const path = e.url.substr(s->base.size() + 1);
+            auto const it = s->files.find(path);
+            if (e.method == "GET" || e.method == "HEAD") {
+                if (it == s->files.end()) return http_answer(404, "");
+                if (e.method == "HEAD") return http_answer(200, "");
+                if (!e.download.empty()) {
+                    std::ofstream{e.download, std::ios::binary} << it->second;
+                    return http_answer(200, "");
+                }
+                return http_answer(200, it->second);
+            }
+            if (e.method == "PUT") {
+                bool const only_new = std::ranges::find(e.headers, "If-None-Match: *") != e.headers.end();
+                if (only_new && it != s->files.end()) return http_answer(412, "");
+                std::string body = e.body;
+                if (!e.upload.empty()) body = read_file(e.upload).value_or("");
+                s->files[path] = std::move(body);
+                return http_answer(201, "");
+            }
+            return http_answer(405, "");
+        };
+    }
+
+    std::map<std::string, std::string> files() const
+    {
+        std::lock_guard lock{state_->m};
+        return state_->files;
+    }
+    void set(std::string const& path, std::string content)
+    {
+        std::lock_guard lock{state_->m};
+        state_->files[path] = std::move(content);
+    }
+    std::vector<std::string> requests() const
+    {
+        std::lock_guard lock{state_->m};
+        return state_->requests;
+    }
+    void set_failing(bool failing)
+    {
+        std::lock_guard lock{state_->m};
+        state_->failing = failing;
+    }
+
+private:
+    struct state
+    {
+        std::mutex m;
+        std::string base, token;
+        std::map<std::string, std::string> files;
+        std::vector<std::string> requests;
+        bool failing = false;
+    };
+    std::shared_ptr<state> state_;
+};
 
 }

@@ -176,6 +176,8 @@ option_spec const jobs_option{"jobs", 'j', "N", "Run at most N jobs at once (ove
 option_spec const no_dev_option{"no-dev", 0, "", "Build what otok.lock says, ignoring the working trees of otok.dev.toml"};
 option_spec const drop_option{"drop", 0, "SYSTEM,...", "Resolve the project for machines of these systems no longer (windows, linux, macos): remove their graphs from otok.lock"};
 option_spec const no_build_option{"no-build", 0, "", "Resolve and write otok.lock only: fetch and build nothing"};
+// The shared build cache (cache.md 12).
+option_spec const no_build_cache_option{"no-build-cache", 0, "", "Use the local cache only, not the stores of the shared build cache of config.toml"};
 
 // The flags of reproducible runs (DESIGN 5.4).
 bool offline(parsed_command const& cmd)
@@ -861,24 +863,30 @@ bool is_override(locked_location const& l)
     return l.type == locked_location::kind::path || l.type == locked_location::kind::local;
 }
 
-// Fetches the sources and resources of the packages the selected configuration builds, or of every
-// package with `everything`, and checks their local sources whose hash `lock` kept from `previous`
-// (make_lock). Where each package's inputs are (package_key → inputs), or nothing after an error.
-std::optional<std::map<std::string, package_inputs>> fetch_project_inputs(project& p, lock_file const& lock, lock_file const* previous,
-    std::span<std::string const> rehash, bool everything, command_context& ctx, diagnostics& diags)
+// The inputs of the packages a command builds: where each is, its recipe's directory and its local source given, the
+// requests for what is fetched made, nothing fetched yet (cache.md 12.2: the slices found in a cache need none).
+struct project_inputs
 {
+    std::map<std::string, package_inputs> inputs;               // package key → its inputs
     std::vector<input_request> requests;
-    std::map<std::string, package_inputs> inputs;
-    // where the fetched paths go: the request's index → (package, resource name; empty: the source)
-    std::vector<std::pair<std::string, std::string>> targets;
+    std::vector<std::pair<std::string, std::string>> targets;   // per request: the package key, the resource (empty: the source)
     std::map<std::string, std::pair<std::string, recipe const*>> licensed;  // package key → label, recipe
+    bool fetched = false;                                       // all of them fetched already
+};
+
+// The inputs of the packages the selected configuration builds, or of every package with `everything`; checks their local
+// sources whose hash `lock` kept from `previous` (make_lock). Nothing after an error.
+std::optional<project_inputs> plan_project_inputs(project& p, lock_file const& lock, lock_file const* previous, std::span<std::string const> rehash,
+    bool everything, command_context& ctx, diagnostics& diags)
+{
+    project_inputs out;
     auto const add = [&](resolved_package const& pkg, locked_package const* locked, bool tool) {
         if (!locked || (!everything && pkg.configurations[p.configuration].platforms.empty())) return;
         std::string const name = (tool ? "tool " : "") + package_label(pkg, tool, p.built().tool_packages);
         std::string const key = package_key(pkg.id, tool);
-        package_inputs& in = inputs[key];
+        package_inputs& in = out.inputs[key];
         in.recipe_dir = pkg.chosen.dir;
-        licensed[key] = {name, pkg.chosen.recipe.get()};
+        out.licensed[key] = {name, pkg.chosen.recipe.get()};
         // otok.dev.toml: its working trees instead of the locked inputs, fetched nothing (otok-dev-toml.md 2); a source
         // of otok.toml it replaces is not built, nor checked
         dev_library const* const dev = p.dev.find(pkg.library);
@@ -907,8 +915,8 @@ std::optional<std::map<std::string, package_inputs>> fetch_project_inputs(projec
             dependency const* entry = tool ? p.m.find_tool_dep(pkg.library) : p.m.find_dep(pkg.library);
             if (entry && entry->source_path) in.source = (ctx.project_dir / path_from_utf8(*entry->source_path)).lexically_normal();
         } else {
-            requests.push_back({name + " source", locked->source, true, pkg.library});
-            targets.emplace_back(key, std::string{});
+            out.requests.push_back({name + " source", locked->source, true, pkg.library});
+            out.targets.emplace_back(key, std::string{});
         }
         for (locked_resource const& res : locked->resources) {
             if (dev && dev->resources.contains(res.name)) continue;
@@ -923,28 +931,45 @@ std::optional<std::map<std::string, package_inputs>> fetch_project_inputs(projec
                 }
                 if (!needed) continue;
             }
-            requests.push_back({name + " resource " + in_quotes(res.name), res.location, it == declared.end() || it->unpack, pkg.library});
-            targets.emplace_back(key, res.name);
+            out.requests.push_back({name + " resource " + in_quotes(res.name), res.location, it == declared.end() || it->unpack, pkg.library});
+            out.targets.emplace_back(key, res.name);
         }
     };
     // the recipes of otok.dev.toml, when it names any: their directories and resources (otok-dev-toml.md 3)
     for (resolved_package const& pkg : p.built().packages) add(pkg, locked_entry(lock, p.built(), pkg, false), false);
     for (resolved_package const& pkg : p.built().tool_packages) add(pkg, locked_entry(lock, p.built(), pkg, true), true);
+    if (diags.has_errors()) return std::nullopt;
+    return out;
+}
 
+// Fetches the planned inputs of the packages `only` names (package keys), or of all, into `into`; says how many are in the
+// cache now. False after an error.
+bool fetch_planned_inputs(project& p, project_inputs const& planned, std::set<std::string> const* only, std::map<std::string, package_inputs>& into,
+    command_context& ctx, diagnostics& diags)
+{
+    std::vector<input_request> requests;
+    std::vector<std::pair<std::string, std::string>> targets;
+    for (std::size_t i = 0; i < planned.requests.size(); ++i) {
+        if (only && !only->contains(planned.targets[i].first)) continue;
+        requests.push_back(planned.requests[i]);
+        targets.push_back(planned.targets[i]);
+    }
     http_settings settings;
     settings.proxy = p.config.proxy;
     auto const results = fetch_inputs(*p.cache, requests, settings, p.git ? &*p.git : nullptr);
+    std::size_t const errors_before = diags.error_count();
     for (std::size_t i = 0; i < results.size(); ++i) {
         if (!results[i]) {
             diags.error({}, results[i].error().message);
             continue;
         }
         auto const& [key, resource] = targets[i];
-        (resource.empty() ? inputs[key].source : inputs[key].resources[resource]) = *results[i];
+        (resource.empty() ? into[key].source : into[key].resources[resource]) = *results[i];
     }
     // recipe-toml.md 16: the license files exist in the source
-    for (auto const& [key, named] : licensed) {
-        std::filesystem::path const& source = inputs[key].source;
+    for (auto const& [key, named] : planned.licensed) {
+        if (only && !only->contains(key)) continue;
+        std::filesystem::path const& source = into[key].source;
         if (source.empty()) continue;
         for (license_entry const& file : named.second->license_files) {
             if (file.in_recipe) continue;  // checked with the recipe
@@ -954,14 +979,14 @@ std::optional<std::map<std::string, package_inputs>> fetch_project_inputs(projec
             }
         }
     }
-    if (diags.has_errors()) return std::nullopt;
+    if (diags.error_count() != errors_before) return false;
     std::size_t const sources = std::ranges::count_if(targets, [](auto const& t) { return t.second.empty(); });
     auto const counted = [](std::size_t n, std::string const& what) { return std::to_string(n) + " " + what + (n == 1 ? "" : "s"); };
     std::string summary = sources ? counted(sources, "source") : std::string{};
     if (std::size_t const resources = targets.size() - sources) summary += (summary.empty() ? "" : ", ") + counted(resources, "resource");
     if (ctx.events) emit(ctx, "inputs", {{"sources", sources}, {"resources", targets.size() - sources}});
     else ctx.out << (requests.empty() ? std::string{"no inputs to fetch"} : "inputs in the cache: " + summary) << "\n";
-    return inputs;
+    return true;
 }
 
 // The target tables of the project this machine does not build (docs/PLAN.md decision 100): target → why.
@@ -1093,9 +1118,183 @@ bool deliver_tools(project const& p, manifest const& built_m, std::span<built_pa
     return true;
 }
 
+// What otok cache does with the slices of the project (cache.md 12.3); none: install, update and fetch.
+enum class cache_action
+{
+    none,
+    status,
+    push
+};
+
+// The stores of the shared build cache a build of this command asks (cache.md 12.2): none offline, with --no-build-cache or
+// for otok publish, whose builds say that a recipe builds on this machine. A store that cannot be opened is a warning.
+std::vector<build_cache_use> open_build_caches(parsed_command const& cmd, project& p, command_context& ctx, std::string const& only = {})
+{
+    std::vector<build_cache_use> stores;
+    if (offline(cmd) || ctx.nested || cmd.flag("no-build-cache")) return stores;
+    std::vector<build_cache_store> configured = p.config.build_caches;
+    // otok cache push --store: that one, pushed to whatever config.toml says of it
+    if (!only.empty()) {
+        auto const it = std::ranges::find(configured, only, &build_cache_store::url);
+        build_cache_store named;
+        if (it != configured.end()) named = *it;
+        else named.url = only;
+        named.push = true;
+        configured = {named};
+    }
+    for (build_cache_store const& s : configured) {
+        std::string token = s.token;
+        if (token.empty() && !s.token_file.empty()) {
+            auto text = read_file(path_from_utf8(s.token_file));
+            if (!text) {
+                warn(ctx, "the build cache '" + s.url + "': cannot read its 'token-file': " + text.error().message);
+                continue;
+            }
+            token = std::move(*text);
+            while (!token.empty() && (token.back() == '\n' || token.back() == '\r')) token.pop_back();
+        }
+        auto store = shared_store::open(s.url, std::move(token), transport_of(ctx, p.config));
+        if (!store) {
+            warn(ctx, store.error().message + "; it is not used");
+            continue;
+        }
+        stores.push_back({std::move(*store), s.push, s.push_local});
+    }
+    return stores;
+}
+
+// The user named in the descriptors of pushes (cache.md 12.1).
+std::string push_user(command_context& ctx)
+{
+    for (char const* name : {"USER", "USERNAME", "LOGNAME"}) {
+        if (auto user = ctx.env(name); user && !user->empty()) return *user;
+    }
+    return {};
+}
+
+// otok cache status and otok cache push (cache.md 12.3): where each slice of the project's graphs would come from, and the
+// entries of the local cache uploaded. False after an error.
+bool cache_command(parsed_command const& cmd, project& p, lock_file const& lock, project_inputs planned, std::span<build_target* const> targets,
+    toolchain_choice toolchains, skipped_targets const& skipped, cache_action action, command_context& ctx, diagnostics& diags)
+{
+    namespace fs = std::filesystem;
+    manifest built_m = p.m;
+    std::erase_if(built_m.targets, [&](target_settings const& ts) { return skipped.contains(ts.target); });
+    std::string const named = cmd.value("store").value_or("");
+    if (action == cache_action::status && !named.empty()) {
+        diags.error({}, "--store is an option of 'otok cache push'");
+        return false;
+    }
+    std::vector<build_cache_use> stores = open_build_caches(cmd, p, ctx, named);
+    build_settings settings;
+    settings.toolchains = std::move(toolchains);
+    settings.tool_roots = ctx.tool_roots;
+    settings.configuration = p.configuration;
+    settings.jobs = p.config.jobs;
+    settings.git = p.git;
+    settings.stores = stores;
+    std::vector<located_slice> located;
+    settings.locate_only = &located;
+    {
+        builder b{p.built(), built_m, lock, ctx.project_dir, planned.inputs, targets, *p.cache, std::move(settings), ctx.err};
+        auto done = b.build_all();
+        if (!done) {
+            for (error const& e : done.error()) diags.error({}, e.message);
+            return false;
+        }
+    }
+    // the libraries asked for, or all
+    std::set<std::string> libraries{cmd.arguments.begin() + 1, cmd.arguments.end()};
+    for (std::string const& library : libraries) {
+        if (std::ranges::none_of(located, [&](located_slice const& l) { return l.library == library; })) {
+            diags.error({}, in_quotes(library) + " is not a dependency of this project, nor a tool of it");
+        }
+    }
+    if (diags.has_errors()) return false;
+    std::erase_if(located, [&](located_slice const& l) { return !libraries.empty() && !libraries.contains(l.library); });
+    auto const label = [](located_slice const& l) {
+        return (l.tool ? "tool " : "") + l.library + " " + l.version + (l.build_tools ? " (build_tools)" : "") + " " + slice_label(l.spec);
+    };
+
+    if (action == cache_action::status) {
+        std::size_t local = 0, stored = 0, built = 0;
+        std::set<fs::path> entries;  // the headers slice is every slice of its package (recipe-toml.md 11.3)
+        for (located_slice const& l : located) {
+            if (!l.key.empty() && !entries.insert(l.entry).second) continue;
+            std::string where;
+            switch (l.from) {
+            case located_slice::where::local:
+                ++local;
+                where = "in the local cache";
+                break;
+            case located_slice::where::store:
+                ++stored;
+                where = "in '" + l.store + "'";
+                break;
+            case located_slice::where::build:
+                ++built;
+                where = l.dev ? "to be built (dev)" : "to be built";
+                break;
+            }
+            ctx.out << label(l) << ": " << where << "\n";
+        }
+        ctx.out << "slices: " << local + stored + built << " (" << local << " in the local cache, " << stored << " in stores, " << built << " to be built)\n";
+        return true;
+    }
+
+    // push: what the local cache holds, to the stores that take it
+    if (std::ranges::none_of(stores, &build_cache_use::push)) {
+        diags.error({}, named.empty() ? "no store of the build cache takes pushes: set 'push = true' of one in config.toml (config.md 2.3), or give --store"
+                                      : "the build cache '" + named + "' cannot be used");
+        return false;
+    }
+    std::size_t pushed = 0, present = 0, left = 0;
+    std::set<std::string> keys;
+    std::string const user = push_user(ctx);
+    for (located_slice const& l : located) {
+        if (l.key.empty() || !keys.insert(l.key).second) continue;
+        if (l.from != located_slice::where::local || !l.licenses) {
+            ++left;
+            continue;
+        }
+        fs::path const archive = p.cache->tmp() / ("push-" + l.key.substr(0, 32) + ".tar.zst");
+        std::optional<archive_written> written;
+        for (build_cache_use const& s : stores) {
+            if (!s.push || (l.local_input && !s.push_local)) continue;
+            if (!written) {
+                auto made = write_entry_archive(l.entry, archive);
+                if (!made) {
+                    diags.error({}, "cannot push " + label(l) + ": " + made.error().message);
+                    break;
+                }
+                written = *made;
+            }
+            auto outcome = s.store.push(l.key, archive, describe_push(*written, user));
+            if (!outcome) {
+                diags.error({}, "cannot push " + label(l) + ": " + outcome.error().message);
+            } else if (outcome->other) {
+                warn(ctx, label(l) + " is in '" + s.store.url() + "' already with other contents (pushed by '" + outcome->other->pushed_by + "' from '"
+                    + outcome->other->machine + "'): its build is not reproducible; the first push stays");
+                ++present;
+            } else if (outcome->added) {
+                ctx.out << "pushed " << label(l) << " to '" << s.store.url() << "'\n";
+                ++pushed;
+            } else {
+                ++present;
+            }
+        }
+        if (!written) ++left;
+        std::error_code ec;
+        fs::remove(long_path(archive), ec);
+    }
+    ctx.out << "pushed: " << pushed << ", in the stores already: " << present << ", not pushed: " << left
+            << " (not in the local cache, made by an earlier otok, dev, or of a path of this machine without 'push-local')\n";
+    return !diags.has_errors();
+}
+
 // Builds the selected configuration (docs/PLAN.md decision 19) with the targets of project_targets, for the target tables
 // not in `skipped` (decision 100): the outputs of those are left as they are. False after an error.
-bool build_project(parsed_command const& cmd, project& p, lock_file const& lock, std::map<std::string, package_inputs> inputs,
+bool build_project(parsed_command const& cmd, project& p, lock_file const& lock, project_inputs planned,
     std::span<build_target* const> targets, toolchain_choice toolchains, skipped_targets const& skipped, command_context& ctx,
     diagnostics& diags)
 {
@@ -1143,6 +1342,18 @@ bool build_project(parsed_command const& cmd, project& p, lock_file const& lock,
     settings.virtual_paths = p.config.virtual_paths && !cmd.flag("no-virtual-paths");
     if (auto home = ctx.env("HOME"); home && !home->empty()) settings.denied_reads.push_back(path_from_utf8(*home));
     settings.launcher = ctx.launcher;
+    // the stores of the shared build cache (cache.md 12), and the inputs of the slices built here alone (cache.md 12.2)
+    settings.stores = open_build_caches(cmd, p, ctx);
+    settings.pushed_by = push_user(ctx);
+    if (!planned.fetched) settings.fetch = [&](std::set<std::string> const& only, std::map<std::string, package_inputs>& into) -> result<void> {
+        diagnostics fetched;
+        if (fetch_planned_inputs(p, planned, &only, into, ctx, fetched)) return {};
+        std::string message;
+        for (diagnostic const& d : fetched.items()) {
+            if (d.level == severity::error) message += (message.empty() ? "" : "\n") + d.message;
+        }
+        return fail(message);
+    };
     // the slices under way below the lines on a terminal (docs/PLAN.md decision 59): whatever is written to ctx.err
     // meanwhile goes above them, line by line
     std::expected<std::vector<built_package>, std::vector<error>> built;
@@ -1157,6 +1368,7 @@ bool build_project(parsed_command const& cmd, project& p, lock_file const& lock,
                 {"tool", e.tool}, {"build-tools", e.build_tools}, {"slice", slice_name(e.spec)}, {"configuration", e.spec.configuration},
                 {"seconds", e.state == k::built || failed ? nlohmann::json(std::round(e.seconds * 10) / 10) : nlohmann::json(nullptr)},
                 {"dev", e.dev.empty() ? nlohmann::json(nullptr) : nlohmann::json(e.dev)},
+                {"from", e.from.empty() ? nlohmann::json(nullptr) : nlohmann::json(e.from)},
                 {"message", failed ? nlohmann::json(e.message) : nlohmann::json(nullptr)},
                 {"log", failed && !e.log.empty() ? nlohmann::json(absolute_path(e.log)) : nlohmann::json(nullptr)},
                 {"hint", failed && !e.hint.empty() ? nlohmann::json(e.hint.starts_with("hint: ") ? e.hint.substr(6) : e.hint) : nlohmann::json(nullptr)}});
@@ -1165,7 +1377,7 @@ bool build_project(parsed_command const& cmd, project& p, lock_file const& lock,
     if (ctx.display) {
         // the command running this build shows it, and ctx.err reaches its display already (docs/PLAN.md decision 60)
         if (ctx.display->live()) settings.display = ctx.display;
-        builder b{p.built(), built_m, lock, ctx.project_dir, std::move(inputs), targets, *p.cache, std::move(settings), ctx.err};
+        builder b{p.built(), built_m, lock, ctx.project_dir, planned.inputs, targets, *p.cache, std::move(settings), ctx.err};
         built = b.build_all();
     } else {
         std::optional<progress_display::terminal> live;
@@ -1179,7 +1391,7 @@ bool build_project(parsed_command const& cmd, project& p, lock_file const& lock,
             std::streambuf* buffer;
             ~restore() { stream.rdbuf(buffer); }
         } const restored{ctx.err, display.live() ? ctx.err.rdbuf(&display.lines()) : ctx.err.rdbuf()};
-        builder b{p.built(), built_m, lock, ctx.project_dir, std::move(inputs), targets, *p.cache, std::move(settings), ctx.err};
+        builder b{p.built(), built_m, lock, ctx.project_dir, planned.inputs, targets, *p.cache, std::move(settings), ctx.err};
         built = b.build_all();
     }
     if (!built) {
@@ -1299,7 +1511,7 @@ void collect_garbage_if_due(project& p, command_context& ctx);
 // install, update and fetch (docs/PLAN.md decision 16): resolve, check against the lock, write it,
 // fetch the inputs. `use_lock` and `unlocked` as for load_project; `everything`: every package's inputs.
 int run_install_pipeline(parsed_command const& cmd, command_context& ctx, bool use_lock, std::vector<std::string> const& unlocked,
-    bool everything)
+    bool everything, cache_action action = cache_action::none)
 {
     diagnostics diags;
     auto p = load_project(ctx, cmd, use_lock, unlocked, diags, !cmd.flag("no-dev"));
@@ -1330,7 +1542,7 @@ int run_install_pipeline(parsed_command const& cmd, command_context& ctx, bool u
     }
     if (fresh) check_dev_graph(*p, *fresh, ctx, diags);
     if (!diags.has_errors()) {
-        if (locked(cmd)) {
+        if (locked(cmd) || action != cache_action::none) {
             check_locked(*p, *fresh, diags);
             if (diags.has_errors()) {
             } else if (ctx.events) {
@@ -1401,9 +1613,16 @@ int run_install_pipeline(parsed_command const& cmd, command_context& ctx, bool u
         if (none_built() && chose) choose_graphs(*p, {}, diags);
         if (!diags.has_errors() && !none_built()) toolchains = project_toolchains(*p, targets, ctx, diags);
     }
-    std::optional<std::map<std::string, package_inputs>> inputs;
-    if (!diags.has_errors()) inputs = fetch_project_inputs(*p, *fresh, previous, unlocked, everything, ctx, diags);
-    if (inputs && building) {
+    std::optional<project_inputs> planned;
+    if (!diags.has_errors()) planned = plan_project_inputs(*p, *fresh, previous, unlocked, everything, ctx, diags);
+    // otok fetch, and a project this machine builds nothing of: every input now (otok-toml.md 4.9); install and update: those of
+    // the slices built here, as the builder finds them (cache.md 12.2)
+    bool inputs_ok = planned.has_value();
+    if (planned && action == cache_action::none && (everything || none_built() || p->m.targets.empty())) {
+        inputs_ok = fetch_planned_inputs(*p, *planned, nullptr, planned->inputs, ctx, diags);
+        planned->fetched = true;
+    }
+    if (inputs_ok && building) {
         std::string none = "this machine can build none of the target tables of this project:";
         for (target_settings const& ts : p->m.targets) {
             auto const why = skipped.find(ts.target);
@@ -1425,8 +1644,9 @@ int run_install_pipeline(parsed_command const& cmd, command_context& ctx, bool u
             }
         }
     }
-    bool const ok = inputs && (everything
-        || (!none_built() && build_project(cmd, *p, *fresh, std::move(*inputs), targets, std::move(*toolchains), skipped, ctx, diags)));
+    bool const ok = inputs_ok && (everything
+        || (!none_built() && action != cache_action::none && cache_command(cmd, *p, *fresh, std::move(*planned), targets, std::move(*toolchains), skipped, action, ctx, diags))
+        || (!none_built() && action == cache_action::none && build_project(cmd, *p, *fresh, std::move(*planned), targets, std::move(*toolchains), skipped, ctx, diags)));
     report(diags, ctx);
     collect_garbage_if_due(*p, ctx);
     return ok ? 0 : 1;
@@ -1478,6 +1698,17 @@ int update(parsed_command const& cmd, command_context& ctx)
 int fetch(parsed_command const& cmd, command_context& ctx)
 {
     return install_pipeline(cmd, ctx, true, {}, true);
+}
+
+// otok cache status|push [LIBRARY...] (cache.md 12.3): with the lock as it is, which it never writes
+int cache(parsed_command const& cmd, command_context& ctx)
+{
+    std::string const& what = cmd.arguments.front();
+    if (what != "status" && what != "push") {
+        ctx.err << "error: 'otok cache' takes status or push, not " << in_quotes(what) << "\n";
+        return 1;
+    }
+    return run_install_pipeline(cmd, ctx, true, {}, false, what == "status" ? cache_action::status : cache_action::push);
 }
 
 // otok tree: the graph from the direct dependencies down; a package already shown is marked (*).
@@ -3870,9 +4101,9 @@ std::span<command_spec const> command_specs()
 {
     static command_spec const commands[] = {
         {"install", "", "Resolve the dependencies (keeping locked versions), write otok.lock, fetch the inputs and build the libraries into the output",
-            {build_profile_option, locked_option, offline_option, frozen_option, allow_advisory_option, verbose_option, keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option, jobs_option, no_dev_option, stream_format_option}, 0, 0},
+            {build_profile_option, locked_option, offline_option, frozen_option, allow_advisory_option, verbose_option, keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option, jobs_option, no_dev_option, no_build_cache_option, stream_format_option}, 0, 0},
         {"update", "[LIBRARY...]", "Move every library (or the named ones) to the newest allowed version, then as install",
-            {build_profile_option, offline_option, allow_advisory_option, verbose_option, keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option, jobs_option, no_dev_option, drop_option, no_build_option, stream_format_option}, 0, any_number},
+            {build_profile_option, offline_option, allow_advisory_option, verbose_option, keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option, jobs_option, no_dev_option, drop_option, no_build_option, no_build_cache_option, stream_format_option}, 0, any_number},
         {"fetch", "", "Resolve and write otok.lock as install does, then fetch the inputs of every package in it (all profiles); build nothing",
             {locked_option, offline_option, frozen_option, allow_advisory_option, no_dev_option, stream_format_option}, 0, 0},
         {"tree", "", "Print the resolved graph with versions, recipes, platforms and changed options", {profile_option, offline_option, no_dev_option}, 0, 0},
@@ -3882,6 +4113,8 @@ std::span<command_spec const> command_specs()
         {"search", "TEXT...", "Find recipes of the index by id, library, description or keyword", {offline_option, format_option}, 1, any_number},
         {"info", "RECIPE|LIBRARY", "Show the versions, options and dependencies of a recipe of the index, or the recipes of a library", {offline_option, format_option}, 1, 1},
         {"metadata", "", "Print the resolved graph, the targets and where each library lands, as JSON for IDEs and scripts", {profile_option, offline_option}, 0, 0},
+        {"cache", "status|push [LIBRARY...]", "Show where each slice of the project would come from (the local cache, a store of the shared build cache, a build), or push the slices of the local cache to the stores",
+            {build_profile_option, offline_option, no_dev_option, {"store", 0, "URL", "push: to this store, whatever config.toml says of pushing"}}, 1, any_number},
         {"clean", "", "Remove the cache of this machine, or the selected parts of it",
             {{"downloads", 0, "", "Remove downloaded files"}, {"sources", 0, "", "Remove unpacked sources and git repositories"},
                 {"builds", 0, "", "Remove built libraries, the work directories of dev builds and kept work directories of failed builds"},
@@ -3944,6 +4177,7 @@ int run_command(parsed_command const& command, command_context& ctx)
     if (command.command == "outdated") return outdated(command, ctx);
     if (command.command == "search") return search(command, ctx);
     if (command.command == "info") return info(command, ctx);
+    if (command.command == "cache") return cache(command, ctx);
     if (command.command == "clean") return clean(command, ctx);
     if (command.command == "log") return show_log(command, ctx);
     if (command.command == "agent-skill") return agent_skill(command, ctx);

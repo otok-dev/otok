@@ -241,6 +241,23 @@ struct header_list_deleter
     void operator()(curl_slist* l) const noexcept { curl_slist_free_all(l); }
 };
 
+// The body of a reply into a file (http_exchange::download).
+std::size_t on_reply_to_file(char* data, std::size_t size, std::size_t count, void* user)
+{
+    auto* out = static_cast<std::ofstream*>(user);
+    out->write(data, static_cast<std::streamsize>(size * count));
+    return *out ? size * count : 0;
+}
+
+// The body of a request from a file (http_exchange::upload).
+std::size_t on_upload(char* data, std::size_t size, std::size_t count, void* user)
+{
+    auto* in = static_cast<std::ifstream*>(user);
+    in->read(data, static_cast<std::streamsize>(size * count));
+    if (in->bad()) return CURL_READFUNC_ABORT;
+    return static_cast<std::size_t>(in->gcount());
+}
+
 }
 
 std::string const* http_reply::header(std::string_view name) const noexcept
@@ -278,14 +295,25 @@ result<http_reply> http_call(http_exchange const& request, http_settings const& 
     curl_easy_setopt(h, CURLOPT_URL, request.url.c_str());
     curl_easy_setopt(h, CURLOPT_PROTOCOLS_STR, "https,http");
     curl_easy_setopt(h, CURLOPT_REDIR_PROTOCOLS_STR, "https,http");
-    curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, request.follow_redirects ? 1L : 0L);
     curl_easy_setopt(h, CURLOPT_MAXREDIRS, 10L);
+    std::ifstream uploaded;
+    std::ofstream downloaded;
     if (request.method == "HEAD") {
         curl_easy_setopt(h, CURLOPT_NOBODY, 1L);
     } else {
         curl_easy_setopt(h, CURLOPT_CUSTOMREQUEST, request.method.c_str());
     }
-    if (!request.body.empty() || request.method == "POST") {
+    if (!request.upload.empty()) {
+        std::error_code ec;
+        auto const size = std::filesystem::file_size(long_path(request.upload), ec);
+        uploaded.open(long_path(request.upload), std::ios::binary);
+        if (ec || !uploaded) return fail("cannot read '" + path_to_utf8(request.upload) + "'");
+        curl_easy_setopt(h, CURLOPT_UPLOAD, 1L);
+        curl_easy_setopt(h, CURLOPT_READFUNCTION, on_upload);
+        curl_easy_setopt(h, CURLOPT_READDATA, &uploaded);
+        curl_easy_setopt(h, CURLOPT_INFILESIZE_LARGE, static_cast<curl_off_t>(size));
+    } else if (!request.body.empty() || request.method == "POST" || request.method == "PUT") {
         curl_easy_setopt(h, CURLOPT_POSTFIELDS, request.body.c_str());
         curl_easy_setopt(h, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(request.body.size()));
     }
@@ -297,14 +325,25 @@ result<http_reply> http_call(http_exchange const& request, http_settings const& 
     curl_easy_setopt(h, CURLOPT_NOSIGNAL, 1L);
     if (!settings.proxy.empty()) curl_easy_setopt(h, CURLOPT_PROXY, settings.proxy.c_str());
     set_ca(h);
-    curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, on_reply);
-    curl_easy_setopt(h, CURLOPT_WRITEDATA, &sink);
+    if (!request.download.empty()) {
+        downloaded.open(long_path(request.download), std::ios::binary | std::ios::trunc);
+        if (!downloaded) return fail("cannot write '" + path_to_utf8(request.download) + "'");
+        curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, on_reply_to_file);
+        curl_easy_setopt(h, CURLOPT_WRITEDATA, &downloaded);
+    } else {
+        curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, on_reply);
+        curl_easy_setopt(h, CURLOPT_WRITEDATA, &sink);
+        curl_easy_setopt(h, CURLOPT_ACCEPT_ENCODING, "");  // whatever libcurl can decode
+    }
     curl_easy_setopt(h, CURLOPT_HEADERFUNCTION, on_header);
     curl_easy_setopt(h, CURLOPT_HEADERDATA, &reply.headers);
-    curl_easy_setopt(h, CURLOPT_ACCEPT_ENCODING, "");  // whatever libcurl can decode
     curl_easy_setopt(h, CURLOPT_ERRORBUFFER, error.data());
     if (CURLcode const code = curl_easy_perform(h); code != CURLE_OK && !(code == CURLE_WRITE_ERROR && sink.truncated)) {
         return fail(request.method + " " + request.url + ": " + (error[0] ? std::string{error.data()} : std::string{curl_easy_strerror(code)}));
+    }
+    if (downloaded.is_open()) {
+        downloaded.close();
+        if (!downloaded) return fail("cannot write '" + path_to_utf8(request.download) + "'");
     }
     curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &reply.status);
     reply.truncated = sink.truncated;
@@ -351,6 +390,31 @@ std::string file_url(std::filesystem::path const& path)
         }
     }
     return url;
+}
+
+std::optional<std::filesystem::path> file_url_path(std::string_view url)
+{
+    if (!url.starts_with("file://")) return std::nullopt;
+    std::string_view rest = url.substr(7);
+    // file://host/path names another machine, which a path cannot reach; file://localhost/ is this one
+    if (rest.starts_with("localhost/")) rest.remove_prefix(9);
+    if (!rest.starts_with('/')) return std::nullopt;
+    std::string decoded;
+    for (std::size_t i = 0; i < rest.size(); ++i) {
+        if (rest[i] != '%') {
+            decoded += rest[i];
+            continue;
+        }
+        if (i + 2 >= rest.size() || !std::isxdigit(static_cast<unsigned char>(rest[i + 1])) || !std::isxdigit(static_cast<unsigned char>(rest[i + 2]))) {
+            return std::nullopt;
+        }
+        decoded += static_cast<char>(std::stoi(std::string{rest.substr(i + 1, 2)}, nullptr, 16));
+        i += 2;
+    }
+    // file:///C:/dir is C:/dir
+    if (decoded.size() >= 3 && decoded[0] == '/' && std::isalpha(static_cast<unsigned char>(decoded[1])) && decoded[2] == ':') decoded.erase(0, 1);
+    if (decoded.empty() || decoded == "/") return std::nullopt;
+    return path_from_utf8(decoded);
 }
 
 }

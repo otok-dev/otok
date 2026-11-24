@@ -18,11 +18,13 @@
 #include "otok/core/process.hpp"
 
 #ifdef __APPLE__
-#   include <cerrno>
 #   include <sys/clonefile.h>
 #endif
 #ifdef _WIN32
 #   include <windows.h>
+#else
+#   include <cerrno>
+#   include <unistd.h>
 #endif
 
 namespace otok {
@@ -148,6 +150,36 @@ void rename_path(std::filesystem::path const& given_from, std::filesystem::path 
         wait = std::min(wait * 2, std::chrono::milliseconds{500});
         std::filesystem::rename(from, to, ec);
     }
+#endif
+}
+
+result<bool> move_file_if_absent(std::filesystem::path const& given_from, std::filesystem::path const& given_to)
+{
+    std::filesystem::path const from = long_path(given_from), to = long_path(given_to);
+    auto const refused = [&](std::string const& reason) {
+        return fail("cannot move '" + path_to_utf8(plain_path(from)) + "' to '" + path_to_utf8(plain_path(to)) + "': " + reason);
+    };
+#ifdef _WIN32
+    // without MOVEFILE_REPLACE_EXISTING the move fails when the name exists
+    if (MoveFileExW(from.c_str(), to.c_str(), 0)) return true;
+    DWORD const code = GetLastError();
+    if (code == ERROR_ALREADY_EXISTS || code == ERROR_FILE_EXISTS) return false;
+    return refused(std::system_category().message(static_cast<int>(code)));
+#else
+    // a hard link fails when the name exists; file systems without hard links (some network shares) fall back to a check
+    // and a rename, which two writers of one name could both pass, writing the same content
+    if (::link(from.c_str(), to.c_str()) == 0) {
+        ::unlink(from.c_str());
+        return true;
+    }
+    int const code = errno;
+    if (code == EEXIST) return false;
+    if (code != EPERM && code != ENOTSUP && code != EXDEV && code != EOPNOTSUPP) return refused(std::generic_category().message(code));
+    std::error_code ec;
+    if (std::filesystem::exists(to, ec)) return false;
+    std::filesystem::rename(from, to, ec);
+    if (ec) return refused(ec.message());
+    return true;
 #endif
 }
 

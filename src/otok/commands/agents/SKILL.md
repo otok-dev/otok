@@ -141,3 +141,8 @@ options, linkage and products.
 ## Other commands
 
 `otok tree` (the graph, text), `otok fetch` (inputs only, no build), `otok clean` (the cache), `otok help <command>`.
+
+A team may share built slices through a build cache of its own: stores named in the machine's `config.toml`
+(`[[build-cache]]`) or `OTOK_BUILD_CACHE*` variables, never in `otok.toml`. `otok cache status` shows where each slice
+would come from (the local cache, a store, a build); `otok install --no-build-cache` uses the local cache alone. Do not
+put a store's URL or token into the project's files.

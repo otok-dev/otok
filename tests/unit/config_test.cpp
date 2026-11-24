@@ -269,3 +269,77 @@ TEST(config, host_default_locations)
 
     EXPECT_EQ(*config_file_location(fake({{"OTOK_CONFIG", "/etc/otok.toml"}})), path_from_utf8("/etc/otok.toml"));
 }
+
+// [[build-cache]] (config.md 2.3)
+TEST(config, build_cache_stores)
+{
+    diagnostics d;
+    auto c = parse_config("[[build-cache]]\nurl = \"https://cache.example.com/team\"\ntoken-file = \"~/.config/example/token\"\n"
+        "[[build-cache]]\nurl = \"file:///mnt/builds/otok\"\npush = true\npush-local = true\n", "config.toml", d);
+    ASSERT_TRUE(c.has_value()) << messages(d);
+    ASSERT_TRUE(c->build_caches.has_value());
+    ASSERT_EQ(c->build_caches->size(), 2u);
+    EXPECT_EQ((*c->build_caches)[0].url, "https://cache.example.com/team");
+    EXPECT_FALSE((*c->build_caches)[0].push);
+    EXPECT_EQ((*c->build_caches)[0].token_file, "~/.config/example/token");
+    EXPECT_TRUE((*c->build_caches)[1].push);
+    EXPECT_TRUE((*c->build_caches)[1].push_local);
+
+    c->cache_dir = "/c";
+#ifdef _WIN32
+    char const* const home = "USERPROFILE";
+#else
+    char const* const home = "HOME";
+#endif
+    diagnostics e;
+    auto resolved = resolve_config(*c, fake({{home, "/home/u"}}), e);
+    ASSERT_TRUE(resolved.has_value()) << messages(e);
+    ASSERT_EQ(resolved->build_caches.size(), 2u);
+    EXPECT_EQ(path_from_utf8(resolved->build_caches[0].token_file), path_from_utf8("/home/u/.config/example/token"));
+    EXPECT_EQ(resolved->build_caches[0].token, "");
+}
+
+TEST(config, build_cache_urls_are_checked)
+{
+    diagnostics d;
+    EXPECT_FALSE(parse_config("[[build-cache]]\nurl = \"ftp://x\"\n[[build-cache]]\nurl = \"file://host/share\"\n[[build-cache]]\npush = true\n",
+        "config.toml", d).has_value());
+    std::string const m = messages(d);
+    EXPECT_NE(m.find("'url' in build-cache[1] must be a file:, https or http URL, not 'ftp://x'"), std::string::npos) << m;
+    EXPECT_NE(m.find("'url' in build-cache[2] must be a file: URL of a directory of this machine (file:///srv/otok-cache), not 'file://host/share'"),
+        std::string::npos) << m;
+    EXPECT_NE(m.find("build-cache[3]"), std::string::npos) << m;
+}
+
+// OTOK_BUILD_CACHE replaces the file's stores, read only; OTOK_BUILD_CACHE_PUSH pushes to one; the token of the variables
+TEST(config, build_cache_environment_variables)
+{
+    config_file file;
+    file.cache_dir = "/c";
+    file.build_caches = std::vector<build_cache_store>{{"https://file-store", true, false, "/token", ""}};
+    diagnostics d;
+    auto c = resolve_config(file, fake({{"OTOK_BUILD_CACHE", "https://a  file:///b"}, {"OTOK_BUILD_CACHE_PUSH", "file:///b"},
+        {"OTOK_BUILD_CACHE_TOKEN", "secret"}}), d);
+    ASSERT_TRUE(c.has_value()) << messages(d);
+    ASSERT_EQ(c->build_caches.size(), 2u);
+    EXPECT_EQ(c->build_caches[0].url, "https://a");
+    EXPECT_FALSE(c->build_caches[0].push);
+    EXPECT_EQ(c->build_caches[0].token, "secret");
+    EXPECT_EQ(c->build_caches[1].url, "file:///b");
+    EXPECT_TRUE(c->build_caches[1].push);
+
+    // a store to push to besides the file's; an empty OTOK_BUILD_CACHE is none
+    c = resolve_config(file, fake({{"OTOK_BUILD_CACHE_PUSH", "https://ci"}}), d);
+    ASSERT_TRUE(c.has_value()) << messages(d);
+    ASSERT_EQ(c->build_caches.size(), 2u);
+    EXPECT_EQ(c->build_caches[0].url, "https://file-store");
+    EXPECT_EQ(c->build_caches[1].url, "https://ci");
+    EXPECT_TRUE(c->build_caches[1].push);
+    c = resolve_config(file, fake({{"OTOK_BUILD_CACHE", ""}}), d);
+    ASSERT_TRUE(c.has_value()) << messages(d);
+    EXPECT_TRUE(c->build_caches.empty());
+
+    diagnostics e;
+    EXPECT_FALSE(resolve_config(file, fake({{"OTOK_BUILD_CACHE", "s3://bucket"}}), e).has_value());
+    EXPECT_NE(messages(e).find("OTOK_BUILD_CACHE must be a file:, https or http URL, not 's3://bucket'"), std::string::npos) << messages(e);
+}

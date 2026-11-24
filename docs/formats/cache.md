@@ -22,7 +22,7 @@ sharing safe.
 │   ├── archive-<sha256>/             # an unpacked archive (5)
 │   └── git-<commit>[-submodules]/    # the tree of a commit, with its submodules when asked (5)
 ├── builds/<library>/<version>-r<revision>/
-│   ├── slices/<slice key>/           # cache-key.md; prefix/, result.toml, key.txt, build.log (7.1)
+│   ├── slices/<slice key>/           # cache-key.md; prefix/, result.toml, key.txt, licenses/, build.log (7.1)
 │   ├── sources/<sources key>/        # cache-key.md 3.1; source/ (patched) and key.txt
 │   └── packages/<package key>/       # cache-key.md 4; the packaged output and key.txt
 ├── dev/<project key>/<library>-<slice>/  # the kept work directories of dev slices (otok-dev-toml.md 4)
@@ -217,6 +217,7 @@ created under its lock (6) while the build runs; when the build succeeds it rece
 | `prefix/` | `slice.prefix` as the build left it |
 | `result.toml` | What `build` returned (`build-lua-api.md` 8), paths relative to `prefix/`: `headers`, `module-map`, `[libraries]`, `[library-headers]`, `[library-module-maps]`, `[data]` |
 | `key.txt` | The canonical description the key hashes (`cache-key.md` 3) |
+| `licenses/` | The recipe's `license-files` (`recipe-toml.md` 3) at their paths, copied from the slice's source or the recipe directory as `otok-toml.md` 4.2 lays them out, so that packaging needs no source (12); entries of an earlier otok may lack it, and packaging then takes the source |
 | `build.log` | The slice's log |
 
 The work directory is removed afterwards. When the build fails, what it left is kept in
@@ -306,3 +307,107 @@ asks the server, the others find its file and `ETag`.
 
 Offline (6.1) nothing is requested: the cached files are read as they are, and a file that is not
 cached is an error.
+
+## 12. Shared build cache
+
+An organization may share slice entries among its machines and its CI through stores of its own, which `build-cache`
+of `config.md` names (2.3). There is no public one: built output never leaves the trust boundary of whoever runs the
+store (DESIGN 3). A store changes where a slice entry comes from, never what it is, so it enters no key.
+
+### 12.1 Layout of a store
+
+A store is a directory (a `file:` URL, a network share) or an HTTP base URL. Its layout has the shape of Bazel's HTTP
+cache, so that stores already in use serve it unchanged (bazel-remote, with `--disable_http_ac_validation` since the
+descriptors are not Bazel's; nginx with WebDAV; a generic Artifactory repository; S3 or GCS behind presigned URLs):
+
+```text
+<base>/
+├── cas/<sha256>        # the archive of a slice entry, named by its own SHA-256 (64 hex digits)
+└── ac/<slice key>      # the descriptor of the slice: the full 64 hex digits of its key (cache-key.md 3)
+```
+
+Nothing is listed: a slice is looked up by its key alone. Stores prune by their own rules (a lifecycle rule, the LRU of
+bazel-remote); a reader of a directory store sets a descriptor's modification time when it is more than a day old, as
+garbage collection reads it locally (9), so that it can be pruned by that time.
+
+The **archive** is a `tar` (POSIX pax) compressed with zstd, holding `prefix/`, `result.toml`, `key.txt` and `licenses/`
+of the entry (7.1), not `build.log`. It is written so that one entry always gives the same bytes: paths sorted
+bytewise, directories before their contents, every time `2000-01-01T00:00:00Z`, owner and group `0` without names,
+modes `0755` for directories and executable files and `0644` for the rest, symbolic links kept as links (relative
+ones inside the entry only, as 6.2 of a slice entry allows), no other kinds of file, zstd level 10 on one thread.
+
+The **descriptor** is a TOML file:
+
+```toml
+format = 1
+archive = "9f2c…"                  # the SHA-256 of the archive in cas/
+size = 48213377                    # its size in bytes
+pushed-by = "ci"                   # the user name of the process that pushed it
+machine = "build-07"               # its host name
+otok = "0.6.0"                     # its version
+time = 2026-11-24T10:15:00Z
+```
+
+An unknown key is ignored; a `format` other than `1` makes the entry absent for that reader, with a warning.
+
+### 12.2 Lookup
+
+`install` and `update` compute the keys of every slice of the graphs after the lock is written and the toolchains are
+found, before fetching anything. A slice is **needed** when the package entry it belongs to is missing (`cache-key.md`
+4), or when a slice to be built depends on it (a dependency, a tool dependency, the `build_tools` entry). Each needed
+slice missing from the local cache is asked of the stores, in the order `build-cache` gives them, all slices at once;
+only the slices no store holds are built, and only their inputs are fetched (3, 4). So the tools of a graph whose
+slices are all found are neither fetched nor built, and neither is a source whose slices are.
+
+A hit becomes an entry of the local cache as 6 creates one: the descriptor read, the archive downloaded into
+`tmp/<process>/` and checked against `archive` and `size`, unpacked there (with the rules of unpacking archives,
+`recipe-toml.md` 4), its `key.txt` hashed and compared with the key asked for, the entry checked as 6.2 checks a slice
+entry and its libraries as the builder checks those it builds (their kinds by the linkage of the slice, and what the target
+checks of them: their architectures); then renamed into place, with the
+current time (9). An entry failing any of these is dropped with a warning naming the store, and the next store is
+asked, or the slice is built. A store that cannot be reached (a network error, an HTTP status other than `200` and
+`404`) is a warning once per command and is not asked again in that command.
+
+Stores are not used with `--offline` or `--frozen` (6.1), by `otok fetch`, which fetches inputs for building offline,
+and by `otok publish`, whose builds say that a recipe builds on this machine. `--no-build-cache` turns them off for one
+run of `install` or `update`.
+
+### 12.3 Push
+
+A store with `push = true` receives the slices this machine builds, each uploaded as soon as it is built while the
+others build; the command waits for its uploads before it ends. An upload:
+
+1. makes the archive (12.1) in `tmp/<process>/` and hashes it;
+2. writes `cas/<sha256>` when it is absent;
+3. writes `ac/<slice key>` when it is absent.
+
+Each write happens only when the file is absent: over HTTP a `PUT` with `If-None-Match: *` (`412` is not an error:
+another machine pushed it), in a directory a file written under `<base>/tmp/` and renamed into place without
+replacing one. A descriptor already there naming another archive means that the slice's build is not reproducible:
+a warning naming the key and both pushers; the first push stays. A failed upload is a warning, never a failure of the
+command.
+
+Not pushed, unless the store has `push-local = true`: a slice whose source or recipe is a path of this machine
+(`path:` or `local:` in its key, a recipe outside the cache), or one whose key names such a slice. Never pushed: dev
+slices (`otok-dev-toml.md` 4) and the slices depending on them, and entries without `licenses/` (made by an earlier
+otok).
+
+`otok cache push [<library>…] [--store <url>]` uploads the entries of the project's graphs that the local cache
+holds, of the given libraries or all, to the stores with `push = true` or to the one named; it is an error when no
+store takes them, and a failed upload is an error of the command. `otok cache status` lists the slices of the
+project's graphs and where each would come from: the local cache, a store (which) or a build.
+
+### 12.4 HTTP
+
+`GET <base>/ac/<key>` and `GET <base>/cas/<sha256>`; `200` is a hit, `404` a miss. A push (12.3) asks `GET <base>/ac/<key>`
+first, since a server that ignores `If-None-Match` (bazel-remote) would replace a descriptor; when there is none,
+`HEAD <base>/cas/<sha256>`, `PUT` of the archive when that is not `200`, then `PUT` of the descriptor, each with
+`If-None-Match: *`. A `PUT` succeeds with a `2xx`; `412` means another machine pushed it meanwhile. Servers that ignore the
+header (bazel-remote, nginx's WebDAV) let the last of two pushes of one key at the same moment win: harmless in `cas/`,
+whose names are the contents' hashes, and in `ac/` one of two valid descriptors stays, whose archive readers check. Requests carry
+`Authorization: Bearer <token>` when the store has a token (`config.md` 2.3), and go through `proxy`. Redirects are
+followed for `GET` and `HEAD` only, so presigned URLs of object stores work behind a server that redirects; libcurl does
+not send the token to another host. The token is never written into a log, a message or a file of otok's.
+
+A network error or another status (`401`, `5xx`) is a warning naming the store and the request, and the store is not
+asked again in that command (12.2): its slices are built.

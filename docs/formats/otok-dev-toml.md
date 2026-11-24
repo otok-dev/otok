@@ -86,7 +86,9 @@ in the cache's `builds/`, whatever else its key holds.
   build directories beside them; of another directory, every file but `.git` entries. Files that the build wrote into `source/` (build.lua
   copying a file there) are left. Locked resources are copied as for any build when `source/` is new. Patches: a file
   a patch touches is copied and the patches applied again when that file or a patch changed (otherwise it is left
-  patched).
+  patched). A named resource without `dest`, which build.lua reads from `slice.resources`, is copied into
+  `resources/<name>/` of the work directory at every build, the same files of it with their modification times: the
+  sandbox reads the work directory, not the user's working trees.
 - **Build.** `prefix/` is emptied, then build.lua runs as for any slice, in the kept `build/`. `otok.copy` and
   `otok.write` leave a file whose contents would not change, so a recipe that copies its build files into the source
   does not make the build tool configure again (`build-lua-api.md` 6).

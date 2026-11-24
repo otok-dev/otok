@@ -10,6 +10,7 @@
 
 #include "otok/core/fs.hpp"
 #include "otok/core/toml_reader.hpp"
+#include "otok/fetch/http.hpp"
 
 namespace otok {
 
@@ -21,6 +22,17 @@ std::optional<color_mode> parse_color(std::string_view s)
     if (s == "always") return color_mode::always;
     if (s == "never") return color_mode::never;
     return std::nullopt;
+}
+
+// What is wrong with the URL of a store of the shared build cache (config.md 2.3); nothing when it is right.
+std::optional<std::string> build_cache_url_problem(std::string const& url)
+{
+    if (url.starts_with("file:")) {
+        if (!file_url_path(url)) return "must be a file: URL of a directory of this machine (file:///srv/otok-cache), not '" + url + "'";
+        return std::nullopt;
+    }
+    if ((url.starts_with("https://") && url.size() > 8) || (url.starts_with("http://") && url.size() > 7)) return std::nullopt;
+    return std::string{"must be a file:, https or http URL, not '"} + url + "'";
 }
 
 std::optional<bool> parse_flag(std::string_view s)
@@ -100,6 +112,25 @@ std::optional<config_file> parse_config(std::string_view content, std::string co
             "built by its recipe");
     }
     read_input_mirrors(root, c.mirrors, severity::warning);
+    if (auto stores = root.tables("build-cache")) {
+        std::vector<build_cache_store> list;
+        for (toml_table& s : *stores) {
+            build_cache_store store;
+            store.url = s.string("url", need::required).value_or("");
+            if (s.contains("url")) {
+                if (auto problem = build_cache_url_problem(store.url)) s.error(s.position("url"), s.describe("url") + " " + *problem);
+            }
+            store.push = s.boolean("push").value_or(false);
+            store.push_local = s.boolean("push-local").value_or(false);
+            if (auto token = s.string("token-file")) {
+                if (token->empty()) s.error(s.position("token-file"), s.describe("token-file") + " must not be empty");
+                store.token_file = std::move(*token);
+            }
+            s.finish(severity::warning);
+            list.push_back(std::move(store));
+        }
+        c.build_caches = std::move(list);
+    }
     c.keep_build_dirs = root.boolean("keep-build-dirs");
     c.sandbox = root.boolean("sandbox");
     c.virtual_paths = root.boolean("virtual-paths");
@@ -187,6 +218,43 @@ std::optional<machine_config> resolve_config(config_file const& file, environmen
             c.mirrors.mirrors_only_libraries.clear();
         }
     }
+    // the stores of the shared build cache (config.md 2.3): OTOK_BUILD_CACHE replaces the file's, read only
+    if (file.build_caches) c.build_caches = *file.build_caches;
+    for (build_cache_store& s : c.build_caches) {
+        if (s.token_file.starts_with("~/")) {
+#ifdef _WIN32
+            auto const home = non_empty(env, "USERPROFILE");
+#else
+            auto const home = non_empty(env, "HOME");
+#endif
+            if (home) s.token_file = path_to_utf8(path_from_utf8(*home) / path_from_utf8(s.token_file.substr(2)));
+        }
+    }
+    auto const variable_token = non_empty(env, "OTOK_BUILD_CACHE_TOKEN").value_or("");
+    auto const urls_of = [](std::string const& text) {
+        std::vector<std::string> urls;
+        std::size_t start = 0;
+        while ((start = text.find_first_not_of(" \t", start)) != std::string::npos) {
+            std::size_t const end = std::min(text.find_first_of(" \t", start), text.size());
+            urls.push_back(text.substr(start, end - start));
+            start = end;
+        }
+        return urls;
+    };
+    if (auto stores = env("OTOK_BUILD_CACHE")) {
+        c.build_caches.clear();
+        for (std::string const& url : urls_of(*stores)) {
+            if (auto problem = build_cache_url_problem(url)) diags.error({}, "OTOK_BUILD_CACHE " + *problem);
+            c.build_caches.push_back({url, false, false, {}, variable_token});
+        }
+    }
+    if (auto pushed = non_empty(env, "OTOK_BUILD_CACHE_PUSH")) {
+        if (auto problem = build_cache_url_problem(*pushed)) diags.error({}, "OTOK_BUILD_CACHE_PUSH " + *problem);
+        auto const it = std::ranges::find(c.build_caches, *pushed, &build_cache_store::url);
+        if (it != c.build_caches.end()) it->push = true;
+        else c.build_caches.push_back({*pushed, true, false, {}, variable_token});
+    }
+
     c.visual_studio = non_empty(env, "OTOK_VISUAL_STUDIO").value_or(file.visual_studio.value_or(""));
     c.xcode = non_empty(env, "OTOK_XCODE").value_or(file.xcode.value_or(""));
     c.android_ndk = non_empty(env, "OTOK_ANDROID_NDK").value_or(file.android_ndk.value_or(""));

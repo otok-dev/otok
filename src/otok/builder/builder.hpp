@@ -16,10 +16,12 @@
 #include <ostream>
 #include <span>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "otok/builder/target.hpp"
 #include "otok/builder/toolchains.hpp"
+#include "otok/cache/shared.hpp"
 #include "otok/cache/store.hpp"
 #include "otok/core/console.hpp"
 #include "otok/core/error.hpp"
@@ -31,6 +33,7 @@
 #include "otok/lua/build_script.hpp"
 #include "otok/manifest/manifest.hpp"
 #include "otok/resolver/resolver.hpp"
+#include "otok/version/standard.hpp"
 
 // Building the slices of resolved packages into the build cache (DESIGN 6.4, docs/formats/cache-key.md,
 // docs/PLAN.md decision 19): a fresh, patched copy of the source per slice, build.lua with the target's
@@ -108,10 +111,42 @@ struct slice_event
     slice_spec spec;
     double seconds = 0;  // built or failed: how long it took
     std::string dev;     // the working trees of otok.dev.toml it was built from; empty: none
+    std::string from;    // cached: the URL of the store of the shared build cache it came from; empty: the local cache
     // failed: the error, the log kept in failed/ (cache.md 7.1; empty: none), what the user can do (empty: nothing known)
     std::string message;
     std::filesystem::path log;
     std::string hint;
+};
+
+// A store of the shared build cache as a build uses it (cache.md 12, config.md 2.3).
+struct build_cache_use
+{
+    shared_store store;
+    bool push = false;
+    bool push_local = false;
+};
+
+// Where a slice of the build would come from (cache.md 12.2): for `otok cache status` and `otok cache push`.
+struct located_slice
+{
+    enum class where
+    {
+        local,      // the local cache has its entry
+        store,      // a store of the shared build cache has it
+        build       // it is built: in no cache, or a dev slice or one depending on a dev slice
+    };
+    std::string library, id, version;
+    std::int64_t revision = 0;
+    bool tool = false;
+    bool build_tools = false;
+    slice_spec spec;
+    std::string key;                    // 64 hex digits; empty: known only once its dependencies are built (dev)
+    std::filesystem::path entry;        // in the local cache
+    where from = where::build;
+    std::string store;                  // the URL of the store, with `store`
+    bool dev = false;                   // of otok.dev.toml, or depending on it: never pushed
+    bool local_input = false;           // its source or recipe, or a dependency's, is a path of this machine
+    bool licenses = false;              // the local entry has licenses/ (cache.md 7.1): it can be pushed
 };
 
 struct build_settings
@@ -140,6 +175,14 @@ struct build_settings
     // the tool packages of the project's [tool-deps] are built though no recipe uses them: the build of a tool recipe by
     // otok publish (resolve_settings::tool_roots)
     bool tool_roots = false;
+    // The stores of the shared build cache, asked in this order after the local cache (cache.md 12.2); empty: none
+    std::vector<build_cache_use> stores;
+    std::string pushed_by;                  // the user named in the descriptors of pushes
+    // Fetches the inputs of the packages (package keys) into the builder's inputs, of the slices it builds only (cache.md
+    // 12.2); nothing: they were all fetched before
+    std::function<result<void>(std::set<std::string> const& packages, std::map<std::string, package_inputs>& inputs)> fetch;
+    // Only where each slice would come from, into this, nothing fetched or built (otok cache status, push); nothing: a build
+    std::vector<located_slice>* locate_only = nullptr;
 };
 
 // A log of a build kept in the cache (cache.md 7.1): a slice's, or a failed build's in failed/.
@@ -168,8 +211,8 @@ std::string key_text(std::map<std::string, std::string> const& inputs);
 
 // The meson machine file of a slice (build-lua-api.md 6.2): a cross file when `host` describes the host
 // machine (`[host_machine]`), else a native file. `pkg_config`: its program; empty: none. `binaries`: more of `[binaries]`
-// (toolchain_profile::meson_binaries).
-std::string meson_machine_file(slice_toolchain const& t, std::map<std::string, std::string> const& host, std::string const& pkg_config,
+// (toolchain_profile::meson_binaries). Values are written as they are, meson knowing no escapes; one it cannot hold is an error.
+result<std::string> meson_machine_file(slice_toolchain const& t, std::map<std::string, std::string> const& host, std::string const& pkg_config,
     std::map<std::string, std::vector<std::string>> const& binaries = {});
 
 // Builders of this process skip the check of the sandbox's exits (builder::check_sandbox_exits): for the tests, whose
@@ -212,6 +255,57 @@ private:
     // The program the toolchain `name` of a tool package runs: built by its recipe in the tool slice, or found installed
     // (docs/PLAN.md decision 70: the interpreter of a script).
     result<std::filesystem::path> toolchain_program(resolved_package const& tool_package, std::string const& name);
+
+    // The key of a slice and what follows from it (cache-key.md 2, 3), before anything is built (cache.md 12.2) or as it
+    // builds.
+    struct slice_plan
+    {
+        build_target* target = nullptr;
+        std::string os;
+        toolchain_profile profile;
+        std::string text, hex;              // the description of the key and its SHA-256
+        bool known = true;                  // false: a dependency's key comes from its build (a dev slice, otok-dev-toml.md 4)
+        bool local = false;                 // its source or recipe, or a dependency's, is a path of this machine (cache.md 12.3)
+        std::map<std::string, std::string> option_keys;
+        std::map<std::string, std::filesystem::path> option_files;
+        language_standards standards;
+        compile_flags project;
+        chosen_toolchains const* toolchains = nullptr;
+        std::vector<std::string> inherited; // the defines of the dependencies' products (build-lua-api.md 4)
+        std::vector<std::string> defines;   // its own products', then the dependencies'
+        std::filesystem::path entry;
+        std::string work_name;
+        bool dev = false;
+    };
+    // What the key of a slice takes from one it needs.
+    struct dependency_key
+    {
+        std::string key;
+        std::vector<std::string> defines;
+        bool known = true;
+        bool local = false;
+    };
+    // The slice of an id (slice_id) a slice needs; nothing: not built, or not planned.
+    using key_lookup = std::function<std::optional<dependency_key>(std::string const& id)>;
+    result<slice_plan> plan_slice(resolved_package const& p, bool tool, slice_spec const& spec, build_entry entry,
+        std::optional<dependency_key> const& tools, key_lookup const& find);
+
+    // The slice `key` from the stores of the shared build cache, unpacked into its local entry and checked (cache.md 12.2);
+    // the URL of the store, or nothing when no store has it intact (a warning for each that failed).
+    std::optional<std::string> fetch_from_store(std::string const& key, std::filesystem::path const& entry, slice_spec const& spec,
+        build_target& target, std::string const& label);
+
+    // Uploads a slice built here to the stores with `push`, as a task of its own (cache.md 12.3).
+    void push_to_stores(std::string const& key, std::filesystem::path const& entry, bool local, std::string const& label);
+
+    // Fetches the inputs of a package for building it, once (settings_.fetch).
+    result<void> ensure_inputs(std::string const& package);
+
+    // The slice `id` built or found, by its task, when the plan did not count it needed (cache.md 12.2).
+    result<void> ensure_built(std::string const& id);
+
+    // Waits for the uploads under way.
+    void join_pushes();
 
     // One entry: `build` of a slice, or `build_tools` on the tool slice; `tools` is the latter's entry
     // for the target slices of a recipe that has one.
@@ -278,6 +372,16 @@ private:
     std::map<std::string, std::string> recipe_hashes_;  // package key → recipe_hash; filled before building
     std::set<std::string> headers_packages_;            // package keys built from a headers slice; filled before building
     std::map<std::string, std::pair<std::size_t, std::size_t>> slices_done_;  // package key → slices done, of all
+    std::map<std::string, dependency_key> planned_;     // slice id → its key, planned before the build (cache.md 12.2)
+    std::map<std::string, std::string> source_hashes_;  // package key → the tree hash of its local source, once
+    std::set<std::string> fetched_;                     // package keys whose inputs settings_.fetch gave
+    std::mutex fetch_mutex_;
+    std::mutex push_mutex_;
+    std::vector<std::thread> pushes_;                   // uploads under way, joined when the build ends
+    // the tasks by slice id, and what runs each once (ensure_built)
+    std::map<std::string, std::size_t> task_of_;
+    std::vector<std::function<result<void>()>> task_runs_;
+    std::vector<std::unique_ptr<std::mutex>> task_mutexes_;
     // Windows: check_sandbox_exits of this builder alone, without settings_.announced
     sandbox_exits_check exits_;
 };

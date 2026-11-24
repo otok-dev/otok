@@ -45,6 +45,11 @@ std::vector<std::string> symbolic_link_refusals();
 // file), so there it is tried again for about five seconds, waiting longer each time; elsewhere once.
 void rename_path(std::filesystem::path const& from, std::filesystem::path const& to, std::error_code& ec);
 
+// Renames the file `from` to `to` unless `to` exists, atomically: of two processes renaming files to one name, one wins
+// and the other learns that it lost (false); `from` is left then. For files written once by many writers (a shared build
+// cache, cache.md 12.3).
+result<bool> move_file_if_absent(std::filesystem::path const& from, std::filesystem::path const& to);
+
 // The whole file as bytes.
 result<std::string> read_file(std::filesystem::path const& path);
 

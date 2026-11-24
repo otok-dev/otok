@@ -4,14 +4,18 @@
 #include "otok/fetch/archive.hpp"
 
 #include <algorithm>
+#include <cstdint>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <archive.h>
 #include <archive_entry.h>
 
 #include "otok/core/fs.hpp"
+#include "otok/core/sha256.hpp"
 
 namespace otok {
 
@@ -183,6 +187,96 @@ result<void> extract_archive(std::filesystem::path const& archive_file, std::fil
     fs::remove_all(long_path(partial), ec);
     if (!result) fs::remove_all(long_path(destination), ec);
     return result;
+}
+
+result<archive_written> write_tree_archive(std::filesystem::path const& root, std::span<std::string const> names, std::filesystem::path const& archive_file)
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    // the paths, `/`-separated, sorted bytewise: a directory comes before what it holds
+    std::vector<std::string> paths;
+    for (std::string const& name : names) {
+        fs::path const top = root / path_from_utf8(name);
+        fs::file_status const status = fs::symlink_status(long_path(top), ec);
+        if (!fs::exists(status)) continue;
+        paths.push_back(name);
+        if (!fs::is_directory(status)) continue;
+        for (auto it = fs::recursive_directory_iterator{long_path(top), ec}; !ec && it != fs::recursive_directory_iterator{}; it.increment(ec)) {
+            paths.push_back(name + "/" + path_to_utf8(plain_path(it->path()).lexically_relative(plain_path(long_path(top))).generic_u8string()));
+        }
+        if (ec) return fail("cannot list '" + path_to_utf8(top) + "': " + ec.message());
+    }
+    std::ranges::sort(paths);
+
+    std::unique_ptr<archive, write_deleter> out{archive_write_new()};
+    std::string const display = path_to_utf8(archive_file);
+    auto const bad = [&](std::string const& what) { return fail("cannot write the archive '" + display + "': " + what + archive_error_string(out.get())); };
+    if (archive_write_set_format_pax_restricted(out.get()) != ARCHIVE_OK || archive_write_add_filter_zstd(out.get()) != ARCHIVE_OK
+        || archive_write_set_filter_option(out.get(), "zstd", "compression-level", "10") != ARCHIVE_OK) {
+        return bad("");
+    }
+#ifdef _WIN32
+    int const opened = archive_write_open_filename_w(out.get(), long_path(archive_file).c_str());
+#else
+    int const opened = archive_write_open_filename(out.get(), archive_file.c_str());
+#endif
+    if (opened != ARCHIVE_OK) return bad("");
+
+    std::unique_ptr<archive_entry, decltype(&archive_entry_free)> entry{archive_entry_new(), &archive_entry_free};
+    std::vector<char> buffer(256 * 1024);
+    for (std::string const& path : paths) {
+        fs::path const file = long_path(root / path_from_utf8(path));
+        fs::file_status const status = fs::symlink_status(file, ec);
+        archive_entry_clear(entry.get());
+        archive_entry_set_pathname_utf8(entry.get(), path.c_str());
+        archive_entry_set_mtime(entry.get(), archive_time, 0);
+        archive_entry_set_uid(entry.get(), 0);
+        archive_entry_set_gid(entry.get(), 0);
+        std::uintmax_t size = 0;
+        if (fs::is_symlink(status)) {
+            fs::path const target = fs::read_symlink(file, ec);
+            if (ec) return fail("cannot read the link '" + path + "': " + ec.message());
+            std::string const text = path_to_utf8(target.generic_u8string());
+            archive_entry_set_filetype(entry.get(), AE_IFLNK);
+            archive_entry_set_perm(entry.get(), 0777);
+            archive_entry_set_symlink_utf8(entry.get(), text.c_str());
+        } else if (fs::is_directory(status)) {
+            archive_entry_set_filetype(entry.get(), AE_IFDIR);
+            archive_entry_set_perm(entry.get(), 0755);
+        } else if (fs::is_regular_file(status)) {
+            size = fs::file_size(file, ec);
+            if (ec) return fail("cannot read '" + path + "': " + ec.message());
+            archive_entry_set_filetype(entry.get(), AE_IFREG);
+#ifdef _WIN32
+            archive_entry_set_perm(entry.get(), 0644);  // Windows keeps no executable bit
+#else
+            archive_entry_set_perm(entry.get(), (status.permissions() & fs::perms::owner_exec) != fs::perms::none ? 0755 : 0644);
+#endif
+            archive_entry_set_size(entry.get(), static_cast<la_int64_t>(size));
+        } else {
+            return fail("'" + path + "' in '" + path_to_utf8(root) + "' is a special file (device, pipe or socket)");
+        }
+        if (archive_write_header(out.get(), entry.get()) < ARCHIVE_WARN) return bad(path + ": ");
+        if (size > 0) {
+            std::ifstream in{file, std::ios::binary};
+            if (!in) return fail("cannot read '" + path_to_utf8(plain_path(file)) + "'");
+            std::uintmax_t left = size;
+            while (left > 0) {
+                auto const chunk = static_cast<std::streamsize>(std::min<std::uintmax_t>(left, buffer.size()));
+                in.read(buffer.data(), chunk);
+                if (in.gcount() != chunk) return fail("cannot read '" + path_to_utf8(plain_path(file)) + "': it changed while it was archived");
+                if (archive_write_data(out.get(), buffer.data(), static_cast<std::size_t>(chunk)) < 0) return bad(path + ": ");
+                left -= static_cast<std::uintmax_t>(chunk);
+            }
+        }
+    }
+    if (archive_write_close(out.get()) != ARCHIVE_OK) return bad("");
+    out.reset();
+    auto hash = sha256_file(archive_file);
+    if (!hash) return std::unexpected{hash.error()};
+    std::uintmax_t const bytes = fs::file_size(long_path(archive_file), ec);
+    if (ec) return fail("cannot read '" + display + "': " + ec.message());
+    return archive_written{*hash, bytes};
 }
 
 }

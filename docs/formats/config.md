@@ -26,6 +26,7 @@ output is accepted only in `otok.toml` or a recipe.
 | `asset-mirror` | URL template, or array of them | — | `OTOK_ASSET_MIRROR` (templates separated by spaces) | Mirrors of archive inputs addressed by their sha256 (2.1). |
 | `url-rewrite` | array of tables `{ from, to }` | — | — | Other locations of the inputs under a URL prefix (2.1). |
 | `mirrors-only` | boolean, or array of library names | `false` | `OTOK_MIRRORS_ONLY` (a boolean) | Fetch inputs only from this machine's `asset-mirror` and rewritten URLs, never from the locations recipes and projects name (2.1). |
+| `build-cache` | array of tables | — | `OTOK_BUILD_CACHE`, `OTOK_BUILD_CACHE_PUSH`, `OTOK_BUILD_CACHE_TOKEN` (2.3) | Stores of the organization sharing slice entries among its machines (2.3, `cache.md` 12); `--no-build-cache` turns them off for one run. |
 | `proxy` | URL | from `HTTPS_PROXY` / `HTTP_PROXY` | `OTOK_PROXY` | HTTP(S) proxy for all downloads. |
 | `cache-max-age` | integer ≥ 0 (days) | `30` | `OTOK_CACHE_MAX_AGE` | Cache entries unused for longer are removed by the automatic garbage collection (`cache.md` 9); `0` turns it off. |
 | `sandbox` | boolean | `true` | `OTOK_SANDBOX` | Run build processes in the host's sandbox (`build-lua-api.md` 7.1): `sandbox-exec` on macOS, `bwrap` (bubblewrap) of `PATH` on Linux, which otok tries once per command; on Windows an AppContainer (`otok.build`, no capabilities) with `otok-sandbox.dll` injected into every build process. `false` (or `--no-sandbox` for one run) is for a host without a sandbox or a tool the sandbox stops, and every build warns about it; with `true` on a host where the sandbox cannot be made, builds fail rather than run unisolated; results are the same, so it is not part of any cache key. |
@@ -104,6 +105,35 @@ Checked when the file is read: each name appears once in `from`; two placeholder
 literal text (`{a}{b}` could be split in many ways); `to` uses only names of `from`, and `sha256`;
 `sha256` is not a name in `from`; braces are paired. URLs cannot contain braces unencoded, so a literal
 brace needs no escape.
+
+### 2.3 Shared build cache
+
+Slice entries built on one machine of an organization can be taken by its others and its CI from a store the
+organization runs (`cache.md` 12). Only this file and the environment name stores: a project cannot, so that cloning
+a project never makes otok take binaries from a place its user did not choose.
+
+```toml
+[[build-cache]]
+url = "https://otok-cache.example.com/team"
+token-file = "~/.config/example/otok-cache-token"
+
+[[build-cache]]
+url = "file:///mnt/builds/otok"
+push = true
+```
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `url` | URL | — (required) | The store: `file:` for a directory, `https` or `http` for a server (`cache.md` 12.4). |
+| `push` | boolean | `false` | Upload the slices this machine builds (`cache.md` 12.3). |
+| `push-local` | boolean | `false` | Upload also the slices built from a source or recipe that is a path of this machine, and their dependents. |
+| `token-file` | path | — | A file whose contents, without a final line break, are sent as `Authorization: Bearer <token>` to an HTTP store; `~/` is the home directory. |
+
+Stores are asked in the order they are written. `OTOK_BUILD_CACHE` replaces the array: URLs separated by spaces, all
+read only, then `OTOK_BUILD_CACHE_PUSH` names one of them (or another URL, added after them) that is also pushed to,
+and `OTOK_BUILD_CACHE_TOKEN` is the token of every HTTP store of the variables: the forms of CI, whose secrets come as
+variables. An empty `OTOK_BUILD_CACHE` is no store. A machine setting, a store changes where a slice comes from, never
+what is built (common 1.6).
 
 ## 3. Strictness
 

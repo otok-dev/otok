@@ -28,6 +28,16 @@ enum class color_mode
     never
 };
 
+// A store of the shared build cache (config.md 2.3, cache.md 12).
+struct build_cache_store
+{
+    std::string url;                // file:, https or http
+    bool push = false;              // the slices this machine builds are uploaded
+    bool push_local = false;        // also those of sources and recipes of paths of this machine
+    std::string token_file;         // config.toml: the file of the bearer token, `~/` expanded; empty: none
+    std::string token;              // OTOK_BUILD_CACHE_TOKEN; empty: none. Never printed
+};
+
 // What config.toml says; keys it does not set are empty.
 struct config_file
 {
@@ -37,6 +47,7 @@ struct config_file
     std::optional<std::string> index_mirror;
     input_mirrors mirrors;      // asset-mirror, url-rewrite, mirrors-only
     std::optional<std::string> proxy;
+    std::optional<std::vector<build_cache_store>> build_caches;
     std::optional<std::int64_t> cache_max_age;
     std::optional<bool> keep_build_dirs;
     std::optional<bool> sandbox;
@@ -59,6 +70,7 @@ struct machine_config
     std::string index;          // the index: its view (view+https://) or repository URL; empty: none
     std::string index_mirror;   // a checkout of it, or a mirror of its HTTPS view; empty: none
     input_mirrors mirrors;      // asset-mirror, url-rewrite, mirrors-only (config.md 2.1)
+    std::vector<build_cache_store> build_caches;  // in the order they are asked (config.md 2.3)
     std::string proxy;          // empty: none
     std::int64_t cache_max_age = 30;  // days; 0: no automatic garbage collection
     bool keep_build_dirs = false;
