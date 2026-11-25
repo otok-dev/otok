@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdio>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <set>
@@ -140,6 +141,77 @@ void remove_stale_tmp(fs::path const& tmp_root, std::string const& own)
     }
 }
 
+// The entry locks the threads of this process hold or wait for, one registry for a store and its sessions: a thread
+// waiting for another thread of the process (the builds of otok publish) is told nothing, since "another otok process"
+// would be wrong (docs/PLAN.md decision 145). A thread is counted from before it tries the lock until it releases it, so
+// a lock found taken while another thread of the process is counted is that thread's, or one it waits for too.
+struct held_locks
+{
+    std::mutex m;
+    std::map<fs::path, std::size_t> users;  // lock file → threads holding it or waiting for it
+
+    // with m held
+    void leave(fs::path const& path)
+    {
+        auto const it = users.find(path);
+        if (it != users.end() && --it->second == 0) users.erase(it);
+    }
+};
+
+// An entry's lock held, counted in the registry while it is.
+class held_entry
+{
+public:
+    held_entry(std::shared_ptr<held_locks> registry, fs::path path, file_lock lock)
+        : registry_{std::move(registry)}, path_{std::move(path)}, lock_{std::move(lock)}
+    {
+    }
+    held_entry(held_entry&&) noexcept = default;
+    held_entry& operator=(held_entry&&) = delete;
+    ~held_entry() { release(); }
+
+    void release() noexcept
+    {
+        if (!registry_) return;
+        std::lock_guard lock{registry_->m};
+        registry_->leave(path_);
+        lock_->release();
+        registry_.reset();
+    }
+
+private:
+    std::shared_ptr<held_locks> registry_;
+    fs::path path_;
+    std::optional<file_lock> lock_;
+};
+
+// Takes the lock `lock_file`, waiting while another holds it; `on_wait` is told before waiting whether another thread of
+// this process holds it or waits for it (then the holder is taken for one of this process: a thread of it waiting for
+// another process makes the wait silent too, which is rare and costs only the notice).
+result<held_entry> hold_entry(std::shared_ptr<held_locks> const& registry, fs::path const& lock_file, std::function<void(bool within)> const& on_wait)
+{
+    bool within = false;
+    {
+        std::lock_guard lock{registry->m};
+        std::size_t const others = registry->users[lock_file]++;
+        auto taken = file_lock::try_acquire(lock_file);
+        if (!taken) {
+            registry->leave(lock_file);
+            return std::unexpected{taken.error()};
+        }
+        if (*taken) return held_entry{registry, lock_file, std::move(**taken)};
+        within = others > 0;
+    }
+    if (on_wait) on_wait(within);
+    auto taken = file_lock::acquire(lock_file);
+    if (!taken) {
+        std::lock_guard lock{registry->m};
+        registry->leave(lock_file);
+        return std::unexpected{taken.error()};
+    }
+    return held_entry{registry, lock_file, std::move(*taken)};
+}
+
 }
 
 struct cache_store::state
@@ -156,10 +228,23 @@ struct cache_store::state
     cache_access access = cache_access::shared;
     bool offline = false;
     fetch_locations mirrors;
+    std::shared_ptr<held_locks> locks = std::make_shared<held_locks>();  // shared with the sessions
 
     void waiting(std::string const& what) const
     {
         if (notices.waiting) notices.waiting("waiting for another otok process: " + what);
+    }
+
+    // An entry's lock; the notice of waiting `what` only for another process's holding. A build waiting with `lend` lends its
+    // job meanwhile (docs/PLAN.md decision 60).
+    result<held_entry> hold(fs::path const& lock_file, std::string const& what, entry_wait* waited = nullptr, bool lend = false) const
+    {
+        std::optional<lent_job> lent;
+        return hold_entry(locks, lock_file, [&](bool within) {
+            if (waited) *waited = within ? entry_wait::this_process : entry_wait::other_process;
+            if (!within) waiting(what);
+            if (lend) lent.emplace("another build");
+        });
     }
 
     void fetching(std::string const& what) const
@@ -271,6 +356,7 @@ result<cache_store> cache_store::session(cache_notices notices) const
     s->notices = std::move(notices);
     s->opened = opened;
     s->builds = opened->builds;
+    s->locks = opened->locks;
     s->tmp = opened->tmp / ("session-" + std::to_string(++sessions));
     std::error_code ec;
     fs::remove_all(long_path(s->tmp), ec);
@@ -299,9 +385,10 @@ fs::path cache_store::download_path(std::string const& sha256) const
 }
 
 result<fs::path> cache_store::ensure(fs::path const& entry, std::string const& description,
-    std::function<result<void>(fs::path const& staging)> const& make)
+    std::function<result<void>(fs::path const& staging)> const& make, entry_wait* waited)
 {
     std::error_code ec;
+    if (waited) *waited = entry_wait::none;
     if (fs::exists(entry, ec)) {  // entries appear atomically and never change
         mark_used(entry);
         return entry;
@@ -311,13 +398,7 @@ result<fs::path> cache_store::ensure(fs::path const& entry, std::string const& d
 
     fs::path lock_file = entry;
     lock_file += ".lock";
-    // a build waiting for another one lends its job meanwhile (docs/PLAN.md decision 60)
-    std::optional<lent_job> lent;
-    auto lock = file_lock::acquire(lock_file, [&] {
-        state_->waiting(description);
-        lent.emplace("another build");
-    });
-    lent.reset();
+    auto lock = state_->hold(lock_file, description, waited, true);
     if (!lock) return std::unexpected{lock.error()};
     if (fs::exists(entry, ec)) {  // created by the holder we waited for
         mark_used(entry);
@@ -345,12 +426,7 @@ result<void> cache_store::discard(fs::path const& entry, std::string const& desc
 {
     fs::path lock_file = entry;
     lock_file += ".lock";
-    std::optional<lent_job> lent;
-    auto lock = file_lock::acquire(lock_file, [&] {
-        state_->waiting(description);
-        lent.emplace("another build");
-    });
-    lent.reset();
+    auto lock = state_->hold(lock_file, description, nullptr, true);
     if (!lock) return std::unexpected{lock.error()};
     std::error_code ec;
     if (!fs::exists(entry, ec) || !damaged(entry)) return {};
@@ -417,7 +493,7 @@ std::vector<result<fs::path>> cache_store::fetch(std::span<cache_download const>
         std::size_t next = 0;
         std::vector<std::string> errors{};
     };
-    std::vector<file_lock> locks;
+    std::vector<held_entry> locks;
     std::vector<pending> files;
     for (auto const& [sha256, indices] : missing) {
         fs::path const path = download_path(sha256);
@@ -433,7 +509,7 @@ std::vector<result<fs::path>> cache_store::fetch(std::span<cache_download const>
             for (std::size_t i : indices) results[i] = fail("no asset-mirror or url-rewrite covers " + d.url + ", and mirrors-only is set");
             continue;
         }
-        auto lock = file_lock::acquire(lock_file, [&] { state_->waiting("downloading " + d.url); });
+        auto lock = state_->hold(lock_file, "downloading " + d.url);
         if (!lock) {
             for (std::size_t i : indices) results[i] = std::unexpected{lock.error()};
             continue;
@@ -650,7 +726,7 @@ result<fs::path> cache_store::git_repository(std::string const& url, std::string
 
     fs::path lock_file = repo;
     lock_file += ".lock";
-    auto lock = file_lock::acquire(lock_file, [&] { state_->waiting("fetching " + url); });
+    auto lock = state_->hold(lock_file, "fetching " + url);
     if (!lock) return std::unexpected{lock.error()};
 
     auto const present = [&] { return run_git(git, {git_dir, "cat-file", "-e", commit + "^{commit}"}, state_->tmp, log).has_value(); };

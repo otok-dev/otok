@@ -1126,13 +1126,18 @@ enum class cache_action
     push
 };
 
-// The stores of the shared build cache a build of this command asks (cache.md 12.2): none offline, with --no-build-cache or
-// for otok publish, whose builds say that a recipe builds on this machine. A store that cannot be opened is a warning.
-std::vector<build_cache_use> open_build_caches(parsed_command const& cmd, project& p, command_context& ctx, std::string const& only = {})
+// The stores of the shared build cache a build of this command asks (cache.md 12.2): none offline or with --no-build-cache;
+// a nested build (otok publish's) has those its command opened, or none. A store that cannot be opened is a warning.
+std::vector<build_cache_use> open_build_caches(parsed_command const& cmd, machine_config const& config, command_context& ctx,
+    std::string const& only = {})
 {
     std::vector<build_cache_use> stores;
-    if (offline(cmd) || ctx.nested || cmd.flag("no-build-cache")) return stores;
-    std::vector<build_cache_store> configured = p.config.build_caches;
+    if (ctx.nested) {
+        if (ctx.build_caches) stores = *ctx.build_caches;
+        return stores;
+    }
+    if (offline(cmd) || cmd.flag("no-build-cache")) return stores;
+    std::vector<build_cache_store> configured = config.build_caches;
     // otok cache push --store: that one, pushed to whatever config.toml says of it
     if (!only.empty()) {
         auto const it = std::ranges::find(configured, only, &build_cache_store::url);
@@ -1153,7 +1158,7 @@ std::vector<build_cache_use> open_build_caches(parsed_command const& cmd, projec
             token = std::move(*text);
             while (!token.empty() && (token.back() == '\n' || token.back() == '\r')) token.pop_back();
         }
-        auto store = shared_store::open(s.url, std::move(token), transport_of(ctx, p.config));
+        auto store = shared_store::open(s.url, std::move(token), transport_of(ctx, config));
         if (!store) {
             warn(ctx, store.error().message + "; it is not used");
             continue;
@@ -1185,7 +1190,7 @@ bool cache_command(parsed_command const& cmd, project& p, lock_file const& lock,
         diags.error({}, "--store is an option of 'otok cache push'");
         return false;
     }
-    std::vector<build_cache_use> stores = open_build_caches(cmd, p, ctx, named);
+    std::vector<build_cache_use> stores = open_build_caches(cmd, p.config, ctx, named);
     build_settings settings;
     settings.toolchains = std::move(toolchains);
     settings.tool_roots = ctx.tool_roots;
@@ -1343,7 +1348,8 @@ bool build_project(parsed_command const& cmd, project& p, lock_file const& lock,
     if (auto home = ctx.env("HOME"); home && !home->empty()) settings.denied_reads.push_back(path_from_utf8(*home));
     settings.launcher = ctx.launcher;
     // the stores of the shared build cache (cache.md 12), and the inputs of the slices built here alone (cache.md 12.2)
-    settings.stores = open_build_caches(cmd, p, ctx);
+    settings.stores = open_build_caches(cmd, p.config, ctx);
+    settings.built_here = ctx.built_here;
     settings.pushed_by = push_user(ctx);
     if (!planned.fetched) settings.fetch = [&](std::set<std::string> const& only, std::map<std::string, package_inputs>& into) -> result<void> {
         diagnostics fetched;
@@ -1359,6 +1365,7 @@ bool build_project(parsed_command const& cmd, project& p, lock_file const& lock,
     std::expected<std::vector<built_package>, std::vector<error>> built;
     settings.broker = ctx.jobs;
     settings.announced = ctx.announced;
+    settings.tag = ctx.tag;
     if (ctx.events) {
         settings.on_slice = [&ctx](slice_event const& e) {
             using k = slice_event::kind;
@@ -3281,6 +3288,19 @@ result<std::vector<std::filesystem::path>> checkout_recipes(git_tool const& git,
     return dirs;
 }
 
+// An option's value in the tag of a build of otok publish (docs/PLAN.md decision 145): a string without quotes, a list
+// with commas.
+std::string tag_value(option_data const& value)
+{
+    if (auto const* text = std::get_if<std::string>(&value)) return *text;
+    if (auto const* list = std::get_if<std::vector<std::string>>(&value)) {
+        std::string joined;
+        for (std::string const& item : *list) joined += (joined.empty() ? "" : ",") + item;
+        return joined;
+    }
+    return format_option_value(value);
+}
+
 // A build of otok publish as cli-json.md 10 gives it, without `state` and `seconds`.
 nlohmann::json publish_build_json(std::size_t number, recipe const& r, std::string_view publisher, std::string_view target,
     std::vector<std::string> const& platforms, build_environment const& environment, option_values const* options)
@@ -3566,11 +3586,22 @@ int run_publish(parsed_command const& cmd, command_context& ctx)
         for (publish_recipe const& p : recipes) {
             if (!p.published) unpublished.push_back(*p.addition);
         }
+        // the stores of the shared build cache, opened once for all the builds (cache.md 12.2): the dependencies come from
+        // them as in an install; the recipes published, never, since their builds say that they build on this machine
+        std::vector<build_cache_use> const stores = open_build_caches(cmd, *config, ctx);
+        std::set<std::string> built_here;
+        for (publish_recipe const& p : recipes) {
+            if (p.addition) built_here.insert(p.addition->recipe_sha256);
+        }
         // a project per recipe, environment of this machine and option set (docs/PLAN.md decision 82)
         struct publish_build
         {
             std::string text;           // "p/b 2.0-r1 (linux) for linux in linux/gcc with {level = 2}"
             std::string label;          // "p/b 2.0-r1 (linux) in linux/gcc with {level = 2}": the display's while it packages
+            // what tells it from the other builds of the publication (docs/PLAN.md decision 145): "level=2", then "[3 level=2] "
+            // before its lines on standard error; empty with one build
+            std::string tag;
+            std::string number;         // "[3] " before its lines on standard output; empty with one build
             std::string manifest;
             std::filesystem::path dir;
             bool tool = false;          // a tool recipe, in [tool-deps] (publish_project::tool)
@@ -3602,22 +3633,45 @@ int run_publish(parsed_command const& cmd, command_context& ctx)
                     for (std::size_t i = 0; i < project->platforms.size(); ++i) text += (i ? ", " : " ") + project->platforms[i];
                     text += " in " + e.text();
                     std::string label = p.addition->label + " in " + e.text();
+                    // the tag: the environment when the recipe builds in several here, the options when it has checks
+                    std::string tag = environments.size() > 1 ? e.text() : std::string{};
+                    if (!p.r->publish_checks.empty()) {
+                        std::string values;
+                        if (options) {
+                            for (auto const& [name, value] : *options) values += (values.empty() ? "" : " ") + name + "=" + tag_value(value.value);
+                        }
+                        tag += (tag.empty() ? "" : " ") + (values.empty() ? std::string{"default"} : values);
+                    }
                     if (options) {
                         std::string values;
                         for (auto const& [name, value] : *options) values += (values.empty() ? "" : ", ") + name + " = " + format_option_value(value.value);
                         text += " with {" + values + "}";
                         label += " with {" + values + "}";
                     }
-                    out << "building " << text << "\n";
                     nlohmann::json event = publish_build_json(builds.size() + 1, *p.r, publisher, (*target)->name, project->platforms, e, options);
                     nlohmann::json queued(event);
                     queued["state"] = "queued";
                     queued["seconds"] = nullptr;
                     emit(ctx, "build", std::move(queued));
-                    builds.push_back({text, label, project->manifest, cache->tmp() / ("publish-" + std::to_string(builds.size() + 1)), project->tool, 0,
+                    builds.push_back({text, label, std::move(tag), {}, project->manifest, cache->tmp() / ("publish-" + std::to_string(builds.size() + 1)), project->tool, 0,
                         std::move(event)});
                 }
             }
+        }
+
+        // the builds, numbered as their events number them when there are several (docs/PLAN.md decision 145): on standard
+        // output, and with --format json, which says nothing there, once on standard error
+        bool const several = builds.size() > 1;
+        for (std::size_t i = 0; i < builds.size(); ++i) {
+            publish_build& b = builds[i];
+            std::string const number = std::to_string(i + 1);
+            b.number = several ? "[" + number + "] " : std::string{};
+            b.tag = several ? "[" + number + (b.tag.empty() ? "" : " " + b.tag) + "] " : std::string{};
+            out << b.number << "building " << b.text << "\n";
+        }
+        if (several && ctx.events) {
+            ctx.err << builds.size() << " builds:\n";
+            for (publish_build const& b : builds) ctx.err << "  " << b.number << b.text << "\n";
         }
 
         // all at once (docs/PLAN.md decision 60), with the jobs of one jobserver and one display; one after another
@@ -3630,12 +3684,14 @@ int run_publish(parsed_command const& cmd, command_context& ctx)
             // what the builds write, line by line, each thread's apart; on a live terminal all of it above the slices
             progress_display err_lines{ctx.err, std::move(live)};
             progress_display out_lines{out, std::nullopt};
-            std::ostream sub_err{&err_lines.lines()};
             std::ostream summary{err_lines.live() ? &err_lines.lines() : &out_lines.lines()};
             // what the installs of the temporary projects sum up (their lock, inputs, slices, output) is not this command's
             std::ostream nothing{nullptr};
             announcements announced;
             auto const run_build = [&](publish_build& b) {
+                // its lines on standard error after its tag
+                progress_display::line_buffer tagged{err_lines, b.tag};
+                std::ostream build_err{&tagged};
                 // its events (cli-json.md 10): those of its slices, the choices of its install, its errors and warnings
                 std::optional<json_lines> events;
                 if (ctx.events) {
@@ -3662,20 +3718,23 @@ int run_publish(parsed_command const& cmd, command_context& ctx)
                         d.message = ok.error().message;
                         events->report(d);
                     } else {
-                        sub_err << "error: " << ok.error().message << "\n";
+                        build_err << "error: " << ok.error().message << "\n";
                     }
                     b.result = 1;
                     said("failed", true);
                     return;
                 }
-                command_context sub{b.dir, ctx.targets, nullptr, nothing, sub_err, env};
+                command_context sub{b.dir, ctx.targets, nullptr, nothing, build_err, env};
                 sub.nested = true;
                 sub.announced = &announced;
                 sub.label = b.label;
+                sub.tag = b.tag;
                 sub.make_build_targets = ctx.make_build_targets;
                 sub.launcher = ctx.launcher;
                 sub.probe_version = ctx.probe_version;
                 sub.unpublished = unpublished;
+                sub.build_caches = &stores;
+                sub.built_here = built_here;
                 sub.tool_roots = b.tool;
                 sub.git_env = git_env;
                 sub.display = &err_lines;
@@ -3694,7 +3753,7 @@ int run_publish(parsed_command const& cmd, command_context& ctx)
                 if (auto jobs = cmd.value("jobs")) install.values.emplace("jobs", *jobs);
                 b.result = install_pipeline(install, sub, true, {}, false);
                 said(b.result == 0 ? "built" : "failed", true);
-                if (b.result == 0) summary << "built " << b.text << " (" << detail::elapsed_text(std::chrono::steady_clock::now() - started) << ")\n";
+                if (b.result == 0) summary << b.number << "built " << b.text << " (" << detail::elapsed_text(std::chrono::steady_clock::now() - started) << ")\n";
                 std::filesystem::remove_all(b.dir, removed);
             };
             if (one_at_a_time) {
@@ -4128,7 +4187,8 @@ std::span<command_spec const> command_specs()
                 {"dry-run", 0, "", "Build, and publish nothing; with --no-build, only check the recipes as a publication would"}, {"no-build", 0, "", "Add the entry without building the recipe"},
                 {"no-push", 0, "", "With a checkout of the index: commit the entry, but do not push"},
                 verbose_option,
-                keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option, jobs_option, stream_format_option}, 0, any_number},
+                keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option, jobs_option, no_build_cache_option,
+                stream_format_option}, 0, any_number},
         {"agent-skill", "", "Write the skill for coding agents (SKILL.md: how to use otok) into the project's .claude/skills/otok/",
             {{"user", 0, "", "Into ~/.claude/skills/ instead, for every project of this user"},
                 {"dir", 0, "DIR", "Into DIR/otok/ instead: the skills directory of another agent"},

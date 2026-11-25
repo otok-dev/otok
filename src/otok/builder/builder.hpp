@@ -157,6 +157,7 @@ struct build_settings
     // docs/PLAN.md decision 59: 1, what each slice builds with and the commands it runs; 2, their output too, one slice at a time
     int verbosity = 0;
     progress_display* display = nullptr;    // shows the slices under way; nothing: none
+    std::string tag;                        // before their labels there: the build's among several (docs/PLAN.md decision 145)
     // the jobs, shared with other builders (the builds of otok publish, docs/PLAN.md decisions 60, 61); nothing: a broker
     // of its own with `jobs`
     job_broker* broker = nullptr;
@@ -177,6 +178,9 @@ struct build_settings
     bool tool_roots = false;
     // The stores of the shared build cache, asked in this order after the local cache (cache.md 12.2); empty: none
     std::vector<build_cache_use> stores;
+    // Recipes whose slices are not asked of the stores, by the hashes of their trees (recipe-hash.md): those otok publish
+    // publishes, whose builds say that they build on this machine (cache.md 12.2); their dependencies are asked as any
+    std::set<std::string> built_here;
     std::string pushed_by;                  // the user named in the descriptors of pushes
     // Fetches the inputs of the packages (package keys) into the builder's inputs, of the slices it builds only (cache.md
     // 12.2); nothing: they were all fetched before
@@ -266,6 +270,7 @@ private:
         std::string text, hex;              // the description of the key and its SHA-256
         bool known = true;                  // false: a dependency's key comes from its build (a dev slice, otok-dev-toml.md 4)
         bool local = false;                 // its source or recipe, or a dependency's, is a path of this machine (cache.md 12.3)
+        bool from_stores = true;            // false: of a recipe of build_settings::built_here, never asked of the stores
         std::map<std::string, std::string> option_keys;
         std::map<std::string, std::filesystem::path> option_files;
         language_standards standards;

@@ -2585,12 +2585,36 @@ TEST_F(builder_test, publishes_what_it_built)
     // the defaults and with its check, and its entry records it
     ASSERT_EQ(run({"publish", "--index", index_arg, "--publisher", "p", "--all"}), 0) << err.str();
     std::string const o = out.str();
-    EXPECT_NE(o.find("building p/a 1.0-r1 (native) for native in */cc\n"), std::string::npos) << o;
-    EXPECT_NE(o.find("building p/b 2.0-r1 (native) for native in */cc\n"), std::string::npos) << o;
-    EXPECT_NE(o.find("building p/b 2.0-r1 (native) for native in */cc with {level = 2}\n"), std::string::npos) << o;
+    // numbered, as their events number them (docs/PLAN.md decision 145)
+    EXPECT_NE(o.find("[1] building p/a 1.0-r1 (native) for native in */cc\n"), std::string::npos) << o;
+    EXPECT_NE(o.find("[2] building p/b 2.0-r1 (native) for native in */cc\n"), std::string::npos) << o;
+    EXPECT_NE(o.find("[3] building p/b 2.0-r1 (native) for native in */cc with {level = 2}\n"), std::string::npos) << o;
     // each build said done; nothing of the installs of the temporary projects (docs/PLAN.md decision 60)
-    EXPECT_NE(o.find("built p/b 2.0-r1 (native) for native in */cc with {level = 2} ("), std::string::npos) << o;
-    EXPECT_NE(o.find("built p/a 1.0-r1 (native) for native in */cc ("), std::string::npos) << o;
+    EXPECT_NE(o.find("[3] built p/b 2.0-r1 (native) for native in */cc with {level = 2} ("), std::string::npos) << o;
+    EXPECT_NE(o.find("[1] built p/a 1.0-r1 (native) for native in */cc ("), std::string::npos) << o;
+    // the lines of each build after its tag: the options of a recipe with checks; b with the defaults, which builds 1 and 2
+    // both need, said once, by the build that built it, and no build of this process taken for another process
+    std::string const e = err.str();
+    std::string const b_slice = "building b 2.0 for native-" + machine_arch();
+    EXPECT_NE(e.find("[3 level=2] " + b_slice), std::string::npos) << e;
+    EXPECT_NE(e.find("[1] building a 1.0 for native-" + machine_arch()), std::string::npos) << e;
+    std::map<std::string, int> said;  // a line without its tag: how many times
+    std::istringstream lines{e};
+    for (std::string line; std::getline(lines, line);) {
+        ASSERT_TRUE(line.starts_with("[")) << line << "\n" << e;
+        std::size_t const tag_end = line.find("] ");
+        ASSERT_NE(tag_end, std::string::npos) << line;
+        std::string const rest = line.substr(tag_end + 2);
+        ++said[rest.starts_with("built ") ? rest.substr(0, rest.rfind(" (")) : rest];  // without the time
+    }
+    // b twice, with the defaults and with level = 2; a once; each download once
+    EXPECT_EQ(said[b_slice], 2) << e;
+    EXPECT_EQ(said["built b 2.0 for native-" + machine_arch()], 2) << e;
+    EXPECT_EQ(said["building a 1.0 for native-" + machine_arch()], 1) << e;
+    for (auto const& [line, times] : said) {
+        if (line.starts_with("downloading ")) EXPECT_EQ(times, 1) << line << "\n" << e;
+    }
+    EXPECT_EQ(e.find("another otok process"), std::string::npos) << e;
     for (char const* internal : {"inputs in the cache", "otok.lock", "slices: ", "output 'Otok'"}) {
         EXPECT_EQ(o.find(internal), std::string::npos) << internal << "\n" << o;
     }
@@ -2666,6 +2690,11 @@ TEST_F(builder_test, publishes_what_it_built)
     EXPECT_TRUE(list[7]["seconds"].is_number()) << list[7];
     EXPECT_EQ(list[5]["slice"], slice);
     EXPECT_EQ(list[8]["entries"], nlohmann::json::array());
+    EXPECT_EQ(err.str().find("builds:"), std::string::npos) << err.str();  // one build: no list, no tags
+    // several: the list of the builds once on standard error, which nothing else lists (docs/PLAN.md decision 145)
+    ASSERT_EQ(run({"publish", "--index", index_arg, "--publisher", "p", "--dry-run", "--all", "--format", "json"}), 0) << err.str();
+    EXPECT_TRUE(err.str().starts_with("3 builds:\n  [1] p/a 1.0-r1 (native) for native in */cc\n  [2] p/b 2.0-r1 (native) for native in */cc\n"
+                                      "  [3] p/b 2.0-r1 (native) for native in */cc with {level = 2}\n")) << err.str();
 
     // a failed build publishes nothing
     write_recipe("a", "1.1", "function build(slice, options, deps)\n    error('broken')\nend\n");
@@ -2687,6 +2716,84 @@ TEST_F(builder_test, publishes_what_it_built)
         std::string::npos) << list[9];
     EXPECT_EQ(list.back(), nlohmann::json::parse(R"({"event": "end", "exit": 1})"));
     EXPECT_EQ(err.str().find("error:"), std::string::npos) << err.str();
+}
+
+// otok publish and the shared build cache (cache.md 12.2): the dependencies from the stores, the recipes published built
+// here; what it builds is pushed.
+TEST_F(builder_test, publish_takes_dependencies_from_a_build_cache)
+{
+    auto git = find_git(current_environment());
+    if (!git) GTEST_SKIP() << "git is not in PATH";
+    auto const git_in = [&](std::filesystem::path const& dir, std::vector<std::string> args) {
+        std::vector<std::string> full{"-c", "user.name=otok test", "-c", "user.email=test@otok.invalid", "-c", "core.autocrlf=false"};
+        full.insert(full.end(), args.begin(), args.end());
+        auto done = run_git(*git, full, dir, upstream.path() / "setup.log", true);
+        EXPECT_TRUE(done.has_value()) << (done ? "" : done.error().message);
+        return done.value_or("");
+    };
+    git_in(project.path(), {"init", "-q"});
+    git_in(project.path(), {"add", "."});
+    git_in(project.path(), {"commit", "-q", "-m", "recipes"});
+    git_in(project.path(), {"remote", "add", "origin", file_url(project.path())});
+    upstream.write("seed/index.toml", "format = 1\n");
+    git_in(upstream.path(), {"init", "-q", "--bare", "index.git"});
+    git_in(upstream.path() / "seed", {"init", "-q"});
+    git_in(upstream.path() / "seed", {"add", "."});
+    git_in(upstream.path() / "seed", {"commit", "-q", "-m", "index"});
+    git_in(upstream.path() / "seed", {"push", "-q", file_url(upstream.path() / "index.git"), "HEAD:refs/heads/main"});
+    git_in(upstream.path(), {"clone", "-q", "-b", "main", file_url(upstream.path() / "index.git"), "index"});
+    std::filesystem::path const index = upstream.path() / "index";
+    git_in(index, {"config", "user.name", "otok test"});
+    git_in(index, {"config", "user.email", "test@otok.invalid"});
+    std::string const index_arg = path_to_utf8(index);
+    // b in the index, a published after it: a's builds take b from the index
+    ASSERT_EQ(run({"publish", "--index", index_arg, "--publisher", "p", "recipes/b"}), 0) << err.str();
+
+    test::temp_dir store;
+    std::string const url = file_url(store.path());
+    std::filesystem::path const config = upstream.path() / "config.toml";
+    std::ofstream{config} << "[[build-cache]]\nurl = \"" << url << "\"\npush = true\n";
+    env["OTOK_CONFIG"] = path_to_utf8(config);
+    // the state of each slice of a's build, by library
+    auto const slices = [&] {
+        std::map<std::string, std::string> states;
+        std::istringstream lines{out.str()};
+        for (std::string line; std::getline(lines, line);) {
+            auto j = nlohmann::json::parse(line, nullptr, false);
+            if (j.is_discarded() || j.value("event", "") != "slice") continue;
+            std::string& s = states[j.value("library", "?")];
+            s += (s.empty() ? "" : " ") + j.value("state", "?");
+            if (j.contains("from") && j["from"].is_string()) s += " from " + j["from"].get<std::string>();
+        }
+        return states;
+    };
+
+    // built here, both pushed: the slices of index recipes are no paths of this machine
+    ASSERT_EQ(run({"clean"}), 0) << err.str();
+    ASSERT_EQ(run({"publish", "--index", index_arg, "--publisher", "p", "--dry-run", "recipes/a", "--format", "json"}), 0) << err.str();
+    auto states = slices();
+    EXPECT_EQ(states["b"], "building built") << out.str();
+    EXPECT_EQ(states["a"], "building built") << out.str();
+    EXPECT_EQ(std::distance(std::filesystem::directory_iterator{store.path() / "ac"}, std::filesystem::directory_iterator{}), 2);
+
+    // another machine: b from the store, a built though the store has it too, since its build is what a publication says
+    ASSERT_EQ(run({"clean"}), 0) << err.str();
+    ASSERT_EQ(run({"publish", "--index", index_arg, "--publisher", "p", "--dry-run", "recipes/a", "--format", "json"}), 0) << err.str();
+    states = slices();
+    EXPECT_EQ(states["b"], "cached from " + url) << out.str();
+    EXPECT_EQ(states["a"], "building built") << out.str();
+    // published together, b is built here too: in its own build and in a's, where the store is not asked of it
+    ASSERT_EQ(run({"clean"}), 0) << err.str();
+    ASSERT_EQ(run({"publish", "--index", index_arg, "--publisher", "p", "--dry-run", "--all", "--format", "json"}), 0) << err.str();
+    EXPECT_EQ(out.str().find("\"from\":\"" + url + "\""), std::string::npos) << out.str();
+
+    // --no-build-cache: the local cache alone
+    ASSERT_EQ(run({"clean"}), 0) << err.str();
+    ASSERT_EQ(run({"publish", "--index", index_arg, "--publisher", "p", "--dry-run", "recipes/a", "--no-build-cache", "--format", "json"}), 0)
+        << err.str();
+    states = slices();
+    EXPECT_EQ(states["b"], "building built") << out.str();
+    EXPECT_EQ(states["a"], "building built") << out.str();
 }
 
 // ---- the work directories of dev slices (otok-dev-toml.md 4)

@@ -36,8 +36,18 @@ struct cache_download
 // Messages about what the cache is doing; either may be empty.
 struct cache_notices
 {
-    std::function<void(std::string const& what)> waiting{};   // for another process holding an entry's lock
+    // for another process holding an entry's lock; never for another thread of this one (the builds of otok publish,
+    // docs/PLAN.md decision 145)
+    std::function<void(std::string const& what)> waiting{};
     std::function<void(std::string const& what)> fetching{};  // before a download or a git fetch starts
+};
+
+// Whose holding of an entry's lock cache_store::ensure waited for.
+enum class entry_wait
+{
+    none,
+    this_process,   // another thread of this process: the builds of otok publish (docs/PLAN.md decision 145)
+    other_process
 };
 
 // How a process uses the cache (cache.md 8): every otok process shares it, `otok clean` has it alone.
@@ -140,9 +150,11 @@ public:
         std::string const& path, git_tool const& git, std::string const& library = {});
 
     // The entry `entry` (a path in the cache), created if missing (cache.md 6): `make` builds it in a
-    // staging path under tmp(), which is then renamed to `entry`. `description` names it in wait notices.
+    // staging path under tmp(), which is then renamed to `entry`. `description` names it in wait notices. `waited`, when
+    // given, tells whose holding of the entry it waited for: another process's, or another thread's of this one.
     result<std::filesystem::path> ensure(std::filesystem::path const& entry, std::string const& description,
-        std::function<result<void>(std::filesystem::path const& staging)> const& make);
+        std::function<result<void>(std::filesystem::path const& staging)> const& make,
+        entry_wait* waited = nullptr);
 
     // Removes the entry `entry`, found damaged (cache.md 6.2): under its lock, and only if `damaged` still says so (another
     // process may have built it again meanwhile), renamed into tmp() first so that nobody sees it half removed. Nothing

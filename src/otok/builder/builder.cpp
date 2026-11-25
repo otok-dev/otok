@@ -1132,6 +1132,7 @@ std::expected<std::vector<built_package>, std::vector<error>> builder::build_all
             from[i] = where::local;
             continue;
         }
+        if (!plans[i]->from_stores) continue;
         for (build_cache_use const& s : settings_.stores) {
             auto found = s.store.lookup(plans[i]->hex);
             if (!found) {
@@ -1825,6 +1826,9 @@ result<builder::slice_plan> builder::plan_slice(resolved_package const& p, bool 
     key["recipe-sha256"] = *recipe_sha256;
     // a recipe of a path of this machine (cache.md 12.3)
     plan.local = locked->kind == locked_package::recipe_kind::path;
+    // a recipe otok publish publishes is built here, never taken from a store (cache.md 12.2): the one of its project, a git
+    // recipe, and those it publishes with it, of the index
+    plan.from_stores = !settings_.built_here.contains(*recipe_sha256);
     key["source"] = source_pin(locked->source);
     // the working trees of otok.dev.toml: `dev`, their contents are the dev slice's business (otok-dev-toml.md 4)
     plan.dev = inputs.dev.has_value();
@@ -2067,7 +2071,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         if (!gone) return std::unexpected{gone.error()};
     }
     // from a store of the shared build cache, which the plan found holding it (cache.md 12.2)
-    if (!dev && plan.known && !settings_.stores.empty()) {
+    if (!dev && plan.known && plan.from_stores && !settings_.stores.empty()) {
         if (auto const from = fetch_from_store(hex, out.entry, spec, *target, label + " for " + slice_label(spec))) {
             if (auto result = read_result(out.entry)) {
                 out.output = std::move(*result);
@@ -2144,9 +2148,11 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
     std::string const script_label = p.library + "/build.lua";
     if (tools) slice.tools_prefix = builds_drive_.empty() ? tools->entry / "prefix" : virtual_drives::to_virtual(tools->entry / "prefix");
 
-    // on a terminal the slice is shown below the lines while it builds (docs/PLAN.md decision 59); with -vv this heads its output
     report_slice(slice_event::kind::building, 0);
-    if (!settings_.display || settings_.verbosity >= 2) say("building " + label + " for " + slice_label(spec));
+    // its line, said by the build that builds it, below (on a terminal the slice is shown below the lines while it builds,
+    // docs/PLAN.md decision 59; with -vv the line heads its output): a build waiting for another of this process (the
+    // builds of otok publish) says nothing of it (docs/PLAN.md decision 145)
+    bool made_here = false;
     // below the lines while it builds (docs/PLAN.md decision 59)
     struct shown_task
     {
@@ -2157,7 +2163,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
             on_job_wait({});
             if (display) display->end(id);
         }
-    } const shown{settings_.display, settings_.display ? settings_.display->begin(label + "  " + slice_label(spec), current_priority()) : 0};
+    } const shown{settings_.display, settings_.display ? settings_.display->begin(settings_.tag + label + "  " + slice_label(spec), current_priority()) : 0};
     // and what it does now
     auto const show_stage = [&shown](std::string text) {
         if (shown.display) shown.display->stage(shown.id, std::move(text));
@@ -2215,6 +2221,8 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
     building_since = started;
     fs::path const work = dev ? out.entry : work_root_ / work_name;
     auto const build = [&](fs::path const& staging) -> result<void> {
+        made_here = true;
+        if (!settings_.display || settings_.verbosity >= 2) say("building " + label + " for " + slice_label(spec));
         // a dev slice keeps source/ and build/ while the rest of its key stays (otok-dev-toml.md 4)
         std::optional<dev_record> record;
         if (dev) {
@@ -2848,6 +2856,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
         return {};
     };
     result<void> made;
+    entry_wait waited = entry_wait::none;
     if (dev) {
         // one otok at a time in the work directory
         fs::create_directories(work.parent_path(), ec);
@@ -2855,7 +2864,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
             [&] { say("note: waiting for another otok building " + label + " for " + slice_label(spec)); });
         made = held ? build({}) : result<void>{std::unexpected{held.error()}};
     } else {
-        if (auto ensured = cache_.ensure(out.entry, "building " + label + " for " + slice_label(spec), build); !ensured) made = std::unexpected{ensured.error()};
+        if (auto ensured = cache_.ensure(out.entry, "building " + label + " for " + slice_label(spec), build, &waited); !ensured) made = std::unexpected{ensured.error()};
     }
     if (!made) return failure(std::unexpected{made.error()});
     if (dev) {
@@ -2872,8 +2881,9 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
     std::snprintf(seconds, sizeof seconds, "%.1f", took.count());
     if (shown.display) shown.display->end(shown.id);  // off the display before its line
     report_slice(slice_event::kind::built, took.count());
-    say("built " + label + " for " + slice_label(spec) + (dev ? " (dev: " + inputs.dev->label + ")" : std::string{}) + " (" + seconds + " s)"
-        + slice_done(p.id, tool, entry));
+    std::string const done = slice_done(p.id, tool, entry);
+    if (made_here || waited == entry_wait::other_process)
+        say("built " + label + " for " + slice_label(spec) + (dev ? " (dev: " + inputs.dev->label + ")" : std::string{}) + " (" + seconds + " s)" + done);
     // to the stores that take it (cache.md 12.3): never a dev slice or one depending on a dev slice, whose key the plan
     // could not know
     if (!dev && !settings_.stores.empty()) {

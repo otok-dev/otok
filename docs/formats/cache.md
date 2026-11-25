@@ -146,8 +146,9 @@ entry has a lock file next to it, `<entry>.lock` (`downloads/sha256/<sha256>.loc
 
 1. If the entry exists, use it (no lock needed: entries appear atomically).
 2. Take the exclusive lock on `<entry>.lock` (created if missing), waiting for another holder; while
-   waiting, otok says which entry it waits for.
-3. If the entry exists now, another process created it: release and use it.
+   waiting, otok says which entry it waits for when another process holds it; a thread of the same process
+   (another build of `otok publish`) is waited for silently, since that build says what it makes.
+3. If the entry exists now, another holder created it: release and use it.
 4. Create it under `tmp/<process>/`, then rename it to its final name (same file system, so the
    rename is atomic).
 5. Release the lock. Lock files stay; they are empty and cost nothing.
@@ -368,9 +369,12 @@ current time (9). An entry failing any of these is dropped with a warning naming
 asked, or the slice is built. A store that cannot be reached (a network error, an HTTP status other than `200` and
 `404`) is a warning once per command and is not asked again in that command.
 
-Stores are not used with `--offline` or `--frozen` (6.1), by `otok fetch`, which fetches inputs for building offline,
-and by `otok publish`, whose builds say that a recipe builds on this machine. `--no-build-cache` turns them off for one
-run of `install` or `update`.
+Stores are not used with `--offline` or `--frozen` (6.1) and by `otok fetch`, which fetches inputs for building offline.
+`otok publish` asks them for the slices of the dependencies of its builds as `install` does, and pushes what it builds;
+never for the slices of the recipes it publishes in that run (those of its `--all` or `DIR` arguments, published already or
+not), told by the hashes of their trees (`recipe-hash.md`): its builds say that those build on this machine, so they come
+from the local cache or are built. `--no-build-cache` turns the stores off for one run of `install`, `update` or
+`publish`.
 
 ### 12.3 Push
 

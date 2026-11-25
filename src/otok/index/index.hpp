@@ -194,6 +194,7 @@ struct index_addition
     std::string release;               // "a 1.0-r1"
     std::string entry_path;            // "recipes/<publisher>/<name>/<variant>/<version>-r<revision>.toml"
     std::string entry_text;
+    std::string recipe_sha256;         // the hash of the recipe tree (recipe-hash.md), as the entry says
     std::string library_path;          // "libraries/<library>.toml", added when the index has none
     std::string library_text;
 };

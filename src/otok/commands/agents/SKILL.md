@@ -142,7 +142,29 @@ options, linkage and products.
 
 `otok tree` (the graph, text), `otok fetch` (inputs only, no build), `otok clean` (the cache), `otok help <command>`.
 
-A team may share built slices through a build cache of its own: stores named in the machine's `config.toml`
-(`[[build-cache]]`) or `OTOK_BUILD_CACHE*` variables, never in `otok.toml`. `otok cache status` shows where each slice
-would come from (the local cache, a store, a build); `otok install --no-build-cache` uses the local cache alone. Do not
-put a store's URL or token into the project's files.
+## A shared build cache
+
+A team may share built slices through stores of its own: a directory (`file:///mnt/share/otok`) or an HTTP server
+answering `GET` and `PUT` of files (nginx with WebDAV, bazel-remote, a generic Artifactory repository). There is no
+public store. Stores belong to the machine, never to the project: do not put a store's URL or token into `otok.toml`,
+`otok.dev.toml` or any file of the repository.
+
+- On a machine, in `config.toml` (`~/.config/otok/config.toml`, Windows `%APPDATA%\otok\config.toml`), at its end:
+
+  ```toml
+  [[build-cache]]
+  url = "https://otok-cache.example.com/team"
+  token-file = "~/.config/team/otok-cache-token"   # a bearer token; ~/ is the home directory
+  push = true            # upload what this machine builds; give it the store's write token
+  # push-local = true    # also libraries of `path` sources and recipes of this machine
+  ```
+
+  Several tables are asked in their order. A relative `token-file` is relative to the directory of `config.toml`.
+- In CI, variables instead: `OTOK_BUILD_CACHE` (URLs separated by spaces, read only), `OTOK_BUILD_CACHE_PUSH` (one URL
+  pushed to), `OTOK_BUILD_CACHE_TOKEN` (from a secret of the CI).
+- Never print a token, never write one into a command line or a log: give it as a file or a secret.
+- `otok cache status` shows where each slice would come from (the local cache, a store, a build); `otok cache push
+  [LIBRARY...] [--store URL]` uploads what the local cache holds; `--no-build-cache` turns the stores off for one run.
+- A store that cannot be reached is a warning and the libraries are built; a slice is found only when its toolchain is
+  the same, so machines sharing a store pin Xcode, Visual Studio, the NDK and the compilers. Dev builds are never
+  pushed; `otok publish` takes dependencies from the stores, never the recipes it publishes.

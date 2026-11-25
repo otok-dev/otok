@@ -707,7 +707,8 @@ result<index_addition> make_index_entry(std::filesystem::path const& recipe_dir,
     a.variant = r->variant;
     a.release = r->name + " " + version;
     a.entry_path = "recipes/" + std::string{publisher} + "/" + r->name + "/" + r->variant + "/" + version + ".toml";
-    a.entry_text = write_index_entry(recipe_projection(doc->table(), publisher, targets), recipe_source, tree_hash(*files), published);
+    a.recipe_sha256 = tree_hash(*files);
+    a.entry_text = write_index_entry(recipe_projection(doc->table(), publisher, targets), recipe_source, a.recipe_sha256, published);
     a.library_path = "libraries/" + r->library + ".toml";
     a.library_text = "scheme = \"dotted\"\n";
     return a;

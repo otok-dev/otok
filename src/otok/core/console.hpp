@@ -107,14 +107,14 @@ public:
     // Redraws the tasks.
     void draw();
 
-    // A stream buffer that gives line() every complete line written to it, each thread's apart.
-    std::streambuf& lines() noexcept { return buffer_; }
-
-private:
+    // A stream buffer that gives line() every complete line written to it, each thread's apart, after `prefix`: the lines
+    // of one build among several (otok publish, docs/PLAN.md decision 145, "[2 level=2] "). Its unfinished lines are given
+    // when it is destroyed, before the display it writes to.
     class line_buffer : public std::streambuf
     {
     public:
-        explicit line_buffer(progress_display& d) : display_{d} {}
+        explicit line_buffer(progress_display& d, std::string prefix = {}) : display_{d}, prefix_{std::move(prefix)} {}
+        ~line_buffer() override { finish(); }
         void finish();      // the unfinished lines, as lines
 
     protected:
@@ -123,9 +123,15 @@ private:
 
     private:
         progress_display& display_;
+        std::string prefix_;
         std::mutex m_;
         std::map<std::thread::id, std::string> pending_;
     };
+
+    // A stream buffer that gives line() every complete line written to it, each thread's apart.
+    std::streambuf& lines() noexcept { return buffer_; }
+
+private:
 
     struct task
     {

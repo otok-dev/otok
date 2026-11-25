@@ -319,7 +319,7 @@ void progress_display::line_buffer::finish()
         rest.swap(pending_);
     }
     for (auto const& [thread, text] : rest) {
-        if (!text.empty()) display_.line(text);
+        if (!text.empty()) display_.line(prefix_ + text);
     }
 }
 
@@ -348,7 +348,7 @@ std::streamsize progress_display::line_buffer::xsputn(char const* s, std::stream
         }
         if (pending.empty()) pending_.erase(std::this_thread::get_id());
     }
-    for (std::string const& l : complete) display_.line(l);
+    for (std::string const& l : complete) display_.line(prefix_ + l);
     return n;
 }
 

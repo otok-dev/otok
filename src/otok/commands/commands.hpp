@@ -7,7 +7,9 @@
 #include <functional>
 #include <memory>
 #include <ostream>
+#include <set>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "otok/builder/builder.hpp"
@@ -53,6 +55,9 @@ struct command_context
     // What `display` calls such an install while it packages and writes its output, after its slices (otok publish:
     // the recipe, "apotocki/boost 1.92.0-r3")
     std::string label{};
+    // What tells such an install from the others the command runs (otok publish: "[3 level=2] ", docs/PLAN.md decision
+    // 145): before its slices on `display`, as `err` puts it before its lines; empty: nothing
+    std::string tag{};
     // The targets that can build (docs/PLAN.md decision 19), made with the machine settings; a project
     // whose target has none is resolved and fetched only.
     std::function<std::vector<std::unique_ptr<build_target>>(machine_config const&)> make_build_targets{};
@@ -65,6 +70,11 @@ struct command_context
     http_transport http{};
     // Entries read as if the index had them: those `otok publish` builds together (DESIGN 7.4).
     std::vector<index_addition> unpublished{};
+    // The stores of the shared build cache of a nested build: those otok publish opened once for all its builds (cache.md
+    // 12.2); nothing: a nested build has none, another command opens those of config.toml.
+    std::vector<build_cache_use> const* build_caches = nullptr;
+    // The recipes a nested build of otok publish builds here, never taken from the stores (build_settings::built_here).
+    std::set<std::string> built_here{};
     // The project's [tool-deps] are built as roots: the project `otok publish` builds a tool recipe with
     // (docs/PLAN.md decision 78).
     bool tool_roots = false;

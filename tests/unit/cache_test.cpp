@@ -250,6 +250,59 @@ TEST(cache, sessions_share_the_builds)
     EXPECT_TRUE(said.empty());
 }
 
+// cache.md 6, docs/PLAN.md decision 145: an entry another thread of the process makes is waited for silently, one another
+// process makes with a notice
+TEST(cache, waits_for_other_processes_aloud)
+{
+    test::temp_dir dir;
+    std::filesystem::path const root = dir.path() / "cache";
+    std::mutex m;
+    std::vector<std::string> said;
+    auto const notices = [&](std::string who) {
+        return cache_notices{.waiting = [&, who](std::string const& what) {
+            std::lock_guard lock{m};
+            said.push_back(who + ": " + what);
+        }};
+    };
+    auto opened = cache_store::open(root, notices("opened"));
+    ASSERT_TRUE(opened.has_value()) << opened.error().message;
+    auto first = opened->session(notices("first"));
+    auto second = opened->session(notices("second"));
+    ASSERT_TRUE(first.has_value() && second.has_value());
+    // a second opening of the cache: another process, as the lock files see it
+    auto other = cache_store::open(root, notices("other"));
+    ASSERT_TRUE(other.has_value()) << other.error().message;
+
+    // `holder` makes `entry` until it is let go, `waiter` asks for it meanwhile
+    auto const make_while = [&](cache_store& holder, cache_store& waiter, std::filesystem::path const& entry) {
+        std::promise<void> started, go;
+        std::shared_future<void> let_go = go.get_future().share();
+        auto made = std::async(std::launch::async, [&] {
+            return holder.ensure(entry, "making it", [&](std::filesystem::path const& staging) -> result<void> {
+                std::filesystem::create_directories(staging);
+                started.set_value();
+                let_go.wait();
+                return {};
+            });
+        });
+        started.get_future().wait();
+        entry_wait waited = entry_wait::none;
+        auto asked = std::async(std::launch::async, [&] {
+            return waiter.ensure(entry, "making it", [](std::filesystem::path const&) -> result<void> { return fail("made twice"); }, &waited);
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds{300});  // the waiter at the lock
+        go.set_value();
+        EXPECT_TRUE(made.get().has_value());
+        auto got = asked.get();
+        EXPECT_TRUE(got.has_value()) << got.error().message;
+        return waited;
+    };
+    EXPECT_NE(make_while(*first, *second, root / "builds" / "one"), entry_wait::other_process);
+    EXPECT_TRUE(said.empty()) << said.front();
+    EXPECT_EQ(make_while(*first, *other, root / "builds" / "two"), entry_wait::other_process);
+    EXPECT_EQ(said, std::vector<std::string>{"other: waiting for another otok process: making it"});
+}
+
 TEST(cache, fetches_downloads_once)
 {
     test::temp_dir dir;
