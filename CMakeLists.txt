@@ -105,8 +105,10 @@ target_include_directories(otok-options SYSTEM INTERFACE
 if(MSVC)
     target_compile_options(otok-options INTERFACE /utf-8 /W4 /Zc:__cplusplus /Zc:preprocessor /bigobj
         /external:anglebrackets /external:W0)
+    # UNICODE and _UNICODE as the Visual Studio projects' CharacterSet Unicode gives them: the release binaries are built
+    # with CMake, and Windows' generic names (TEXT, SE_*_NAME, the functions without A or W) must mean what was tested
     target_compile_definitions(otok-options INTERFACE
-        _CRT_SECURE_NO_WARNINGS _SCL_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+        _CRT_SECURE_NO_WARNINGS _SCL_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
 else()
     target_compile_options(otok-options INTERFACE -Wall -Wextra)
 endif()
@@ -123,7 +125,7 @@ add_library(otok-lua STATIC ${OTOK_LUA_SOURCES})
 target_include_directories(otok-lua SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/lua/src)
 if(MSVC)
     target_compile_options(otok-lua PRIVATE /w)
-    target_compile_definitions(otok-lua PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_compile_definitions(otok-lua PRIVATE _CRT_SECURE_NO_WARNINGS UNICODE _UNICODE)  # as otok-options
 else()
     target_compile_options(otok-lua PRIVATE -w)
 endif()
