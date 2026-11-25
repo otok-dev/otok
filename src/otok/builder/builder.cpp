@@ -1355,8 +1355,11 @@ result<fs::path> builder::toolchain_program(resolved_package const& tool_package
     if (edge != rec.tool_dependencies.end()) {
         auto const i = static_cast<std::size_t>(edge - rec.tool_dependencies.begin());
         if (i >= tool_package.tool_edges.size() || tool_package.tool_edges[i].empty()) return fail("its recipe was not resolved");
+        std::string const id = slice_id(tool_package.tool_edges[i], true, *tool_slice_);
+        // the tool slice of a script taken from a cache did not need its interpreter, which is built (or taken) now (cache.md 12.2)
+        if (auto ok = ensure_built(id); !ok) return fail("its recipe was not built: " + ok.error().message);
         std::lock_guard lock{mutex_};
-        auto const built = built_.find(slice_id(tool_package.tool_edges[i], true, *tool_slice_));
+        auto const built = built_.find(id);
         if (built == built_.end()) return fail("its recipe was not built");
         auto const program = built->second.output.programs.find(name);
         if (program == built->second.output.programs.end()) return fail("its recipe builds no program '" + name + "'");

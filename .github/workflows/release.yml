@@ -175,13 +175,58 @@ jobs:
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.version.outputs.version }}
           PRERELEASE: ${{ needs.version.outputs.prerelease }}
+        # GitHub's API fails now and then (500, 502, a file stored twice): every call is tried again, and every step is
+        # idempotent, so that a re-run of this job finishes what a failed one left (a draft, some of the files). The
+        # release stays a draft until all its files are on it.
+        shell: bash
         run: |
           tag=${GITHUB_REF#refs/tags/}
           ls -l dist
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" dist/* --clobber
-          else
-            flags=(--verify-tag --title "otok $VERSION ($tag)" --notes "otok $VERSION, built from $tag ($GITHUB_SHA).")
-            [[ $PRERELEASE == true ]] && flags+=(--prerelease)
-            gh release create "$tag" "${flags[@]}" dist/*
-          fi
+          retry() {
+            local i
+            for i in 1 2 3 4 5; do
+              "$@" && return 0
+              echo "failed ($i of 5): $*" >&2
+              (( i < 5 )) && sleep $(( i * 20 ))
+            done
+            return 1
+          }
+          # the release of the tag, a draft too (the endpoint of tags does not show drafts); empty: none
+          release_id() {
+            gh api "repos/$GH_REPO/releases?per_page=100" --jq "[.[] | select(.tag_name == \"$tag\")][0].id // empty"
+          }
+          flags=(--draft --verify-tag --title "otok $VERSION ($tag)" --notes "otok $VERSION, built from $tag ($GITHUB_SHA).")
+          [[ $PRERELEASE == true ]] && flags+=(--prerelease)
+          # a failed creation may have created it all the same: looked for before each try, never made twice
+          make_draft() {
+            local found
+            found=$(release_id) || return 1
+            [[ -n $found ]] && return 0
+            gh release create "$tag" "${flags[@]}" >/dev/null
+          }
+          retry make_draft
+          id=$(retry release_id)
+          [[ -n $id ]] || { echo "no release of $tag after its creation" >&2; exit 1; }
+          echo "release $id"
+          # a file replaces the one of the same name, if any (a part of a failed upload among them)
+          upload() {
+            local file=$1 name=${1##*/} old a
+            old=$(gh api "repos/$GH_REPO/releases/$id/assets?per_page=100" --jq ".[] | select(.name == \"$name\") | .id") || return 1
+            for a in $old; do gh api -X DELETE "repos/$GH_REPO/releases/assets/$a" || return 1; done
+            curl -fsS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Content-Type: application/octet-stream" \
+              --data-binary "@$file" "https://uploads.github.com/repos/$GH_REPO/releases/$id/assets?name=$name" >/dev/null
+          }
+          for file in dist/*; do retry upload "$file"; done
+          # every file on it, whole, before it is published
+          check() {
+            local listed file
+            listed=$(gh api "repos/$GH_REPO/releases/$id/assets?per_page=100" --jq '.[] | select(.state == "uploaded") | "\(.name) \(.size)"') || return 1
+            for file in dist/*; do
+              grep -qxF "${file##*/} $(stat -c %s "$file")" <<<"$listed" || { echo "not on the release: ${file##*/}" >&2; return 1; }
+            done
+          }
+          retry check
+          publish=(-X PATCH "repos/$GH_REPO/releases/$id" -F draft=false)
+          [[ $PRERELEASE == true ]] || publish+=(-f make_latest=true)
+          retry gh api "${publish[@]}" >/dev/null
+          echo "published $tag"

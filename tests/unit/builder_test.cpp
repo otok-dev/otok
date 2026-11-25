@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -94,6 +95,8 @@ struct fake_toolchain
     std::vector<std::string> unchecked;         // and its warnings: what it could not check
     std::vector<std::string> output_platforms;  // "<library>: <platforms>" of the packages output_problems is given
     std::vector<std::filesystem::path> read_paths;  // toolchain_profile::read_paths
+    // the builds of otok publish run at once, each with targets of its own over this one toolchain
+    std::mutex mutex;
 };
 
 class fake_target final : public build_target
@@ -117,6 +120,7 @@ public:
 
     result<toolchain_profile> profile(slice_spec const&) override
     {
+        std::lock_guard lock{t_.mutex};
         ++t_.profiles;
         toolchain_profile p;
         p.triple = "fake-triple";
@@ -141,6 +145,7 @@ public:
     std::vector<std::string> output_problems(std::filesystem::path const&, std::span<output_package const> packages,
         std::map<std::string, std::string> const&, std::vector<std::string>& warnings) const override
     {
+        std::lock_guard lock{t_.mutex};
         for (output_package const& p : packages) {
             std::string platforms;
             for (std::string const& platform : p.platforms) platforms += (platforms.empty() ? "" : " ") + platform;
@@ -154,14 +159,17 @@ public:
     result<void> make_package(built_package const& p, recipe const& rec, std::span<output_product const> products,
         std::filesystem::path const& staging) override
     {
-        for (output_product const& o : products) {
-            std::string text = p.library + "." + o.source->name + ":";
-            for (library_ref const& l : o.libraries) text += " " + l.package + "/" + l.name;
-            for (library_ref const& l : o.hidden_libraries) text += " (headers of " + l.package + "/" + l.name + ")";
-            for (std::string const& d : o.defines) text += " [" + d + "]";
-            t_.products.push_back(text);
+        {
+            std::lock_guard lock{t_.mutex};
+            for (output_product const& o : products) {
+                std::string text = p.library + "." + o.source->name + ":";
+                for (library_ref const& l : o.libraries) text += " " + l.package + "/" + l.name;
+                for (library_ref const& l : o.hidden_libraries) text += " (headers of " + l.package + "/" + l.name + ")";
+                for (std::string const& d : o.defines) text += " [" + d + "]";
+                t_.products.push_back(text);
+            }
+            if (p.bundle_data) t_.bundled.insert(p.library);
         }
-        if (p.bundle_data) t_.bundled.insert(p.library);
         return native_->make_package(p, rec, products, staging);
     }
 
@@ -2402,6 +2410,19 @@ TEST_F(builder_test, toolchains_that_are_scripts_run_under_their_interpreter)
     EXPECT_LT(e.find("building tool python"), e.find("building tool meson")) << e;
     EXPECT_LT(e.find("building tool meson"), e.find("building b 2.0 for")) << e;
 
+    // a library built again with meson from the cache: the slices of meson's tools were not needed by the plan, the
+    // interpreter is taken from the cache when the library comes to the script (cache.md 12.2)
+    write_recipe("b", "2.0",
+        build_lua("b", "    local out = otok.run({ slice.toolchains.meson, 'args', 'setup' }, { capture = true })\n"
+                       "    assert(out == 'script meson.py\\nsetup\\n', out)\n    -- built again\n"),
+        options_of_b + "[toolchains]\nmeson = { default-recipe = \"p/meson\" }\n");
+    err.str("");
+    ASSERT_EQ(run({"install"}), 0) << err.str();
+    std::string const again = err.str();
+    EXPECT_NE(again.find("tool meson 1.9.0 "), std::string::npos) << again;
+    EXPECT_EQ(again.find("building tool"), std::string::npos) << again;
+    EXPECT_NE(again.find("building b 2.0 for"), std::string::npos) << again;
+
     // the interpreter is a toolchain of the tool recipe
     meson_with("perl");
     EXPECT_EQ(run({"install"}), 1);
@@ -2612,7 +2633,9 @@ TEST_F(builder_test, publishes_what_it_built)
     EXPECT_EQ(said["built b 2.0 for native-" + machine_arch()], 2) << e;
     EXPECT_EQ(said["building a 1.0 for native-" + machine_arch()], 1) << e;
     for (auto const& [line, times] : said) {
-        if (line.starts_with("downloading ")) EXPECT_EQ(times, 1) << line << "\n" << e;
+        if (line.starts_with("downloading ")) {
+            EXPECT_EQ(times, 1) << line << "\n" << e;
+        }
     }
     EXPECT_EQ(e.find("another otok process"), std::string::npos) << e;
     for (char const* internal : {"inputs in the cache", "otok.lock", "slices: ", "output 'Otok'"}) {
