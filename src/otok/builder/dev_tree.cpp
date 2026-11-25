@@ -113,7 +113,7 @@ result<std::set<std::string>> sync_trees(std::vector<synced_tree> const& trees, 
         if (fs::read_symlink(to, missing) != target || missing) {
             fs::remove(to, missing);
             fs::create_directories(to.parent_path(), missing);
-            fs::copy_symlink(long_path(from), to, ec);
+            copy_link(from, to, ec);
             if (ec) return fail("cannot copy '" + path_to_utf8(from) + "': " + ec.message());
             copied.insert(relative);
         }

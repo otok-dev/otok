@@ -42,6 +42,12 @@ output is accepted only in `otok.toml` or a recipe.
 
 Precedence: command-line flag, then environment variable, then the file, then the default.
 
+A relative path in the file (`cache-dir`, `index-mirror`, `xcode`, `android-ndk`, `windows-sdk`, `llvm`, `token-file`,
+and `git` and `visual-studio` when they hold a directory separator) is relative to the file's directory; in a variable,
+to the current directory. otok makes them absolute as it reads them, since it runs git and the builds in directories of
+its own. A `git` without a separator is a program of `PATH`, a `visual-studio` without one a version; `index-mirror`
+holding `://` is a URL, and `token-file` starting with `~/` is in the home directory.
+
 The programs of recipes' `[toolchains]` are not machine settings: published recipes build them from their recipes
 (`default-recipe`, `recipe-toml.md` 13.1), and a local recipe's other toolchains are found in the target's and otok's
 `PATH`. `tool-paths` and `toolchains` of earlier versions are gone: the file is refused

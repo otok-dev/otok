@@ -22,6 +22,8 @@
 //   list D        Windows: opens the directory D to list it and prints opened, or the error
 //   find API P    Windows: FindFirstFile (API A, W, ExA or ExW) of P, then FindNextFile, and prints the names found, or
 //                 the error
+//   symlink API L T file|dir  Windows: CreateSymbolicLink (API A or W) of the link L to T, then prints the link's kind, its
+//                 flag (relative or absolute), substitute name and print name, or the error
 //   brokering     Windows: prints whether file functions refused may be brokered (brokered or skipped) in this
 //                 thread and in a new one
 //   connect       Windows: connects to 192.0.2.1:80 (TEST-NET, never answers) and prints the Winsock error, or
@@ -45,6 +47,7 @@
 #   include <fcntl.h>
 #   include <io.h>
 #   include <windows.h>
+#   include <winioctl.h>
 #   pragma comment(lib, "ws2_32.lib")
 #else
 #   include <unistd.h>
@@ -198,6 +201,39 @@ int run(std::vector<std::string> args)
         std::cout << name() << ((attributes & FILE_ATTRIBUTE_DIRECTORY) ? " dir" : " file");
         while (wide ? ::FindNextFileW(h, &w) : ::FindNextFileA(h, &a)) std::cout << ' ' << name();
         std::cout << ' ' << ::GetLastError() << (::FindClose(h) ? " closed" : " not closed") << '\n';
+    } else if (command == "symlink" && args.size() == 5) {
+        // CreateSymbolicLinkW or A (otok-sandbox.dll makes the link itself where Windows 24H2 refuses a path on a letter of
+        // otok's device map), then the link's reparse data: flags, substitute name, print name
+        std::string const& api = args[1];
+        if (api != "A" && api != "W") return 2;
+        DWORD const flags = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE | (args[4] == "dir" ? SYMBOLIC_LINK_FLAG_DIRECTORY : 0);
+        std::wstring const link = std::filesystem::path{std::u8string{args[2].begin(), args[2].end()}}.wstring();
+        std::wstring const target = std::filesystem::path{std::u8string{args[3].begin(), args[3].end()}}.wstring();
+        BOOLEAN const made = api == "W" ? ::CreateSymbolicLinkW(link.c_str(), target.c_str(), flags)
+                                        : ::CreateSymbolicLinkA(args[2].c_str(), args[3].c_str(), flags);
+        if (!made) {
+            std::cout << ::GetLastError() << '\n';
+            return 0;
+        }
+        HANDLE const h = ::CreateFileW(link.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+            OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        std::vector<unsigned char> data(MAXIMUM_REPARSE_DATA_BUFFER_SIZE);
+        DWORD got = 0;
+        bool const read = h != INVALID_HANDLE_VALUE
+                          && ::DeviceIoControl(h, FSCTL_GET_REPARSE_POINT, nullptr, 0, data.data(), static_cast<DWORD>(data.size()), &got, nullptr);
+        DWORD const attributes = ::GetFileAttributesW(link.c_str());
+        if (h != INVALID_HANDLE_VALUE) ::CloseHandle(h);
+        if (!read || got < 20 || *reinterpret_cast<ULONG const*>(data.data()) != IO_REPARSE_TAG_SYMLINK) {
+            std::cout << "not a symbolic link\n";
+            return 0;
+        }
+        auto const field = [&](std::size_t at) { return *reinterpret_cast<USHORT const*>(data.data() + at); };
+        auto const name = [&](USHORT offset, USHORT length) {
+            return utf8(std::wstring{reinterpret_cast<wchar_t const*>(data.data() + 20 + offset), length / sizeof(wchar_t)});
+        };
+        ULONG const link_flags = *reinterpret_cast<ULONG const*>(data.data() + 16);
+        std::cout << ((attributes & FILE_ATTRIBUTE_DIRECTORY) ? "dir" : "file") << ' ' << ((link_flags & 1) ? "relative" : "absolute") << ' '
+                  << name(field(8), field(10)) << ' ' << name(field(12), field(14)) << '\n';
     } else if (command == "volume" && args.size() == 2) {
         // whether GetVolumeInformationW tells of a volume preserving case (perlglob lowercases names otherwise)
         std::filesystem::path const root{std::u8string{args[1].begin(), args[1].end()}};

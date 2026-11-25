@@ -17,6 +17,7 @@
 #include <archive_entry.h>
 
 #include "otok/core/fs.hpp"
+#include "otok/core/virtual_drives.hpp"
 #include "otok/fetch/archive.hpp"
 #include "otok/fetch/git.hpp"
 #include "otok/fetch/http.hpp"
@@ -286,6 +287,47 @@ TEST(archive, keeps_links_inside_the_tree)
     EXPECT_EQ(read(dir.path() / "out" / "lib" / "up" / "a.h"), "int a;\n");
 }
 #endif
+
+// zstd 1.5.7: tests/cli-tests/bin/unzstd -> zstd, the link before its target in the archive; the unpacked source is then
+// copied into a work directory
+TEST(archive, relative_file_links_are_copied_with_the_tree)
+{
+    test::temp_dir dir;
+    write_archive(dir.path() / "z.tar.gz", &archive_write_add_filter_gzip, {
+        {.path = "zstd-1.5.7/tests/cli-tests/bin/unzstd", .type = AE_IFLNK, .link = "zstd", .mode = 0777},
+        {.path = "zstd-1.5.7/tests/cli-tests/bin/zstd", .content = "#!/bin/sh\n", .mode = 0755},
+        {.path = "zstd-1.5.7/tests/cli-tests/bin/zstdcat", .type = AE_IFLNK, .link = "zstd", .mode = 0777},
+    });
+    auto ok = extract_archive(dir.path() / "z.tar.gz", dir.path() / "out");
+    ASSERT_TRUE(ok.has_value()) << ok.error().message;
+    std::filesystem::path const bin = std::filesystem::path{"tests"} / "cli-tests" / "bin";
+#ifdef _WIN32
+    // without the privilege of symbolic links (or developer mode) libarchive leaves them out
+    if (!std::filesystem::is_symlink(dir.path() / "out" / bin / "unzstd")) GTEST_SKIP() << "no symbolic links written here";
+#endif
+    EXPECT_EQ(std::filesystem::read_symlink(dir.path() / "out" / bin / "unzstd"), "zstd");
+
+    // the builder copies into the work directory through its virtual drive letter (core/virtual_drives)
+    std::filesystem::create_directories(dir.path() / "work");
+    std::filesystem::path work = dir.path() / "work";
+#ifdef _WIN32
+    ASSERT_TRUE(virtual_drives::enable());
+    auto drive = virtual_drives::drive_for(work);
+    ASSERT_TRUE(drive) << drive.error().message;
+    work = *drive;
+#endif
+    auto copied = copy_tree(dir.path() / "out", work / "source");
+#ifdef _WIN32
+    virtual_drives::release(*drive);
+#endif
+    ASSERT_TRUE(copied.has_value()) << copied.error().message;
+    for (char const* name : {"unzstd", "zstdcat"}) {
+        std::filesystem::path const link = dir.path() / "work" / "source" / bin / name;
+        EXPECT_TRUE(std::filesystem::is_symlink(link)) << name;
+        EXPECT_EQ(std::filesystem::read_symlink(link), "zstd") << name;
+        EXPECT_EQ(read(link), "#!/bin/sh\n") << name;
+    }
+}
 
 // a private index on GitHub read with the token of the publication (base64 of perl's MIME::Base64)
 TEST(git, gives_the_token_for_one_repository)

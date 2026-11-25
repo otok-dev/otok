@@ -96,7 +96,11 @@ std::optional<config_file> parse_config(std::string_view content, std::string co
 // OTOK_CONFIG, or the host's default location (config.md 1).
 std::optional<std::filesystem::path> config_file_location(environment const& env);
 
-// Combines the file with OTOK_* variables and the defaults (config.md 2).
+// Makes the relative paths of the file absolute against its directory `base` (config.md 2).
+void anchor_config_paths(config_file& file, std::filesystem::path const& base);
+
+// Combines the file with OTOK_* variables and the defaults (config.md 2); relative paths of the variables are made
+// absolute against the current directory.
 std::optional<machine_config> resolve_config(config_file const& file, environment const& env, diagnostics& diags);
 
 // Reads the config file (a missing file means all defaults) and resolves it.

@@ -5,12 +5,14 @@
 
 #include <gtest/gtest.h>
 
+#include <filesystem>
 #include <map>
 #include <string>
 #include <vector>
 
 #include "otok/config/config.hpp"
 #include "otok/core/fs.hpp"
+#include "test_util.hpp"
 
 using namespace otok;
 
@@ -297,6 +299,63 @@ TEST(config, build_cache_stores)
     ASSERT_EQ(resolved->build_caches.size(), 2u);
     EXPECT_EQ(path_from_utf8(resolved->build_caches[0].token_file), path_from_utf8("/home/u/.config/example/token"));
     EXPECT_EQ(resolved->build_caches[0].token, "");
+}
+
+// Relative paths of config.toml are relative to its directory (config.md 2): git and the builds run elsewhere.
+TEST(config, relative_paths_of_the_file_are_relative_to_its_directory)
+{
+    diagnostics d;
+    auto c = parse_config("cache-dir = \"../cache\"\nindex-mirror = \"mirror\"\nvisual-studio = \"2026\"\nandroid-ndk = \"ndk\"\n"
+        "windows-sdk = \"/opt/xwin\"\nllvm = \"tools/llvm\"\ngit = \"git\"\n"
+        "[[build-cache]]\nurl = \"https://cache.example.com\"\ntoken-file = \"tokens/read\"\n"
+        "[[build-cache]]\nurl = \"https://cache.example.com\"\ntoken-file = \"~/token\"\n", "config.toml", d);
+    ASSERT_TRUE(c.has_value()) << messages(d);
+#ifdef _WIN32
+    std::string const root = "C:/";
+#else
+    std::string const root = "/";
+#endif
+    anchor_config_paths(*c, path_from_utf8(root + "etc/otok"));
+    EXPECT_EQ(path_from_utf8(*c->cache_dir), path_from_utf8(root + "etc/cache"));
+    EXPECT_EQ(path_from_utf8(*c->index_mirror), path_from_utf8(root + "etc/otok/mirror"));
+    EXPECT_EQ(*c->visual_studio, "2026");  // a version, not a path
+    EXPECT_EQ(path_from_utf8(*c->android_ndk), path_from_utf8(root + "etc/otok/ndk"));
+    EXPECT_EQ(*c->windows_sdk, "/opt/xwin");
+    EXPECT_EQ(path_from_utf8(*c->llvm), path_from_utf8(root + "etc/otok/tools/llvm"));
+    EXPECT_EQ(*c->git, "git");  // a program of PATH
+    EXPECT_EQ(path_from_utf8((*c->build_caches)[0].token_file), path_from_utf8(root + "etc/otok/tokens/read"));
+    EXPECT_EQ((*c->build_caches)[1].token_file, "~/token");
+
+    diagnostics e;
+    auto urls = parse_config("index-mirror = \"https://mirror.example.com\"\ngit = \"bin/git\"\n", "config.toml", e);
+    ASSERT_TRUE(urls.has_value()) << messages(e);
+    anchor_config_paths(*urls, path_from_utf8(root + "etc/otok"));
+    EXPECT_EQ(*urls->index_mirror, "https://mirror.example.com");
+    EXPECT_EQ(path_from_utf8(*urls->git), path_from_utf8(root + "etc/otok/bin/git"));
+}
+
+TEST(config, relative_paths_of_variables_are_relative_to_the_current_directory)
+{
+    diagnostics d;
+    auto c = resolve_config({}, fake({{"OTOK_CACHE_DIR", "../cache"}, {"OTOK_ANDROID_NDK", "ndk"}, {"OTOK_GIT", "git"},
+        {"OTOK_INDEX_MIRROR", "https://mirror.example.com"}}), d);
+    ASSERT_TRUE(c.has_value()) << messages(d);
+    std::filesystem::path const current = std::filesystem::current_path();
+    EXPECT_EQ(c->cache_dir, (current / "../cache").lexically_normal());
+    EXPECT_TRUE(c->cache_dir.is_absolute());
+    EXPECT_EQ(path_from_utf8(c->android_ndk), (current / "ndk").lexically_normal());
+    EXPECT_EQ(c->git, "git");
+    EXPECT_EQ(c->index_mirror, "https://mirror.example.com");
+}
+
+TEST(config, load_config_reads_paths_against_the_file)
+{
+    test::temp_dir dir;
+    dir.write("machine/config.toml", "cache-dir = \"cache\"\n");
+    diagnostics d;
+    auto c = load_config(fake({{"OTOK_CONFIG", path_to_utf8(dir.path() / "machine" / "config.toml")}}), d);
+    ASSERT_TRUE(c.has_value()) << messages(d);
+    EXPECT_EQ(c->cache_dir, (dir.path() / "machine" / "cache").lexically_normal());
 }
 
 TEST(config, build_cache_urls_are_checked)

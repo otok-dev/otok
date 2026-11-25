@@ -38,10 +38,13 @@
 //      CreateFileW refused with ERROR_ACCESS_DENIED in a container (a directory opened as a file too, as clang tries
 //      each include directory for <utility>) to windows.storage.onecore's broker of packaged apps, which throws a C++
 //      exception inside; LLVM's handler of exceptions takes it for a crash. A process without a package has no broker.
+//  20. symbolic links on a virtual drive, which CreateSymbolicLinkW of Windows 24H2 and newer refuses, made with
+//      FSCTL_SET_REPARSE_POINT.
 // The DLL passes itself and the payload (otok/core/sandbox_windows.hpp) to every child through CreateProcessW/A. Without a
-// container in the payload (sandbox = false) it does 14 and 15 alone.
+// container in the payload (sandbox = false) it does 14, 15 and 20 alone.
 
 #include <windows.h>
+#include <winioctl.h>
 #include <winternl.h>
 #include <sddl.h>
 
@@ -907,6 +910,189 @@ DWORD WINAPI hook_get_final_path_name_by_handle_w(HANDLE file, LPWSTR buffer, DW
     return static_cast<DWORD>(out.size());
 }
 
+// --- symbolic links on virtual drives --------------------------------------------------------------------------------
+
+using create_symbolic_link_w_t = BOOLEAN(APIENTRY*)(LPCWSTR, LPCWSTR, DWORD);
+using create_symbolic_link_a_t = BOOLEAN(APIENTRY*)(LPCSTR, LPCSTR, DWORD);
+create_symbolic_link_w_t real_create_symbolic_link_w;  // kernelbase's; kernel32's is a jump into it (22631, 26300)
+create_symbolic_link_a_t real_create_symbolic_link_a;  // kernel32's own
+
+using rtl_dos_path_name_to_nt_path_name_t = NTSTATUS(NTAPI*)(PCWSTR, PUNICODE_STRING, PWSTR*, PVOID);
+using rtl_determine_dos_path_name_type_t = ULONG(NTAPI*)(PCWSTR);
+using rtl_free_unicode_string_t = VOID(NTAPI*)(PUNICODE_STRING);
+constexpr ULONG rtl_path_type_relative = 5;  // "a\b", neither rooted nor on a drive
+constexpr ULONG symlink_flag_relative = 1;
+
+// SeCreateSymbolicLinkPrivilege enabled for this thread alone, as CreateSymbolicLinkW enables it for its request: a copy of
+// the process's token impersonated, with the privilege on where the token holds it (an administrator's, disabled until
+// asked). True when the thread impersonates now and must RevertToSelf; false for a thread already impersonating, left as
+// it is, or a token without the privilege (developer mode lets NTFS make the link without it).
+bool with_link_privilege()
+{
+    HANDLE token = nullptr;
+    if (::OpenThreadToken(::GetCurrentThread(), TOKEN_QUERY, TRUE, &token)) {
+        ::CloseHandle(token);
+        return false;
+    }
+    if (!::ImpersonateSelf(SecurityImpersonation)) return false;
+    if (!::OpenThreadToken(::GetCurrentThread(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, TRUE, &token)) return true;
+    TOKEN_PRIVILEGES privileges{1};
+    privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    if (::LookupPrivilegeValueW(nullptr, SE_CREATE_SYMBOLIC_LINK_NAME, &privileges.Privileges[0].Luid))
+        ::AdjustTokenPrivileges(token, FALSE, &privileges, 0, nullptr, nullptr);
+    ::CloseHandle(token);
+    return true;
+}
+
+using rtl_nt_status_to_dos_error_t = ULONG(NTAPI*)(NTSTATUS);
+
+// The file or directory `name` made in the directory `parent` with the reparse point `data`, opened relative to the
+// directory's handle: a thread impersonating finds \?? in its token's logon session, where the letters of otok's device
+// map are not. Nothing is left on failure; the error is the last one.
+bool set_link(HANDLE parent, std::wstring name, std::vector<unsigned char>& data, bool directory)
+{
+    HMODULE const ntdll = ::GetModuleHandleW(L"ntdll.dll");
+    auto const create = reinterpret_cast<nt_create_file_t>(::GetProcAddress(ntdll, "NtCreateFile"));
+    auto const to_error = reinterpret_cast<rtl_nt_status_to_dos_error_t>(::GetProcAddress(ntdll, "RtlNtStatusToDosError"));
+    UNICODE_STRING leaf{static_cast<USHORT>(name.size() * sizeof(wchar_t)), static_cast<USHORT>(name.size() * sizeof(wchar_t)), name.data()};
+    OBJECT_ATTRIBUTES oa;
+    InitializeObjectAttributes(&oa, &leaf, OBJ_CASE_INSENSITIVE, parent, nullptr);
+    IO_STATUS_BLOCK io{};
+    HANDLE h = nullptr;
+    NTSTATUS const status = create(&h, GENERIC_WRITE | DELETE | SYNCHRONIZE, &oa, &io, nullptr, FILE_ATTRIBUTE_NORMAL, 0, FILE_CREATE,
+        FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT | (directory ? FILE_DIRECTORY_FILE : FILE_NON_DIRECTORY_FILE), nullptr, 0);
+    if (status < 0) {
+        ::SetLastError(to_error(status));
+        return false;
+    }
+    DWORD got = 0;
+    if (::DeviceIoControl(h, FSCTL_SET_REPARSE_POINT, data.data(), static_cast<DWORD>(data.size()), nullptr, 0, &got, nullptr)) {
+        ::CloseHandle(h);
+        return true;
+    }
+    DWORD const error = ::GetLastError();
+    FILE_DISPOSITION_INFO remove{TRUE};
+    ::SetFileInformationByHandle(h, FileDispositionInfo, &remove, sizeof remove);
+    ::CloseHandle(h);
+    ::SetLastError(error);
+    return false;
+}
+
+// The link `link` to `target` made as CreateSymbolicLinkW makes it, with the file system's own request: a file (or a
+// directory, with SYMBOLIC_LINK_FLAG_DIRECTORY) holding a symbolic link's reparse point, a relative target kept as given
+// with the relative flag, another one as its NT path (substitute name) and as given (print name). On failure nothing is
+// left and the error is the last one.
+bool made_link(LPCWSTR link, LPCWSTR target, DWORD flags)
+{
+    HMODULE const ntdll = ::GetModuleHandleW(L"ntdll.dll");
+    auto const to_nt = reinterpret_cast<rtl_dos_path_name_to_nt_path_name_t>(::GetProcAddress(ntdll, "RtlDosPathNameToNtPathName_U_WithStatus"));
+    auto const type_of = reinterpret_cast<rtl_determine_dos_path_name_type_t>(::GetProcAddress(ntdll, "RtlDetermineDosPathNameType_U"));
+    auto const free_string = reinterpret_cast<rtl_free_unicode_string_t>(::GetProcAddress(ntdll, "RtlFreeUnicodeString"));
+    if (!to_nt || !type_of || !free_string || !*target) {
+        ::SetLastError(ERROR_INVALID_PARAMETER);
+        return false;
+    }
+    std::wstring const print{target};
+    bool const relative = type_of(target) == rtl_path_type_relative;
+    std::wstring substitute = print;
+    if (!relative) {
+        UNICODE_STRING nt{};
+        if (to_nt(target, &nt, nullptr, nullptr) < 0) {
+            ::SetLastError(ERROR_INVALID_NAME);
+            return false;
+        }
+        substitute.assign(nt.Buffer, nt.Length / sizeof(wchar_t));
+        free_string(&nt);
+    }
+    // REPARSE_DATA_BUFFER of a symbolic link: tag, data length, reserved; the names' offsets and lengths; flags; the names
+    std::size_t const names = (substitute.size() + print.size()) * sizeof(wchar_t);
+    if (20 + names > MAXIMUM_REPARSE_DATA_BUFFER_SIZE) {
+        ::SetLastError(ERROR_FILENAME_EXCED_RANGE);
+        return false;
+    }
+    std::vector<unsigned char> data(20 + names);
+    auto const put16 = [&](std::size_t at, std::size_t value) { *reinterpret_cast<USHORT*>(data.data() + at) = static_cast<USHORT>(value); };
+    *reinterpret_cast<ULONG*>(data.data()) = IO_REPARSE_TAG_SYMLINK;
+    put16(4, 12 + names);
+    put16(8, 0);
+    put16(10, substitute.size() * sizeof(wchar_t));
+    put16(12, substitute.size() * sizeof(wchar_t));
+    put16(14, print.size() * sizeof(wchar_t));
+    *reinterpret_cast<ULONG*>(data.data() + 16) = relative ? symlink_flag_relative : 0;
+    std::memcpy(data.data() + 20, substitute.data(), substitute.size() * sizeof(wchar_t));
+    std::memcpy(data.data() + 20 + substitute.size() * sizeof(wchar_t), print.data(), print.size() * sizeof(wchar_t));
+
+    // the directory holding the link opened as the process, through its device map; the link made in it with the privilege
+    // enabled before it is opened, since NTFS checks the request against the security context of the open
+    std::wstring full(32768, L'\0');
+    DWORD const n = ::GetFullPathNameW(link, static_cast<DWORD>(full.size()), full.data(), nullptr);
+    if (n == 0 || n >= full.size()) return false;
+    full.resize(n);
+    while (full.size() > 3 && full.back() == L'\\') full.pop_back();
+    std::size_t const slash = full.find_last_of(L'\\');
+    if (slash == std::wstring::npos || slash + 1 >= full.size()) {
+        ::SetLastError(ERROR_INVALID_NAME);
+        return false;
+    }
+    std::wstring parent = full.substr(0, slash);
+    if (parent.ends_with(L':') || parent.ends_with(L":\\")) parent = parent.substr(0, parent.find(L':') + 1) + L"\\";  // a root
+    HANDLE const directory = ::CreateFileW(parent.c_str(), FILE_TRAVERSE | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (directory == INVALID_HANDLE_VALUE) return false;
+    bool const impersonating = with_link_privilege();
+    bool const set = set_link(directory, full.substr(slash + 1), data, (flags & SYMBOLIC_LINK_FLAG_DIRECTORY) != 0);
+    DWORD const error = ::GetLastError();
+    if (impersonating) ::RevertToSelf();
+    ::CloseHandle(directory);
+    ::SetLastError(error);
+    return set;
+}
+
+// Hook 20: CreateSymbolicLinkW of Windows 24H2 and newer (26100, 26300) fails with ERROR_PATH_NOT_FOUND for a link on a
+// letter of otok's device map (with SeCreateSymbolicLinkPrivilege held but not enabled, ERROR_PRIVILEGE_NOT_HELD), where
+// files and directories are made and a reparse point set by FSCTL_SET_REPARSE_POINT is accepted (docs/PLAN.md decision
+// 143). It seems to open the link while impersonating, to enable the privilege, and an impersonating thread finds \?? in
+// its token's logon session, without the process's map: a CreateFileW on the letter under ImpersonateSelf fails so on
+// 22631 too, whose CreateSymbolicLinkW works. Refused so while the payload has virtual drives, the link is made with the
+// file system's request relative to its directory opened as the process; a path really missing, or a user without the
+// right to make links, fails there again: the kernel checks that right as for CreateSymbolicLinkW.
+bool refused_on_drive(BOOLEAN made)
+{
+    DWORD const error = ::GetLastError();
+    return !made && (error == ERROR_PATH_NOT_FOUND || error == ERROR_PRIVILEGE_NOT_HELD) && the_payload.drive_count;
+}
+
+BOOLEAN linked(create_symbolic_link_w_t real, LPCWSTR link, LPCWSTR target, DWORD flags)
+{
+    BOOLEAN const made = real(link, target, flags);
+    if (!refused_on_drive(made) || !link || !target) return made;
+    if (!made_link(link, target, flags)) return FALSE;
+    ::SetLastError(ERROR_SUCCESS);
+    return TRUE;
+}
+
+BOOLEAN APIENTRY hook_create_symbolic_link_w(LPCWSTR link, LPCWSTR target, DWORD flags)
+{
+    return linked(real_create_symbolic_link_w, link, target, flags);
+}
+
+std::wstring widened_name(LPCSTR name);
+
+BOOLEAN APIENTRY hook_create_symbolic_link_a(LPCSTR link, LPCSTR target, DWORD flags)
+{
+    BOOLEAN const made = real_create_symbolic_link_a(link, target, flags);
+    if (!refused_on_drive(made) || !link || !target) return made;
+    DWORD const refused = ::GetLastError();
+    std::wstring const wide_link = widened_name(link), wide_target = widened_name(target);
+    if (wide_link.empty() || wide_target.empty()) {
+        ::SetLastError(refused);
+        return FALSE;
+    }
+    if (!made_link(wide_link.c_str(), wide_target.c_str(), flags)) return FALSE;
+    ::SetLastError(ERROR_SUCCESS);
+    return TRUE;
+}
+
 // --- long names ------------------------------------------------------------------------------------------------------
 
 using get_long_path_name_w_t = DWORD(WINAPI*)(LPCWSTR, LPWSTR, DWORD);
@@ -1227,6 +1413,15 @@ void attach(T& real, HMODULE module, char const* name, T hook)
     if (real) ::DetourAttach(&reinterpret_cast<PVOID&>(real), reinterpret_cast<PVOID>(hook));
 }
 
+// Hook 20: kernelbase's CreateSymbolicLinkW and kernel32's own CreateSymbolicLinkA (where it calls the W one, the inner
+// hook makes the link and the outer sees it made)
+void attach_symbolic_links(HMODULE kernelbase)
+{
+    HMODULE const kernel32 = ::GetModuleHandleW(L"kernel32.dll");
+    attach(real_create_symbolic_link_w, kernelbase, "CreateSymbolicLinkW", &hook_create_symbolic_link_w);
+    attach(real_create_symbolic_link_a, kernel32, "CreateSymbolicLinkA", &hook_create_symbolic_link_a);
+}
+
 void install()
 {
     HMODULE const ntdll = ::GetModuleHandleW(L"ntdll.dll");
@@ -1266,6 +1461,7 @@ void install()
     attach(real_find_next_file_a, kernelbase, "FindNextFileA", &hook_find_next_file_a);
     attach(real_find_next_file_w, kernelbase, "FindNextFileW", &hook_find_next_file_w);
     attach(real_find_close, kernelbase, "FindClose", &hook_find_close);
+    attach_symbolic_links(kernelbase);
     ::DetourTransactionCommit();
 }
 
@@ -1290,6 +1486,7 @@ void install_drives_only()
     attach(real_create_process_w, kernelbase, "CreateProcessW", &hook_create_process_w);
     attach(real_create_process_a, kernelbase, "CreateProcessA", &hook_create_process_a);
     attach(real_get_final_path_name_by_handle_w, kernelbase, "GetFinalPathNameByHandleW", &hook_get_final_path_name_by_handle_w);
+    attach_symbolic_links(kernelbase);
     ::DetourTransactionCommit();
 }
 

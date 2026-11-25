@@ -888,7 +888,8 @@ int otok_copy(lua_State* L)
     std::error_code ec;
     if (fs::is_symlink(fs::symlink_status(from, ec)) || !fs::is_directory(from, ec)) {
         if (fs::is_symlink(fs::symlink_status(from, ec))) {
-            fs::copy(from, to, fs::copy_options::overwrite_existing | fs::copy_options::copy_symlinks);
+            copy_link(from, to, ec);
+            if (ec) throw fs::filesystem_error{"otok.copy", from, to, ec};
         } else {
             copy_file_unless_same(from, fs::is_directory(to, ec) ? to / from.filename() : to);
         }
@@ -900,7 +901,8 @@ int otok_copy(lua_State* L)
         fs::file_status const status = it->symlink_status();
         if (fs::is_symlink(status)) {
             if (fs::exists(fs::symlink_status(target, ec))) fs::remove(target);
-            fs::copy_symlink(it->path(), target);
+            copy_link(it->path(), target, ec);
+            if (ec) throw fs::filesystem_error{"otok.copy", it->path(), target, ec};
         } else if (fs::is_directory(status)) {
             fs::create_directories(target);
         } else {

@@ -960,6 +960,33 @@ end
     }
     virtual_drives::release(*drive);
 }
+
+// otok.copy makes links on a letter too, where CreateSymbolicLinkW of Windows Server 2025 refuses them (core/fs copy_link)
+TEST_F(build_script, copies_links_on_a_letter)
+{
+    dir.write("source/bin/zstd", "#!/bin/sh\n");
+    std::error_code ec;
+    std::filesystem::create_symlink("zstd", base / "source" / "bin" / "unzstd", ec);
+    if (ec) GTEST_SKIP() << "cannot create symbolic links here: " << ec.message();
+    ASSERT_TRUE(virtual_drives::enable());
+    auto drive = virtual_drives::drive_for(base);
+    ASSERT_TRUE(drive) << drive.error().message;
+    slice.virtual_paths = true;
+    slice.source = *drive / "source";
+    slice.build = *drive / "build";
+    slice.prefix = *drive / "prefix";
+    auto out = run(R"(
+function build(slice, options, deps)
+    otok.copy(slice.source .. "/bin", slice.prefix .. "/bin")
+    return finish(slice)
+end
+)");
+    virtual_drives::release(*drive);
+    ASSERT_TRUE(out.has_value()) << out.error().message;
+    std::filesystem::path const link = base / "prefix" / "bin" / "unzstd";
+    EXPECT_TRUE(std::filesystem::is_symlink(link));
+    EXPECT_EQ(std::filesystem::read_symlink(link, ec), std::filesystem::path{"zstd"});
+}
 #endif
 
 TEST_F(build_script, files_are_confined)

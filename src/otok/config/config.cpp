@@ -57,6 +57,52 @@ std::optional<std::string> non_empty(environment const& env, std::string_view na
     return value;
 }
 
+// What a setting holding a path may hold besides one (config.md 2).
+enum class path_setting
+{
+    path,          // a path alone
+    path_or_name,  // a path, or a name without a directory (git, a Visual Studio version) kept as it is
+    path_or_url,   // a path, or a URL kept as it is (index-mirror)
+};
+
+// A relative path made absolute against `base` (config.md 2): otok runs git and the builds in directories of its own,
+// where a relative path would name something else.
+// Only a path of neither a root name nor a root directory: `/srv/cache` and `D:cache` on Windows name their place.
+bool relative_alone(std::filesystem::path const& p)
+{
+    return !p.empty() && !p.has_root_name() && !p.has_root_directory();
+}
+
+void anchor(std::string& value, std::filesystem::path const& base, path_setting kind = path_setting::path)
+{
+    if (value.empty() || value.starts_with("~/")) return;  // `~/` of token-file is the home directory
+    if (kind == path_setting::path_or_name && value.find_first_of("/\\") == std::string::npos) return;
+    if (kind == path_setting::path_or_url && value.find("://") != std::string::npos) return;
+    std::filesystem::path const p = path_from_utf8(value);
+    if (!relative_alone(p)) return;
+    value = path_to_utf8((base / p).lexically_normal());
+}
+
+void anchor(std::optional<std::string>& value, std::filesystem::path const& base, path_setting kind = path_setting::path)
+{
+    if (value) anchor(*value, base, kind);
+}
+
+}
+
+void anchor_config_paths(config_file& file, std::filesystem::path const& base)
+{
+    anchor(file.cache_dir, base);
+    anchor(file.index_mirror, base, path_setting::path_or_url);
+    anchor(file.visual_studio, base, path_setting::path_or_name);
+    anchor(file.xcode, base);
+    anchor(file.android_ndk, base);
+    anchor(file.windows_sdk, base);
+    anchor(file.llvm, base);
+    anchor(file.git, base, path_setting::path_or_name);
+    if (file.build_caches) {
+        for (build_cache_store& s : *file.build_caches) anchor(s.token_file, base);
+    }
 }
 
 environment process_environment()
@@ -311,6 +357,21 @@ std::optional<machine_config> resolve_config(config_file const& file, environmen
         else c.color = *value;
     }
 
+    // the paths of variables, relative to the current directory (those of the file are made absolute as it is read)
+    std::error_code ec;
+    std::filesystem::path const current = std::filesystem::current_path(ec);
+    if (!ec) {
+        if (relative_alone(c.cache_dir)) c.cache_dir = (current / c.cache_dir).lexically_normal();
+        anchor(c.index_mirror, current, path_setting::path_or_url);
+        anchor(c.visual_studio, current, path_setting::path_or_name);
+        anchor(c.xcode, current);
+        anchor(c.android_ndk, current);
+        anchor(c.windows_sdk, current);
+        anchor(c.llvm, current);
+        anchor(c.git, current, path_setting::path_or_name);
+        for (build_cache_store& s : c.build_caches) anchor(s.token_file, current);
+    }
+
     if (diags.error_count() != errors_before) return std::nullopt;
     return c;
 }
@@ -320,6 +381,10 @@ std::optional<machine_config> load_config(environment const& env, diagnostics& d
     config_file file;
     if (auto location = config_file_location(env)) {
         std::error_code ec;
+        if (relative_alone(*location)) {
+            auto const current = std::filesystem::current_path(ec);
+            if (!ec) *location = (current / *location).lexically_normal();
+        }
         if (std::filesystem::exists(*location, ec)) {
             std::string const display = path_to_utf8(*location);
             auto content = read_file(*location);
@@ -330,6 +395,7 @@ std::optional<machine_config> load_config(environment const& env, diagnostics& d
             auto parsed = parse_config(*content, display, diags);
             if (!parsed) return std::nullopt;
             file = std::move(*parsed);
+            anchor_config_paths(file, location->parent_path());
         } else if (non_empty(env, "OTOK_CONFIG")) {
             diags.error({}, "OTOK_CONFIG names '" + path_to_utf8(*location) + "', which does not exist");
             return std::nullopt;

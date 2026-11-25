@@ -111,6 +111,14 @@ TEST(virtual_drives, reach_the_children)
     };
     // a program started by otok, in a working directory on the letter
     EXPECT_EQ(run({path_to_utf8(child), "cwd"}, nullptr), path_to_utf8(*drive) + "\n");
+    // symbolic links (hook 20, docs/PLAN.md decision 143)
+    struct link_case
+    {
+        std::string api, target, kind;
+    };
+    std::vector<link_case> const links{{"W", "file.txt", "file"}, {"W", "sub/a.txt", "file"}, {"W", path_to_utf8(*drive / "file.txt"), "file"},
+        {"W", "sub", "dir"}, {"A", "file.txt", "file"}};
+    int round = 0;
     for (std::string const& container : {std::string{}, host.container}) {
         auto const launch = std::make_shared<sandbox_launch const>(sandbox_launch{container, host.program, *drive / "sandbox.log", *drive});
         SCOPED_TRACE(container.empty() ? "without the container" : "in the container");
@@ -122,6 +130,19 @@ TEST(virtual_drives, reach_the_children)
         EXPECT_EQ(run({path_to_utf8(child), "volume", path_to_utf8(*drive)}, launch), "preserves case\n");
         // the brokering of file functions turned off in the container alone (hook 19)
         EXPECT_EQ(run({path_to_utf8(child), "brokering"}, launch), container.empty() ? "brokered brokered\n" : "skipped skipped\n");
+        // each link on the letter as CreateSymbolicLink makes it on the real path, where Windows 24H2 and newer make it
+        // too, in the same way: in the container a user without the right to make links is refused both (1314)
+        ++round;
+        for (std::size_t i = 0; i < links.size(); ++i) {
+            SCOPED_TRACE(links[i].api + " " + links[i].target + " " + links[i].kind);
+            auto const make = [&](std::string const& name) {
+                return run({path_to_utf8(child), "symlink", links[i].api, name, links[i].target, links[i].kind}, launch);
+            };
+            std::string const suffix = std::to_string(round) + "-" + std::to_string(i);
+            std::string const expected = make("\\\\?\\" + path_to_utf8(real / ("real-" + suffix)));
+            if (container.empty()) EXPECT_TRUE(expected.starts_with(links[i].kind + " ")) << expected;
+            EXPECT_EQ(make(path_to_utf8(*drive / ("link-" + suffix))), expected);
+        }
     }
     virtual_drives::release(*drive);
     remove_long(dir);

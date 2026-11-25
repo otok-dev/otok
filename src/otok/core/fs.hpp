@@ -61,6 +61,12 @@ result<void> write_file_atomic(std::filesystem::path const& path, std::string_vi
 // of an output, otok-toml.md 4.2); true when it was written.
 result<bool> write_file_if_changed(std::filesystem::path const& path, std::string_view content);
 
+// Copies the symbolic link `from` to `to` as a link with the same target, as std::filesystem::copy_symlink does. On Windows the
+// link is made at the real path of `to`: CreateSymbolicLinkW of Windows Server 2025 (build 26100) fails with "The system
+// cannot find the path specified" for a path on a letter of otok's own device map (core/virtual_drives), which the builder
+// gives the work directories, though files and directories are made there.
+void copy_link(std::filesystem::path const& from, std::filesystem::path const& to, std::error_code& ec);
+
 // Copies the directory tree `from` to `to`, which must not exist (its parents are created): files with their times and
 // permissions, symbolic links as links. On macOS a `clonefile` (APFS copy-on-write) when the file
 // system supports it (docs/formats/cache.md 5).

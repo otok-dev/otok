@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "otok/core/process.hpp"
+#include "otok/core/virtual_drives.hpp"
 
 #ifdef __APPLE__
 #   include <sys/clonefile.h>
@@ -218,6 +219,12 @@ result<bool> write_file_if_changed(std::filesystem::path const& path, std::strin
     return true;
 }
 
+void copy_link(std::filesystem::path const& from, std::filesystem::path const& to, std::error_code& ec)
+{
+    auto const real = [](std::filesystem::path const& p) { return long_path(virtual_drives::to_real(plain_path(p))); };
+    std::filesystem::copy_symlink(real(from), real(to), ec);
+}
+
 result<void> copy_tree(std::filesystem::path const& from, std::filesystem::path const& to)
 {
     namespace fs = std::filesystem;
@@ -250,7 +257,7 @@ result<void> copy_tree(std::filesystem::path const& from, std::filesystem::path 
         fs::file_status const status = it->symlink_status(ec);
         if (ec) return failed(source, ec);
         if (fs::is_symlink(status)) {
-            fs::copy_symlink(source, target, ec);
+            copy_link(source, target, ec);
         } else if (fs::is_directory(status)) {
             fs::create_directory(target, source, ec);  // with the source's permissions
         } else {
