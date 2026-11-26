@@ -6,7 +6,7 @@ Commands that report something print it for people by default: columns, sections
 `--format json` they print one JSON document instead, which scripts, IDEs and coding agents read without parsing that
 layout, and which says everything the text says. `otok metadata` (`metadata.md`) is JSON always and stays as it is.
 
-This document defines the rules common to every command (1, 2) and the document of each command (3 to 10). Commands not
+This document defines the rules common to every command (1, 2) and the document of each command (3 to 11). Commands not
 listed here do not take `--format`.
 
 ## 1. The option
@@ -33,7 +33,7 @@ Every document is an object with these keys, beside those of its command:
 |---|---|---|
 | `format` | integer | The format of this document; `1`. A change that removes or changes a key raises it; new keys may be added without (unlike the files of README 1.4, which a newer otok must read: a reader of this document runs against the otok it calls). |
 | `otok` | string | The version of otok that wrote it. |
-| `command` | string | The command: `"search"`, `"info"`, `"outdated"`, `"audit"`, `"why"`, `"log"`. |
+| `command` | string | The command: `"search"`, `"info"`, `"outdated"`, `"audit"`, `"why"`, `"log"`, `"bump"`. |
 | `diagnostics` | array | 2.1: the errors and warnings of the command, in the order they were found; empty when there are none. |
 
 The keys of the command are present when it did its work, whatever its exit code (`otok audit` exits with 1 for what it
@@ -617,6 +617,11 @@ cannot be published is an error `diagnostic` whose `file` is its `recipe.toml` (
 checked all the same; the check ends with `publication` `"checked"`, its exit code 1 when a recipe was refused. A
 publication refuses before anything, every refused recipe said the same way.
 
+With `--dry-run --working-tree DIR...` (`DESIGN` 7.4.2) each directory is built as it is, not fetched from a remote: the
+same events, the `recipe` event with `source` `null` and `working-tree` its absolute path, and nothing checked that
+needs git (whether it is committed and pushed, the remote, the entry's `recipe-source`); its entry is made with the
+remote and `HEAD` of the checkout it is in, if any, and is never published.
+
 ```text
 {"command":"publish","event":"start","format":1,"otok":"0.6.0"}
 {"checkout":false,"event":"index","index":"https://github.com/otok-dev/index","publisher":"apotocki"}
@@ -635,7 +640,7 @@ publication refuses before anything, every refused recipe said the same way.
 |---|---|---|
 | `start` | as in 9, `command` `"publish"` | First. |
 | `index` | `index` (the repository on GitHub, or the checkout of the index as an absolute path), `checkout` (whether it is a checkout), `publisher` | Once the index and the publisher are known. |
-| `recipe` | `recipe` (the recipe id it is published under, `"<publisher>/<name>"`), `library`, `variant`, `version`, `revision`, `entry` (the path of its entry in the index, `index.md` 3), `source` (`git`, `commit`, `path`: where users fetch it; `path` `null` for a recipe at the root of its repository), `published` (whether the index has this entry already, the same: nothing to add), `build-on` (`[platforms] build-on`, `recipe-toml.md` 6, in its order, each environment as in 4.2.2: `"macos/xcode"`, `"*/ndk"`), `programs` (`[tool] programs`, `recipe-toml.md` 3.1; empty for a recipe that is not a tool recipe) | Each recipe, once it is fetched back from its remote and checked, before anything is built. |
+| `recipe` | `recipe` (the recipe id it is published under, `"<publisher>/<name>"`), `library`, `variant`, `version`, `revision`, `entry` (the path of its entry in the index, `index.md` 3), `source` (`git`, `commit`, `path`: where users fetch it; `path` `null` for a recipe at the root of its repository; `null` with `--working-tree`), `working-tree` (the directory built as it is, with `--working-tree`, an absolute path; else `null`), `published` (whether the index has this entry already, the same: nothing to add), `build-on` (`[platforms] build-on`, `recipe-toml.md` 6, in its order, each environment as in 4.2.2: `"macos/xcode"`, `"*/ndk"`), `programs` (`[tool] programs`, `recipe-toml.md` 3.1; empty for a recipe that is not a tool recipe) | Each recipe, once it is fetched back from its remote and checked, before anything is built. |
 | `limit` | `key` (of `index.toml`, `index.md` 2; counted as 9.2 says), `limit`, `recent` (the publisher's entries published in the last 24 hours), `pending` (its entries in other open pull requests), `pending-requests` (their numbers), `adding`, `exceeded`, `passes-at` (when the limit lets these entries in by waiting, a time; `null` when it does now or waiting does not help) | Before anything is built, when the index counts the entries of this publisher: a pull request with entries to add, by one who cannot push to the index. When it is exceeded, an error follows (with `--dry-run` a warning). |
 | `build` | `build` (its number, from 1), `state`: `"queued"`, `"building"`, `"built"` or `"failed"`; `recipe`, `library`, `variant`, `version`, `revision`, `target`, `platforms` (those it builds), `environment` (`"linux/gcc"`), `options` (the option set of a `[[publish.check]]`, an object of option values; `null` for the defaults), `seconds` (how long it took, for `"built"` and `"failed"`; else `null`) | Each build of a recipe: one per environment of the recipe this machine has and per option set (`DESIGN` 7.4). All are `"queued"` first, then they build at once (one after another with `-vv`). |
 | `slice`, `skipped`, `linkage-fallback`, `standard`, `diagnostic` | as in 9, with `build`, the number of the build they belong to | What the install of a build reports (its other events are of the temporary project it builds in and are left out). A failed slice is a `slice` event with `state` `"failed"`, its log and hint, then the build's error `diagnostic`. |
@@ -654,3 +659,86 @@ publication refuses before anything, every refused recipe said the same way.
 - `"pushed"`: committed to a checkout of the index and pushed.
 
 A script follows a publication by its `pull-request`: index CI writes its verdict into the pull request (`index.md` 9).
+
+## 11. `otok bump`
+
+```text
+otok bump DIR VERSION [--into NEWDIR] --format json
+```
+
+The recipe in `DIR`, or its copy `NEWDIR`, moved to the upstream version `VERSION` (`DESIGN` 7.4.2). The document says
+what became of each input; nothing is written when there is an error, and `directory` is `null` then. The downloads
+and lookups it makes are said on standard error.
+
+```json
+{
+  "format": 1,
+  "otok": "0.6.4",
+  "command": "bump",
+  "diagnostics": [
+    {
+      "severity": "warning",
+      "message": "still mentions 4.4 (of the version 4.4.5); change it by hand if it should follow the version",
+      "file": "/work/recipes/recipes/cmake/4.5/apple/build.lua",
+      "line": 1,
+      "column": null
+    }
+  ],
+  "directory": "/work/recipes/recipes/cmake/4.5/apple",
+  "from": "/work/recipes/recipes/cmake/4.4/apple",
+  "library": "cmake",
+  "name": "cmake",
+  "variant": "apple",
+  "version": { "old": "4.4.5", "new": "4.5.1" },
+  "revision": { "old": 2, "new": 1 },
+  "patches": [],
+  "inputs": [
+    {
+      "name": "source",
+      "kind": "archive",
+      "status": "changed",
+      "message": null,
+      "old": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v4.4.5/cmake-4.4.5.tar.gz",
+        "mirrors": [],
+        "sha256": "a0c54c88abb8078dd8eccadb717fc6bb194bf18e7d44c86309910288886e04e2",
+        "git": null,
+        "commit": null,
+        "tag": null
+      },
+      "new": {
+        "url": "https://github.com/Kitware/CMake/releases/download/v4.5.1/cmake-4.5.1.tar.gz",
+        "mirrors": [],
+        "sha256": "a79bf33cbe05686fdf79c2bbbcfe5e8e62ad16d3d540fa737cbedfeed41fb69e",
+        "git": null,
+        "commit": null,
+        "tag": null
+      }
+    }
+  ]
+}
+```
+
+| Key | Type | Meaning |
+|---|---|---|
+| `directory` | string or null | The recipe directory written (`NEWDIR`, else `DIR`), absolute; `null` when nothing was written. |
+| `from` | string | `DIR`, absolute. |
+| `library`, `name`, `variant` | string or null | Of the recipe in `DIR` (`recipe-toml.md` 3); `null` when it could not be read. |
+| `version` | object or null | `old` and `new`, as the recipe writes them. |
+| `revision` | object or null | `old` and `new` (always `1`). |
+| `patches` | array or null | The `[source] patches`, written for the old version: whether they still apply, the dry run of `otok publish --dry-run --working-tree` tells. |
+| `inputs` | array or null | Every input of the recipe in its order: `[source]`, its `verify-against`, each `[[resource]]`. |
+
+`null` when the recipe could not be read. An input:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `name` | string | `"source"`, `"source.verify-against"` or the resource's name. |
+| `kind` | string | `"archive"` or `"git"`. |
+| `status` | string | `"changed"`: its location held the version and was fetched anew; `"unchanged"`: it does not hold the version, so it is pinned apart from it; `"not-bumped"`: it holds the version in a way otok does not replace, or it is a git commit without a tag (an error for the source, which must follow the version); `"failed"`: it could not be fetched (with the URL tried), its tag was not found, or a mirror gave another file. |
+| `message` | string or null | Why it is not bumped or failed; `null` otherwise. |
+| `old`, `new` | object | Its location before and after: `url`, `mirrors`, `sha256` of an archive and `git`, `commit`, `tag` of a git repository, each `null` for the other kind and `commit` and `tag` when absent. `new` is `old` unless `status` is `"changed"`. |
+
+Warnings: the patches of the source, a mirror that does not give the file (kept, tried after the URL), and every line of
+the directory's files that still mentions the old version or its line (comments, `build.lua`, keys that are no input),
+with its file and line.

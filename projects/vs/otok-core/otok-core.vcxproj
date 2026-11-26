@@ -76,6 +76,7 @@
     <ClInclude Include="$(OtokRoot)src\otok\index\check.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\index\index.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\index\view.hpp" />
+    <ClInclude Include="$(OtokRoot)src\otok\publish\bump.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\publish\github.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\publish\publish.hpp" />
     <ClInclude Include="$(OtokRoot)src\otok\lock\lock.hpp" />
@@ -139,6 +140,7 @@
     <ClCompile Include="$(OtokRoot)src\otok\index\check.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\index\index.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\index\view.cpp" />
+    <ClCompile Include="$(OtokRoot)src\otok\publish\bump.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\publish\github.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\publish\publish.cpp" />
     <ClCompile Include="$(OtokRoot)src\otok\lock\lock.cpp" />

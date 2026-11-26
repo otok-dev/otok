@@ -572,6 +572,38 @@ std::vector<result<fs::path>> cache_store::fetch(std::span<cache_download const>
     return out;
 }
 
+result<std::string> cache_store::fetch_new(std::string const& url, http_settings const& settings)
+{
+    if (state_->offline) return fail(url + " is not in the cache (--offline)");
+    std::error_code ec;
+    fs::create_directories(state_->tmp, ec);
+    fs::path file = state_->tmp / "new-download";
+    for (int n = 1; fs::exists(file, ec); ++n) file = state_->tmp / ("new-download-" + std::to_string(n));
+    state_->fetching("downloading " + url);
+    auto got = download_file({url, file, ""}, settings);
+    if (!got) return std::unexpected{got.error()};
+    fs::path const path = download_path(got->sha256);
+    fs::create_directories(path.parent_path(), ec);
+    fs::path lock_file = path;
+    lock_file += ".lock";
+    auto lock = state_->hold(lock_file, "downloading " + url);
+    if (!lock) {
+        fs::remove(file, ec);
+        return std::unexpected{lock.error()};
+    }
+    if (fs::exists(path, ec)) {
+        fs::remove(file, ec);
+        mark_used(path);
+        return got->sha256;
+    }
+    rename_path(file, path, ec);
+    if (ec) {
+        fs::remove(file, ec);
+        return fail("cannot move the download of " + url + " into the cache: " + ec.message());
+    }
+    return got->sha256;
+}
+
 result<std::vector<cleaned_directory>> cache_store::clean(cache_parts parts, bool dry_run)
 {
     if (state_->access != cache_access::exclusive) return fail("cleaning needs the cache opened for exclusive access");

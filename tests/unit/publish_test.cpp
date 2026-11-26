@@ -14,6 +14,7 @@
 #include <nlohmann/json.hpp>
 
 #include "otok/manifest/manifest.hpp"
+#include "otok/publish/bump.hpp"
 #include "otok/publish/github.hpp"
 #include "otok/publish/publish.hpp"
 #include "otok/target/apple/apple_target.hpp"
@@ -440,4 +441,176 @@ TEST(github_index, lists_open_pull_requests_and_what_they_add)
     auto failed = other->open_pull_requests();
     ASSERT_FALSE(failed.has_value());
     EXPECT_EQ(failed.error().message, "GitHub: GET /repos/idx/index/pulls?state=open&per_page=100&page=1: 404 Not Found");
+}
+
+// a working tree (docs/PLAN.md decision 146): the recipe by its absolute path, outside the publication's project
+TEST(publish_project, builds_a_working_tree_by_path)
+{
+    recipe const r = parsed_recipe(recipe_text());
+    locked_location const tree{.type = locked_location::kind::path, .path = "C:/recipes/a"};
+    auto project = make_publish_project(r, tree, target::apple::info(), *parse_environment("macos/xcode"), nullptr);
+    ASSERT_TRUE(project.has_value()) << project.error().message;
+    EXPECT_NE(project->manifest.find("recipe = { path = \"C:/recipes/a\" }"), std::string::npos) << project->manifest;
+    diagnostics d;
+    auto m = parse_manifest(project->manifest, "otok.toml", targets, {}, d);
+    ASSERT_TRUE(m.has_value()) << messages(d) << project->manifest;
+    EXPECT_EQ(m->deps[0].recipe.source, recipe_ref::kind::path);
+    EXPECT_EQ(m->deps[0].recipe.path, "C:/recipes/a");
+}
+
+// The spellings of a version otok bump replaces (docs/PLAN.md decision 146).
+TEST(bump, spells_the_version_as_urls_do)
+{
+    auto const spellings = version_spellings("1.92.0", "1.93.1");
+    std::vector<std::string> from;
+    for (version_spelling const& s : spellings) from.push_back(s.from + ">" + s.to);
+    EXPECT_EQ(from, (std::vector<std::string>{"1.92.0>1.93.1", "1_92_0>1_93_1", "1-92-0>1-93-1", "1.92>1.93", "1_92>1_93"}));
+    // within the line, the line stays
+    EXPECT_EQ(version_spellings("4.4.5", "4.4.7").size(), 3u);
+    EXPECT_EQ(version_spellings("2175", "2190").size(), 1u);
+
+    auto const replaced = [](std::string_view text, std::string_view from, std::string_view to) {
+        return replace_version(text, version_spellings(from, to)).value_or("<none>");
+    };
+    EXPECT_EQ(replaced("https://archives.boost.io/release/1.92.0/source/boost_1_92_0.tar.bz2", "1.92.0", "1.93.0"),
+        "https://archives.boost.io/release/1.93.0/source/boost_1_93_0.tar.bz2");
+    EXPECT_EQ(replaced("https://download.gnome.org/sources/glib/2.84/glib-2.84.1.tar.xz", "2.84.1", "2.86.0"),
+        "https://download.gnome.org/sources/glib/2.86/glib-2.86.0.tar.xz");
+    EXPECT_EQ(replaced("https://github.com/unicode-org/icu/releases/download/release-79-1/icu4c-79_1-src.tgz", "79.1", "80.1"),
+        "https://github.com/unicode-org/icu/releases/download/release-80-1/icu4c-80_1-src.tgz");
+    EXPECT_EQ(replaced("https://download.gnome.org/sources/libxml2/2.13/libxml2-2.13.5.tar.xz", "2.13.5", "2.14.0"),
+        "https://download.gnome.org/sources/libxml2/2.14/libxml2-2.14.0.tar.xz");
+    EXPECT_EQ(replaced("v1.2.1", "1.2.1", "1.2.2"), "v1.2.2");
+    // alone only: not within another version or number
+    EXPECT_EQ(replaced("x-1.2.10.tar.gz", "1.2.1", "1.2.2"), "<none>");
+    EXPECT_EQ(replaced("x-11.2.1.tar.gz", "1.2.1", "1.2.2"), "<none>");
+    EXPECT_EQ(replaced("x-0.1.2.1.tar.gz", "1.2.1", "1.2.2"), "<none>");
+    EXPECT_EQ(replaced("https://example.com/data.zip", "1.2.1", "1.2.2"), "<none>");
+
+    EXPECT_TRUE(mentions_version_digits("https://example.com/x-1920.zip", "1.92.0"));
+    EXPECT_FALSE(mentions_version_digits("https://example.com/x-19201.zip", "1.92.0"));
+    EXPECT_FALSE(mentions_version_digits("https://example.com/x-2175.zip", "2175"));
+}
+
+namespace {
+
+// fetchers answering from maps: sha256 by URL, commits by tag
+bump_fetchers fake_fetchers(std::map<std::string, std::string> files, std::map<std::string, std::string> tags)
+{
+    bump_fetchers f;
+    f.archive = [files](std::string const& url) -> result<std::string> {
+        auto it = files.find(url);
+        if (it == files.end()) return fail("HTTP 404");
+        return it->second;
+    };
+    f.mirror = f.archive;
+    f.tag_commit = [tags](std::string const&, std::string const& tag) -> result<std::string> {
+        auto it = tags.find(tag);
+        if (it == tags.end()) return fail("the repository has no such tag");
+        return it->second;
+    };
+    return f;
+}
+
+}
+
+TEST(bump, rewrites_only_the_values_it_changes)
+{
+    std::string const sha(64, 'a'), new_sha(64, 'b'), commit(40, '1'), new_commit(40, '2');
+    // CRLF, comments, a non-ASCII comment before a value on its line
+    std::string const old_text =
+        "[recipe]  # head\r\nversion = \"1.0.0\"\r\nrevision = 7 # r\r\n"
+        "[source]\r\ngit = \"https://example.com/a.git\"\r\ncommit = \"" + commit + "\"\r\ntag = \"v1.0.0\"\r\n"
+        "verify-against = { git = \"https://example.com/a.git\", tag = \"v1.0.0\" }\r\n"
+        "[[resource]]\r\nname = \"doc\" # \xc3\xa9\r\nurl =\"https://example.com/doc-1.0.0.zip\"  # \xc3\xa9\r\n"
+        "sha256 = \"" + sha + "\"\r\n";
+    std::string const fixed = old_text;
+    diagnostics d;
+    auto r = bump_recipe_text(fixed, "recipe.toml", "1.1.0", fake_fetchers({{"https://example.com/doc-1.1.0.zip", new_sha}}, {{"v1.1.0", new_commit}}), d);
+    ASSERT_TRUE(r.has_value()) << messages(d);
+    EXPECT_FALSE(d.has_errors()) << messages(d);
+    std::string expected = fixed;
+    expected = replace_in(expected, "\"1.0.0\"", "\"1.1.0\"");
+    expected = replace_in(expected, "revision = 7", "revision = 1");
+    expected = replace_in(expected, commit, new_commit);
+    expected = replace_in(expected, "tag = \"v1.0.0\"", "tag = \"v1.1.0\"");
+    expected = replace_in(expected, "tag = \"v1.0.0\"", "tag = \"v1.1.0\"");
+    expected = replace_in(expected, "doc-1.0.0", "doc-1.1.0");
+    expected = replace_in(expected, sha, new_sha);
+    EXPECT_EQ(r->text, expected);
+    ASSERT_EQ(r->inputs.size(), 3u);
+    EXPECT_EQ(r->inputs[0].name, "source");
+    EXPECT_EQ(r->inputs[0].after.commit, new_commit);
+    EXPECT_EQ(r->inputs[1].name, "source.verify-against");
+    EXPECT_EQ(r->inputs[1].status, bump_status::changed);
+    EXPECT_EQ(r->inputs[2].name, "doc");
+    EXPECT_EQ(r->old_revision, 7);
+
+    // literal strings stay literal
+    std::string const literal = "[recipe]\nversion = '1.0'\nrevision = 1\n[source]\nurl = 'https://example.com/a-1.0.zip'\nsha256 = '" + sha + "'\n";
+    d = {};
+    r = bump_recipe_text(literal, "recipe.toml", "1.1", fake_fetchers({{"https://example.com/a-1.1.zip", new_sha}}, {}), d);
+    ASSERT_TRUE(r.has_value()) << messages(d);
+    EXPECT_EQ(r->text, "[recipe]\nversion = '1.1'\nrevision = 1\n[source]\nurl = 'https://example.com/a-1.1.zip'\nsha256 = '" + new_sha + "'\n");
+
+    // a value after non-ASCII text on its line: toml++ counts code points
+    std::string const inline_source = "source = { note = \"\xc3\xa9\xc3\xa9\", url = \"https://example.com/a-1.0.zip\", sha256 = \""
+        + sha + "\" }\n[recipe]\nversion = \"1.0\"\nrevision = 1\n";
+    d = {};
+    r = bump_recipe_text(inline_source, "recipe.toml", "1.1", fake_fetchers({{"https://example.com/a-1.1.zip", new_sha}}, {}), d);
+    ASSERT_TRUE(r.has_value()) << messages(d);
+    EXPECT_EQ(r->text, replace_in(replace_in(replace_in(inline_source, "\"1.0\"", "\"1.1\""), "a-1.0", "a-1.1"), sha, new_sha)) << messages(d);
+}
+
+TEST(bump, says_what_it_cannot_bump)
+{
+    std::string const sha(64, 'a');
+    auto const bumped = [&](std::string const& source_table, std::map<std::string, std::string> files, std::map<std::string, std::string> tags,
+                            diagnostics& d) {
+        return bump_recipe_text("[recipe]\nversion = \"1.92.0\"\nrevision = 1\n[source]\n" + source_table, "recipe.toml", "1.93.0",
+            fake_fetchers(std::move(files), std::move(tags)), d);
+    };
+    // a commit without a tag
+    diagnostics d;
+    auto r = bumped("git = \"https://example.com/a.git\"\ncommit = \"" + std::string(40, '1') + "\"\n", {}, {}, d);
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(r->inputs[0].status, bump_status::not_bumped);
+    EXPECT_TRUE(r->text.empty());
+    EXPECT_EQ(messages(d), "recipe.toml:4:1: error: the source does not follow the version: a git commit without a tag: otok does not know "
+                           "the commit of version 1.93.0; bump the recipe by hand\n");
+    // the version in a spelling otok does not replace
+    d = {};
+    r = bumped("url = \"https://example.com/a-1920.zip\"\nsha256 = \"" + sha + "\"\n", {}, {}, d);
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(r->inputs[0].status, bump_status::not_bumped);
+    EXPECT_NE(messages(d).find("its URL holds the version 1.92.0 in a way otok does not replace: https://example.com/a-1920.zip"), std::string::npos)
+        << messages(d);
+    // a URL without the version
+    d = {};
+    r = bumped("url = \"https://example.com/a.zip\"\nsha256 = \"" + sha + "\"\n", {}, {}, d);
+    EXPECT_NE(messages(d).find("the source does not follow the version: its URL does not hold the version 1.92.0"), std::string::npos) << messages(d);
+    // no such tag
+    d = {};
+    r = bumped("git = \"https://example.com/a.git\"\ncommit = \"" + std::string(40, '1') + "\"\ntag = \"boost-1.92.0\"\n", {}, {}, d);
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(r->inputs[0].status, bump_status::failed);
+    EXPECT_NE(messages(d).find("recipe.toml:7:7: error: the source of version 1.93.0: cannot find the tag boost-1.93.0 in https://example.com/a.git: "
+                               "the repository has no such tag"), std::string::npos) << messages(d);
+    // a mirror giving another file is an error, one that gives none a warning
+    std::string const other(64, 'c');
+    d = {};
+    r = bumped("url = \"https://a.example/a-1.92.0.zip\"\nsha256 = \"" + sha + "\"\nmirrors = [\"https://b.example/a-1.92.0.zip\"]\n",
+        {{"https://a.example/a-1.93.0.zip", sha}, {"https://b.example/a-1.93.0.zip", other}}, {}, d);
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(r->inputs[0].status, bump_status::failed);
+    EXPECT_NE(messages(d).find("error: the source of version 1.93.0: the mirror https://b.example/a-1.93.0.zip gives another file"), std::string::npos)
+        << messages(d);
+    d = {};
+    r = bumped("url = \"https://a.example/a-1.92.0.zip\"\nsha256 = \"" + sha + "\"\nmirrors = [\"https://b.example/a-1.92.0.zip\"]\n",
+        {{"https://a.example/a-1.93.0.zip", sha}}, {}, d);
+    ASSERT_TRUE(r.has_value());
+    EXPECT_FALSE(d.has_errors()) << messages(d);
+    EXPECT_FALSE(r->text.empty());
+    EXPECT_NE(messages(d).find("warning: the mirror https://b.example/a-1.93.0.zip of the source does not give the file of version 1.93.0 (HTTP 404)"),
+        std::string::npos) << messages(d);
 }

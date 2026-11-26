@@ -2697,7 +2697,7 @@ TEST_F(builder_test, publishes_what_it_built)
     EXPECT_EQ(recipe_a["source"]["path"], "recipes/a");
     recipe_a.erase("source");
     EXPECT_EQ(recipe_a, nlohmann::json::parse(R"({"event": "recipe", "recipe": "p/a", "library": "a", "variant": "native", "version": "1.0",
-        "revision": 1, "entry": "recipes/p/a/native/1.0-r1.toml", "published": true, "build-on": ["*/cc"], "programs": []})"));
+        "revision": 1, "entry": "recipes/p/a/native/1.0-r1.toml", "published": true, "build-on": ["*/cc"], "programs": [], "working-tree": null})"));
     EXPECT_EQ(list[4], nlohmann::json::parse(R"({"event": "publication", "state": "published-already", "entries": [],
         "published": ["recipes/p/a/native/1.0-r1.toml", "recipes/p/b/native/2.0-r1.toml"], "pull-request": null, "registered": null})"));
 
@@ -2739,6 +2739,80 @@ TEST_F(builder_test, publishes_what_it_built)
         std::string::npos) << list[9];
     EXPECT_EQ(list.back(), nlohmann::json::parse(R"({"event": "end", "exit": 1})"));
     EXPECT_EQ(err.str().find("error:"), std::string::npos) << err.str();
+}
+
+// otok publish --dry-run --working-tree (docs/PLAN.md decision 146): a recipe directory with changes not committed, built as a
+// publication builds it, from the directory itself; nothing published.
+TEST_F(builder_test, publish_dry_run_builds_a_working_tree)
+{
+    auto git = find_git(current_environment());
+    if (!git) GTEST_SKIP() << "git is not in PATH";
+    auto const git_in = [&](std::filesystem::path const& dir, std::vector<std::string> args) {
+        std::vector<std::string> full{"-c", "user.name=otok test", "-c", "user.email=test@otok.invalid", "-c", "core.autocrlf=false"};
+        full.insert(full.end(), args.begin(), args.end());
+        auto done = run_git(*git, full, dir, upstream.path() / "setup.log", true);
+        EXPECT_TRUE(done.has_value()) << (done ? "" : done.error().message);
+        return done.value_or("");
+    };
+    git_in(project.path(), {"init", "-q"});
+    git_in(project.path(), {"add", "."});
+    git_in(project.path(), {"commit", "-q", "-m", "recipes"});
+    git_in(project.path(), {"remote", "add", "origin", file_url(project.path())});
+    upstream.write("seed/index.toml", "format = 1\n");
+    git_in(upstream.path(), {"init", "-q", "--bare", "index.git"});
+    git_in(upstream.path() / "seed", {"init", "-q"});
+    git_in(upstream.path() / "seed", {"add", "."});
+    git_in(upstream.path() / "seed", {"commit", "-q", "-m", "index"});
+    git_in(upstream.path() / "seed", {"push", "-q", file_url(upstream.path() / "index.git"), "HEAD:refs/heads/main"});
+    git_in(upstream.path(), {"clone", "-q", "-b", "main", file_url(upstream.path() / "index.git"), "index"});
+    std::filesystem::path const index = upstream.path() / "index";
+    std::string const index_arg = path_to_utf8(index);
+
+    // b 2.1, not committed: refused by a publication, built by a dry run of the working tree
+    write_recipe("b", "2.1", build_lua("b"), options_of_b);
+    EXPECT_EQ(run({"publish", "--index", index_arg, "--publisher", "p", "--dry-run", "recipes/b"}), 1);
+    EXPECT_NE(err.str().find("has changes that are not committed"), std::string::npos) << err.str();
+    EXPECT_EQ(run({"publish", "--index", index_arg, "--publisher", "p", "--working-tree", "recipes/b"}), 1);
+    EXPECT_EQ(err.str(), "error: --working-tree builds recipes that are not committed or pushed, which are never published: give --dry-run with it\n");
+    EXPECT_EQ(run({"publish", "--index", index_arg, "--publisher", "p", "--dry-run", "--working-tree", "--all"}), 1);
+    EXPECT_EQ(err.str(), "error: --working-tree builds the directories it is given; name them instead of --all\n");
+
+    ASSERT_EQ(run({"publish", "--index", index_arg, "--publisher", "p", "--dry-run", "--working-tree", "recipes/b"}), 0) << err.str();
+    EXPECT_NE(out.str().find("building p/b 2.1-r1 (native) for native in */cc\n"), std::string::npos) << out.str();
+    EXPECT_TRUE(out.str().ends_with("built; --dry-run publishes nothing\n")) << out.str();
+    std::string const tree = path_to_utf8(std::filesystem::absolute(project.path() / "recipes" / "b").lexically_normal().generic_u8string());
+    EXPECT_NE(err.str().find("note: p/b 2.1-r1 (native) is built from the working tree '" + tree + "': whether it is committed and pushed, and its "
+                             "entry's recipe-source, are not checked\n"), std::string::npos) << err.str();
+    EXPECT_EQ(err.str().find("local inputs"), std::string::npos) << err.str();  // the publication's lock is never kept
+    EXPECT_GT(entries(slices_of("b", "2.1")), 0u);
+    EXPECT_FALSE(std::filesystem::exists(index / "recipes"));
+    EXPECT_EQ(git_in(index, {"status", "--porcelain"}), "");
+
+    // as JSON: the recipe event says where it is built from, and no git source
+    ASSERT_EQ(run({"publish", "--index", index_arg, "--publisher", "p", "--dry-run", "--working-tree", "recipes/b", "--format", "json"}), 0) << err.str();
+    std::istringstream lines{out.str()};
+    nlohmann::json recipe_event, publication_event;
+    for (std::string line; std::getline(lines, line);) {
+        auto j = nlohmann::json::parse(line);
+        if (j["event"] == "recipe") recipe_event = j;
+        if (j["event"] == "publication") publication_event = j;
+    }
+    EXPECT_EQ(recipe_event["working-tree"], tree) << recipe_event;
+    EXPECT_EQ(recipe_event["source"], nullptr) << recipe_event;
+    EXPECT_EQ(recipe_event["version"], "2.1");
+    EXPECT_EQ(publication_event["state"], "dry-run") << publication_event;
+    EXPECT_EQ(publication_event["entries"], nlohmann::json::array({"recipes/p/b/native/2.1-r1.toml"})) << publication_event;
+
+    // committed, the same tree: its slices are those built from the working tree (the key holds the recipe's tree hash)
+    git_in(project.path(), {"commit", "-q", "-am", "b 2.1"});
+    ASSERT_EQ(run({"publish", "--index", index_arg, "--publisher", "p", "--dry-run", "recipes/b"}), 0) << err.str();
+    EXPECT_EQ(err.str().find("building b 2.1"), std::string::npos) << err.str();
+
+    // outside a git checkout too
+    ASSERT_TRUE(copy_tree(project.path() / "recipes" / "b", upstream.path() / "loose" / "b").has_value());
+    ASSERT_EQ(run({"publish", "--index", index_arg, "--publisher", "p", "--dry-run", "--working-tree", path_to_utf8(upstream.path() / "loose" / "b")}), 0)
+        << err.str();
+    EXPECT_TRUE(out.str().ends_with("built; --dry-run publishes nothing\n")) << out.str();
 }
 
 // otok publish and the shared build cache (cache.md 12.2): the dependencies from the stores, the recipes published built

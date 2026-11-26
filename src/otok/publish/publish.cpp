@@ -101,9 +101,16 @@ result<publish_project> make_publish_project(recipe const& r, locked_location co
     table.insert_or_assign("output", "out-" + target.name);
     manifest.insert(target.name, std::move(table));
 
-    toml::table recipe_location{{"git", source.git}, {"rev", source.commit}};
-    if (!source.tag.empty()) recipe_location.insert("tag", source.tag);
-    if (!source.path.empty()) recipe_location.insert("path", source.path);
+    toml::table recipe_location;
+    if (source.type == locked_location::kind::path) {
+        // a working tree (docs/PLAN.md decision 146): the directory, outside the project
+        recipe_location.insert("path", source.path);
+    } else {
+        recipe_location.insert("git", source.git);
+        recipe_location.insert("rev", source.commit);
+        if (!source.tag.empty()) recipe_location.insert("tag", source.tag);
+        if (!source.path.empty()) recipe_location.insert("path", source.path);
+    }
     recipe_location.is_inline(true);
     toml::table dep{{"recipe", std::move(recipe_location)}};
     if (options && !options->empty()) {

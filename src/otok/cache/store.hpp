@@ -133,6 +133,10 @@ public:
     // request, in order.
     std::vector<result<std::filesystem::path>> fetch(std::span<cache_download const> downloads, http_settings const& settings);
 
+    // Downloads the file at `url`, whose sha256 is not known yet, into downloads/sha256/ (cache.md 3), and gives its sha256: what
+    // `otok bump` fetches of a new version, which the build that follows finds there (docs/PLAN.md decision 146).
+    result<std::string> fetch_new(std::string const& url, http_settings const& settings);
+
     // sources/archive-<sha256>/: the archive downloads/sha256/<sha256> (present already) unpacked.
     result<std::filesystem::path> unpacked_archive(std::string const& sha256);
 

@@ -1656,3 +1656,100 @@ TEST_F(commands, update_without_building_writes_the_lock_alone)
     // the option belongs to update alone
     EXPECT_EQ(run({"install", "--no-build"}), 2);
 }
+
+namespace {
+
+// A recipe of `a` for otok bump: comments, a literal string, a mirror, a patch, a resource that follows the version and one
+// pinned apart from it.
+std::string bump_recipe(std::string const& version, int revision, std::string const& url, std::string const& sha, std::string const& mirror,
+    std::string const& data_url, std::string const& data_sha, std::string const& pinned_url, std::string const& pinned_sha)
+{
+    return "# The recipe of a, written for version 1.0.\n[recipe]\napi = 1\nlibrary = \"a\"\nname = \"a\"\nversion = \"" + version
+        + "\"   # upstream\nrevision = " + std::to_string(revision) + "\nlicense = \"MIT\"\nlicense-files = [\"LICENSE\"]\ndescription = \"Test.\"\n\n"
+        + "[source]\nurl = '" + url + "'\nsha256 = \"" + sha + "\"\nmirrors = [\"" + mirror + "\"]\npatches = [\"fix.patch\"]\n\n"
+        + "[[resource]]\nname = \"data\"\nurl = \"" + data_url + "\"\nsha256 = \"" + data_sha + "\"\nunpack = false\n\n"
+        + "[[resource]]\nname = \"pinned\"\nurl = \"" + pinned_url + "\"\nsha256 = \"" + pinned_sha + "\"\nunpack = false\n\n"
+        + "[platforms]\nsupported = [\"ios\", \"iossim\", \"macosx\"]\nbuild-on = [\"macos/xcode\"]\n[[product]]\nname = \"P\"\nlibraries = [\"a\"]\n";
+}
+
+}
+
+// otok bump (docs/PLAN.md decision 146): a copy of the recipe moved to another version, its inputs that hold the version
+// fetched anew, everything else of recipe.toml as it was; nothing written when an input cannot be fetched.
+TEST_F(commands, bump_moves_a_recipe_to_another_version)
+{
+    for (std::string const name : {"a-1.1.tar.gz", "mirror/a-1.1.tar.gz"}) upstream.write(name, "a 1.1\n");
+    upstream.write("data-1.0.bin", "data 1.0\n");
+    upstream.write("data-1.1.bin", "data 1.1\n");
+    upstream.write("pinned.bin", "pinned\n");
+    auto const url = [&](std::string const& name) { return file_url(upstream.path() / path_from_utf8(name)); };
+    auto const sha = [&](std::string const& name) { return sha256_file(upstream.path() / path_from_utf8(name)).value_or("?"); };
+    std::string const old_text = bump_recipe("1.0", 3, urls["a"], hashes["a"], url("mirror/a-1.0.tar.gz"), url("data-1.0.bin"), sha("data-1.0.bin"),
+        url("pinned.bin"), sha("pinned.bin"));
+    project.write("recipes/a/recipe.toml", old_text);
+    project.write("recipes/a/build.lua", "-- a 1.0\nfunction build(slice, options, deps)\nend\n");
+    project.write("recipes/a/fix.patch", "");
+
+    ASSERT_EQ(run({"bump", "recipes/a", "1.1", "--into", "recipes/a-1.1"}), 0) << err.str();
+    EXPECT_EQ(read_file(project.path() / "recipes" / "a-1.1" / "recipe.toml").value_or(""),
+        bump_recipe("1.1", 1, url("a-1.1.tar.gz"), sha("a-1.1.tar.gz"), url("mirror/a-1.1.tar.gz"), url("data-1.1.bin"), sha("data-1.1.bin"),
+            url("pinned.bin"), sha("pinned.bin")));
+    EXPECT_EQ(read_file(project.path() / "recipes" / "a" / "recipe.toml").value_or(""), old_text);
+    EXPECT_EQ(read_file(project.path() / "recipes" / "a-1.1" / "build.lua").value_or(""), "-- a 1.0\nfunction build(slice, options, deps)\nend\n");
+    std::string const dir = path_to_utf8(std::filesystem::absolute(project.path() / "recipes" / "a-1.1").lexically_normal().generic_u8string());
+    EXPECT_EQ(out.str(), "bumped a 1.0-r3 to 1.1-r1 in '" + dir + "'\n  source: changed, " + url("a-1.1.tar.gz") + "\n  resource 'data': changed, "
+        + url("data-1.1.bin") + "\n  resource 'pinned': unchanged\n");
+    // the patch, and what still says 1.0, as warnings
+    EXPECT_NE(err.str().find("warning: the source has 1 patch (fix.patch), written for version 1.0: otok publish --dry-run --working-tree tells"),
+        std::string::npos) << err.str();
+    EXPECT_NE(err.str().find("recipe.toml:1: warning: still mentions the version 1.0;"), std::string::npos) << err.str();
+    EXPECT_NE(err.str().find("build.lua:1: warning: still mentions the version 1.0;"), std::string::npos) << err.str();
+
+    // in place, as JSON
+    project.write("recipes/b/recipe.toml", bump_recipe("1.0", 1, urls["a"], hashes["a"], url("mirror/a-1.0.tar.gz"), url("data-1.0.bin"),
+        sha("data-1.0.bin"), url("pinned.bin"), sha("pinned.bin")));
+    project.write("recipes/b/build.lua", "function build(slice, options, deps)\nend\n");
+    project.write("recipes/b/fix.patch", "");
+    ASSERT_EQ(run({"bump", "recipes/b", "1.1", "--format", "json"}), 0) << err.str();
+    auto j = nlohmann::json::parse(out.str());
+    EXPECT_EQ(j["command"], "bump");
+    EXPECT_EQ(j["directory"], j["from"]);
+    EXPECT_EQ(j["version"], nlohmann::json::parse(R"({"old": "1.0", "new": "1.1"})"));
+    EXPECT_EQ(j["revision"], nlohmann::json::parse(R"({"old": 1, "new": 1})"));
+    EXPECT_EQ(j["patches"], nlohmann::json::parse(R"(["fix.patch"])"));
+    ASSERT_EQ(j["inputs"].size(), 3u) << j;
+    nlohmann::json const& source = j["inputs"][0];
+    EXPECT_EQ(source["name"], "source");
+    EXPECT_EQ(source["kind"], "archive");
+    EXPECT_EQ(source["status"], "changed");
+    EXPECT_EQ(source["message"], nullptr);
+    EXPECT_EQ(source["old"]["url"], urls["a"]);
+    EXPECT_EQ(source["old"]["sha256"], hashes["a"]);
+    EXPECT_EQ(source["new"]["url"], url("a-1.1.tar.gz"));
+    EXPECT_EQ(source["new"]["sha256"], sha("a-1.1.tar.gz"));
+    EXPECT_EQ(source["new"]["mirrors"], nlohmann::json::array({url("mirror/a-1.1.tar.gz")}));
+    EXPECT_EQ(source["new"]["git"], nullptr);
+    EXPECT_EQ(source["new"]["tag"], nullptr);
+    EXPECT_EQ(j["inputs"][2]["status"], "unchanged");
+    // the file fetched is in the cache, for the build that follows
+    EXPECT_TRUE(std::filesystem::exists(cache.path() / "downloads" / "sha256" / sha("a-1.1.tar.gz")));
+
+    // no file of the version: nothing written, the input and the URL named
+    ASSERT_EQ(run({"bump", "recipes/a", "1.2", "--into", "recipes/a-1.2"}), 1);
+    EXPECT_NE(err.str().find("error: the source of version 1.2: cannot fetch " + url("a-1.2.tar.gz") + ": "), std::string::npos) << err.str();
+    EXPECT_FALSE(std::filesystem::exists(project.path() / "recipes" / "a-1.2"));
+    EXPECT_EQ(out.str(), "");
+    ASSERT_EQ(run({"bump", "recipes/a", "1.2", "--format", "json"}), 1);
+    j = nlohmann::json::parse(out.str());
+    EXPECT_EQ(j["directory"], nullptr);
+    EXPECT_EQ(j["inputs"][0]["status"], "failed");
+    EXPECT_EQ(read_file(project.path() / "recipes" / "a" / "recipe.toml").value_or(""), old_text);
+
+    // the mistakes
+    EXPECT_EQ(run({"bump", "recipes/a", "1.1", "--into", "recipes/b"}), 1);
+    EXPECT_NE(err.str().find("recipes/b' exists already: --into makes a new recipe directory"), std::string::npos) << err.str();
+    EXPECT_EQ(run({"bump", "recipes/a", "1.0"}), 1);
+    EXPECT_NE(err.str().find("error: the recipe is at version 1.0 already"), std::string::npos) << err.str();
+    EXPECT_EQ(run({"bump", "recipes", "1.1"}), 1);
+    EXPECT_NE(err.str().find("is not a recipe directory: it has no recipe.toml"), std::string::npos) << err.str();
+}

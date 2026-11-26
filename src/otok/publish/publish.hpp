@@ -29,7 +29,8 @@ struct publish_project
 // targets or of none of `targets`.
 result<target_info const*> publish_target(recipe const& r, std::span<target_info const* const> targets);
 
-// The project that builds the recipe `r`, published from `source` (git, commit, tag, path), as its only dependency with
+// The project that builds the recipe `r`, published from `source` (git, commit, tag, path; or a path location, the absolute
+// directory of a working tree, docs/PLAN.md decision 146), as its only dependency with
 // `options` (nothing: the defaults), in `environment`, one of its `build-on` (docs/PLAN.md decision 82): the table of its
 // target with the supported platforms, `[platforms] architectures` and `[publish.<target>]` over
 // target_info::publish_defaults (recipe-toml.md 14), and `build-on = [<environment>]`. A tool recipe without products,

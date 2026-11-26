@@ -46,6 +46,8 @@
 #include "otok/manifest/dev_manifest.hpp"
 #include "otok/manifest/manifest.hpp"
 #include "otok/packager/packager.hpp"
+#include "otok/fetch/http.hpp"
+#include "otok/publish/bump.hpp"
 #include "otok/publish/github.hpp"
 #include "otok/publish/publish.hpp"
 #include "otok/resolver/locking.hpp"
@@ -773,7 +775,8 @@ bool write_changes(project const& p, lock_file const& fresh, command_context& ct
             return false;
         }
     }
-    for (std::string const& local : local_packages(fresh)) {
+    // not for the projects of otok publish, whose lock is never kept: a working tree is local (docs/PLAN.md decision 146)
+    for (std::string const& local : ctx.nested ? std::vector<std::string>{} : local_packages(fresh)) {
         diags.warning({}, in_quotes(local) + " has local inputs outside the project; `otok install --locked` will refuse them");
     }
     // a misspelled name would leave that library's inputs to the recipe's locations
@@ -3232,7 +3235,10 @@ toml::date_time utc_now()
 struct publish_recipe
 {
     std::filesystem::path dir;
-    locked_location source;            // the remote's URL, HEAD, the directory in the repository
+    // the remote's URL, HEAD, the directory in the repository; with --working-tree a path location, the directory itself
+    locked_location source;
+    // --working-tree (docs/PLAN.md decision 146): the directory as it is, not committed or pushed, built and never published
+    bool working_tree = false;
     std::filesystem::path tree;
     std::shared_ptr<recipe const> r;
     std::optional<index_addition> addition;
@@ -3324,6 +3330,157 @@ nlohmann::json publish_build_json(std::size_t number, recipe const& r, std::stri
     return j;
 }
 
+// An input of otok bump as cli-json.md 11 gives its location.
+nlohmann::json bump_location_json(bump_location const& l, bool git)
+{
+    nlohmann::json j;
+    j["url"] = git ? nlohmann::json(nullptr) : nlohmann::json(l.url);
+    j["mirrors"] = git ? nlohmann::json(nullptr) : nlohmann::json(l.mirrors);
+    j["sha256"] = git ? nlohmann::json(nullptr) : nlohmann::json(l.sha256);
+    j["git"] = git ? nlohmann::json(l.git) : nlohmann::json(nullptr);
+    j["commit"] = git && !l.commit.empty() ? nlohmann::json(l.commit) : nlohmann::json(nullptr);
+    j["tag"] = git && !l.tag.empty() ? nlohmann::json(l.tag) : nlohmann::json(nullptr);
+    return j;
+}
+
+// otok bump DIR VERSION (DESIGN 7.4.2, docs/PLAN.md decision 146): the recipe in DIR, or its copy NEWDIR, moved to another
+// upstream version, its inputs fetched anew; nothing written when anything fails.
+int bump(parsed_command const& cmd, command_context& ctx)
+{
+    auto const json = json_requested(cmd, ctx);
+    if (!json) return 1;
+    diagnostics diags;
+    std::filesystem::path const from = (ctx.project_dir / path_from_utf8(cmd.arguments[0])).lexically_normal();
+    std::string const new_version = cmd.arguments[1];
+    std::optional<std::filesystem::path> into;
+    if (auto v = cmd.value("into")) into = (ctx.project_dir / path_from_utf8(*v)).lexically_normal();
+    std::optional<recipe> loaded;
+    std::optional<bump_result> bumped;
+    std::filesystem::path written;
+    [&] {
+        std::error_code ec;
+        if (into && std::filesystem::exists(*into, ec)) {
+            diags.error({}, "'" + absolute_path(*into) + "' exists already: --into makes a new recipe directory");
+            return;
+        }
+        if (!std::filesystem::is_regular_file(from / "recipe.toml", ec)) {
+            diags.error({}, "'" + absolute_path(from) + "' is not a recipe directory: it has no recipe.toml");
+            return;
+        }
+        loaded = load_recipe(from, ctx.targets, diags);
+        if (!loaded) return;
+        auto config = load_config(ctx.env, diags);
+        if (!config) return;
+        cache_notices notices{
+            .waiting = [&ctx](std::string const& what) { ctx.err << "note: " << what << "\n"; },
+            .fetching = [&ctx](std::string const& what) { ctx.err << what << "\n"; },
+        };
+        auto cache = cache_store::open(config->cache_dir, std::move(notices));
+        if (!cache) {
+            diags.error({}, cache.error().message);
+            return;
+        }
+        auto const git = find_git(current_environment(), config->git);
+        http_settings settings;
+        settings.proxy = config->proxy;
+        std::filesystem::path const log = cache->tmp() / "bump.log";
+        bump_fetchers fetchers;
+        fetchers.archive = [&](std::string const& url) { return cache->fetch_new(url, settings); };
+        fetchers.mirror = [&](std::string const& url) -> result<std::string> {
+            std::filesystem::path const file = cache->tmp() / "mirror-check";
+            ctx.err << "downloading " << url << "\n";
+            auto got = download_file({url, file, ""}, settings);
+            std::error_code removed;
+            std::filesystem::remove(file, removed);
+            if (!got) return std::unexpected{got.error()};
+            return got->sha256;
+        };
+        fetchers.tag_commit = [&](std::string const& repository, std::string const& tag) -> result<std::string> {
+            if (!git) return fail("git is not in PATH");
+            ctx.err << "looking up the tag " << tag << " in " << repository << "\n";
+            std::string const ref = "refs/tags/" + tag;
+            auto out = run_git(*git, {"ls-remote", repository, ref, ref + "^{}"}, cache->tmp(), log, true);
+            if (!out) return std::unexpected{out.error()};
+            // the commit of an annotated tag is the peeled line's
+            std::string commit;
+            std::istringstream lines{*out};
+            for (std::string line; std::getline(lines, line);) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                std::size_t const tab = line.find('\t');
+                if (tab == std::string::npos) continue;
+                std::string const name = line.substr(tab + 1);
+                if (name == ref + "^{}") commit = line.substr(0, tab);
+                else if (name == ref && commit.empty()) commit = line.substr(0, tab);
+            }
+            if (commit.empty()) return fail("the repository has no such tag");
+            return commit;
+        };
+        std::string const file = absolute_path(from / "recipe.toml");
+        auto content = read_file(from / "recipe.toml");
+        if (!content) {
+            diags.error({}, content.error().message);
+            return;
+        }
+        bumped = bump_recipe_text(*content, file, new_version, fetchers, diags);
+        if (!bumped || bumped->text.empty()) return;
+        // what is written must read as a recipe
+        diagnostics check;
+        if (!parse_recipe(bumped->text, file, ctx.targets, {}, check)) {
+            for (diagnostic const& d : check.items()) diags.error(d.where, "the bumped recipe.toml: " + d.message);
+            return;
+        }
+        std::filesystem::path const dest = into.value_or(from);
+        if (into) {
+            if (auto copied = copy_tree(from, *into); !copied) {
+                std::filesystem::remove_all(*into, ec);
+                diags.error({}, copied.error().message);
+                return;
+            }
+        }
+        if (auto ok = write_file_atomic(dest / "recipe.toml", bumped->text); !ok) {
+            if (into) std::filesystem::remove_all(*into, ec);
+            diags.error({}, ok.error().message);
+            return;
+        }
+        written = dest;
+        warn_version_mentions(dest, bumped->text, version_spellings(bumped->old_version, bumped->new_version), bumped->old_version, diags);
+    }();
+
+    if (*json) {
+        nlohmann::json body;
+        body["directory"] = written.empty() ? nlohmann::json(nullptr) : nlohmann::json(absolute_path(written));
+        body["from"] = absolute_path(from);
+        body["library"] = loaded ? nlohmann::json(loaded->library) : nlohmann::json(nullptr);
+        body["name"] = loaded ? nlohmann::json(loaded->name) : nlohmann::json(nullptr);
+        body["variant"] = loaded ? nlohmann::json(loaded->variant) : nlohmann::json(nullptr);
+        body["version"] = bumped ? nlohmann::json{{"old", bumped->old_version}, {"new", bumped->new_version}} : nlohmann::json(nullptr);
+        body["revision"] = bumped ? nlohmann::json{{"old", bumped->old_revision}, {"new", 1}} : nlohmann::json(nullptr);
+        body["patches"] = bumped ? nlohmann::json(bumped->patches) : nlohmann::json(nullptr);
+        nlohmann::json inputs = nlohmann::json::array();
+        if (bumped) {
+            for (bump_input const& in : bumped->inputs) {
+                inputs.push_back({{"name", in.name}, {"kind", in.git ? "git" : "archive"}, {"status", std::string{bump_status_name(in.status)}},
+                    {"message", in.message.empty() ? nlohmann::json(nullptr) : nlohmann::json(in.message)},
+                    {"old", bump_location_json(in.before, in.git)}, {"new", bump_location_json(in.after, in.git)}});
+            }
+        }
+        body["inputs"] = bumped ? std::move(inputs) : nlohmann::json(nullptr);
+        return print_json(ctx, "bump", diags, std::move(body));
+    }
+    report(diags, ctx.err);
+    if (diags.has_errors() || written.empty()) return 1;
+    ctx.out << "bumped " << loaded->name << " " << bumped->old_version << "-r" << bumped->old_revision << " to " << bumped->new_version
+            << "-r1 in '" << absolute_path(written) << "'\n";
+    for (bump_input const& in : bumped->inputs) {
+        std::string const name = in.name == "source" || in.name == "source.verify-against" ? in.name : "resource '" + in.name + "'";
+        ctx.out << "  " << name << ": " << bump_status_name(in.status);
+        if (in.status == bump_status::changed) ctx.out << ", " << (in.git ? in.after.tag + " (" + in.after.commit + ")" : in.after.url);
+        if (!in.message.empty()) ctx.out << ": " << in.message;
+        ctx.out << "\n";
+    }
+    return 0;
+}
+
 // otok publish (DESIGN 7.4, docs/PLAN.md decisions 44, 46): recipes committed and pushed in a git checkout,
 // built from a fresh fetch, then added to the index through a pull request on GitHub or a checkout of it.
 int run_publish(parsed_command const& cmd, command_context& ctx)
@@ -3346,6 +3503,10 @@ int run_publish(parsed_command const& cmd, command_context& ctx)
     bool const dry_run = cmd.flag("dry-run");
     // --dry-run --no-build: the recipes checked as a publication checks them, nothing built or published (cli-json.md 10)
     bool const check = dry_run && !build;
+    // a recipe directory as it is, before it is committed (docs/PLAN.md decision 146): a dry run only
+    bool const working_tree = cmd.flag("working-tree");
+    if (working_tree && !dry_run) return error("--working-tree builds recipes that are not committed or pushed, which are never published: give --dry-run with it");
+    if (working_tree && cmd.flag("all")) return error("--working-tree builds the directories it is given; name them instead of --all");
 
     diagnostics diags;
     auto config = load_config(ctx.env, diags);
@@ -3445,24 +3606,51 @@ int run_publish(parsed_command const& cmd, command_context& ctx)
         publish_recipe p;
         p.dir = dir;
         std::string const where = "'" + absolute_path(dir) + "'";
-        auto prefix = git_line({"rev-parse", "--show-prefix"}, dir);
-        if (!prefix) return refused(where + " is not in a git checkout: " + prefix.error().message);
-        auto status = git_line({"status", "--porcelain", "--", "."}, dir);
-        if (!status) return refused(status.error().message);
-        if (!status->empty()) return refused("the recipe directory " + where + " has changes that are not committed:\n" + *status);
-        auto commit = git_line({"rev-parse", "HEAD"}, dir);
-        if (!commit) return refused(commit.error().message);
-        auto url = git_line({"remote", "get-url", remote}, dir);
-        if (!url) return refused("the checkout of " + where + " has no remote " + in_quotes(remote) + ": " + url.error().message);
-        p.source.type = locked_location::kind::git;
-        p.source.git = *url;
-        p.source.commit = *commit;
-        if (!prefix->empty()) p.source.path = prefix->substr(0, prefix->find_last_not_of('/') + 1);
-        auto tree = cache->git_directory(p.source.git, p.source.commit, "", p.source.path, *git);
-        if (!tree) return refused("cannot fetch " + p.source.commit + " from " + in_quotes(remote) + " (is it pushed?): " + tree.error().message);
-        p.tree = *tree;
+        // where the entry says the recipe is: the git source
+        locked_location entry_source;
+        entry_source.type = locked_location::kind::git;
+        bool remote_known = true;
+        if (working_tree) {
+            // the directory itself, built as a recipe by path; the entry made with the remote and HEAD when it is in a
+            // checkout that has them, else with a stand-in: never published, compared without its source (same_index_entry)
+            p.working_tree = true;
+            p.tree = std::filesystem::absolute(dir).lexically_normal();
+            if (!std::filesystem::is_regular_file(p.tree / "recipe.toml", ec)) return refused(where + " is not a recipe directory: it has no recipe.toml");
+            p.source.type = locked_location::kind::path;
+            p.source.path = path_to_utf8(p.tree.generic_u8string());
+            auto prefix = git_line({"rev-parse", "--show-prefix"}, dir);
+            auto commit = prefix ? git_line({"rev-parse", "HEAD"}, dir) : result<std::string>{fail("")};
+            auto url = commit ? git_line({"remote", "get-url", remote}, dir) : result<std::string>{fail("")};
+            if (url) {
+                entry_source.git = *url;
+                entry_source.commit = *commit;
+                if (!prefix->empty()) entry_source.path = prefix->substr(0, prefix->find_last_not_of('/') + 1);
+            } else {
+                remote_known = false;
+                entry_source.git = "https://otok.invalid/working-tree";
+                entry_source.commit = std::string(40, '0');
+            }
+        } else {
+            auto prefix = git_line({"rev-parse", "--show-prefix"}, dir);
+            if (!prefix) return refused(where + " is not in a git checkout: " + prefix.error().message);
+            auto status = git_line({"status", "--porcelain", "--", "."}, dir);
+            if (!status) return refused(status.error().message);
+            if (!status->empty()) return refused("the recipe directory " + where + " has changes that are not committed:\n" + *status);
+            auto commit = git_line({"rev-parse", "HEAD"}, dir);
+            if (!commit) return refused(commit.error().message);
+            auto url = git_line({"remote", "get-url", remote}, dir);
+            if (!url) return refused("the checkout of " + where + " has no remote " + in_quotes(remote) + ": " + url.error().message);
+            p.source.type = locked_location::kind::git;
+            p.source.git = *url;
+            p.source.commit = *commit;
+            if (!prefix->empty()) p.source.path = prefix->substr(0, prefix->find_last_not_of('/') + 1);
+            auto tree = cache->git_directory(p.source.git, p.source.commit, "", p.source.path, *git);
+            if (!tree) return refused("cannot fetch " + p.source.commit + " from " + in_quotes(remote) + " (is it pushed?): " + tree.error().message);
+            p.tree = *tree;
+            entry_source = p.source;
+        }
         // checked as it will be published, before anything is built
-        auto addition = make_index_entry(p.tree, p.source, publisher, std::nullopt, ctx.targets);
+        auto addition = make_index_entry(p.tree, entry_source, publisher, std::nullopt, ctx.targets);
         if (!addition) return refused(addition.error().message);
         diagnostics recipe_diags;
         auto loaded = load_recipe(p.tree, ctx.targets, recipe_diags);
@@ -3472,7 +3660,9 @@ int run_publish(parsed_command const& cmd, command_context& ctx)
         }
         p.r = std::make_shared<recipe const>(std::move(*loaded));
         if (!checkout) {
-            if (auto locations = non_https_locations(p.source, *p.r); !locations.empty()) {
+            // without a remote, the recipe's own location is not known: its inputs alone
+            locked_location const recipe_location = remote_known ? entry_source : locked_location{.type = locked_location::kind::path};
+            if (auto locations = non_https_locations(recipe_location, *p.r); !locations.empty()) {
                 std::string list;
                 for (std::string const& r : locations) list += "\n  " + r;
                 return refused(addition->label + ": an index on GitHub takes https locations only:" + list);
@@ -3511,16 +3701,23 @@ int run_publish(parsed_command const& cmd, command_context& ctx)
     if (refused_recipes > 0 && !check) return 1;
 
     for (publish_recipe const& p : recipes) {
-        nlohmann::json source;
-        source["git"] = p.source.git;
-        source["commit"] = p.source.commit;
-        source["path"] = string_or_null(p.source.path);
+        nlohmann::json source = nullptr;
+        if (p.working_tree) {
+            // what is not checked of a working tree (docs/PLAN.md decision 146)
+            ctx.err << "note: " << p.addition->label << " is built from the working tree '" << absolute_path(p.tree)
+                    << "': whether it is committed and pushed, and its entry's recipe-source, are not checked\n";
+        } else {
+            source["git"] = p.source.git;
+            source["commit"] = p.source.commit;
+            source["path"] = string_or_null(p.source.path);
+        }
         // where it builds and the programs of a tool recipe, spelt as otok info spells them (cli-json.md 4.2.2)
         nlohmann::json build_on = nlohmann::json::array();
         for (build_environment const& b : p.r->build_on) build_on.push_back(b.text());
         emit(ctx, "recipe", {{"recipe", publisher + "/" + p.r->name}, {"library", p.r->library}, {"variant", p.r->variant},
             {"version", p.r->version->str()}, {"revision", p.r->revision}, {"entry", p.addition->entry_path}, {"source", std::move(source)},
-            {"published", p.published}, {"build-on", std::move(build_on)}, {"programs", p.r->programs}});
+            {"published", p.published}, {"build-on", std::move(build_on)}, {"programs", p.r->programs},
+            {"working-tree", p.working_tree ? nlohmann::json(absolute_path(p.tree)) : nlohmann::json(nullptr)}});
     }
 
     // the index's limit of entries per publisher, before anything is built (DESIGN 7.4, index.md 9.2): a pull request's, which
@@ -4185,10 +4382,13 @@ std::span<command_spec const> command_specs()
                 {"remote", 0, "NAME", "The git remote users fetch the recipe from (default: origin)"},
                 {"all", 0, "", "Every recipe of the checkout; those published already are skipped"},
                 {"dry-run", 0, "", "Build, and publish nothing; with --no-build, only check the recipes as a publication would"}, {"no-build", 0, "", "Add the entry without building the recipe"},
+                {"working-tree", 0, "", "With --dry-run: build the recipe directories as they are, not committed or pushed (not from the remote)"},
                 {"no-push", 0, "", "With a checkout of the index: commit the entry, but do not push"},
                 verbose_option,
                 keep_build_dirs_option, no_sandbox_option, no_virtual_paths_option, progress_option, jobs_option, no_build_cache_option,
                 stream_format_option}, 0, any_number},
+        {"bump", "DIR VERSION", "Move the recipe in DIR to another upstream version: [recipe] version, revision 1, and the inputs that follow the version, fetched anew",
+            {{"into", 0, "NEWDIR", "Copy DIR to NEWDIR (a new directory: a new line of the library) and bump the copy"}, format_option}, 2, 2},
         {"agent-skill", "", "Write the skill for coding agents (SKILL.md: how to use otok) into the project's .claude/skills/otok/",
             {{"user", 0, "", "Into ~/.claude/skills/ instead, for every project of this user"},
                 {"dir", 0, "DIR", "Into DIR/otok/ instead: the skills directory of another agent"},
@@ -4243,6 +4443,7 @@ int run_command(parsed_command const& command, command_context& ctx)
     if (command.command == "agent-skill") return agent_skill(command, ctx);
     if (command.command == "licenses") return licenses(command, ctx);
     if (command.command == "publish") return publish(command, ctx);
+    if (command.command == "bump") return bump(command, ctx);
     if (command.command == "index-check") return index_check(command, ctx);
     if (command.command == "index-probe") return index_probe(command, ctx);
     if (command.command == "index-reproject") return index_reproject(command, ctx);
