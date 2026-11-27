@@ -15,6 +15,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <thread>
 
 #include <curl/curl.h>
 
@@ -338,7 +339,19 @@ result<http_reply> http_call(http_exchange const& request, http_settings const& 
     curl_easy_setopt(h, CURLOPT_HEADERFUNCTION, on_header);
     curl_easy_setopt(h, CURLOPT_HEADERDATA, &reply.headers);
     curl_easy_setopt(h, CURLOPT_ERRORBUFFER, error.data());
-    if (CURLcode const code = curl_easy_perform(h); code != CURLE_OK && !(code == CURLE_WRITE_ERROR && sink.truncated)) {
+    CURLcode code = curl_easy_perform(h);
+    if (code == CURLE_COULDNT_CONNECT && request.retry_connect) {
+        // nothing was sent or received: the same transfer once more from its start
+        std::this_thread::sleep_for(settings.connect_retry_pause);
+        error[0] = '\0';
+        reply.headers.clear();
+        if (uploaded.is_open()) {
+            uploaded.clear();
+            uploaded.seekg(0);
+        }
+        code = curl_easy_perform(h);
+    }
+    if (code != CURLE_OK && !(code == CURLE_WRITE_ERROR && sink.truncated)) {
         return fail(request.method + " " + request.url + ": " + (error[0] ? std::string{error.data()} : std::string{curl_easy_strerror(code)}));
     }
     if (downloaded.is_open()) {

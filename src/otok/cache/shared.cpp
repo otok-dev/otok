@@ -164,6 +164,8 @@ struct shared_store::state
         request.download = std::move(download);
         // a GET may be sent to an object store's presigned URL, a PUT never elsewhere
         request.follow_redirects = request.method == "GET" || request.method == "HEAD";
+        // a connection refused once is not yet a store out of reach (cache.md 12.2)
+        request.retry_connect = true;
         return transport(request);
     }
 

@@ -1250,4 +1250,6 @@ TEST(shared_cache, http_store)
     ASSERT_FALSE(failed);
     EXPECT_NE(failed.error().message.find("connection refused; it is not asked again in this command"), std::string::npos) << failed.error().message;
     EXPECT_EQ(failed.error().message.find("secret"), std::string::npos);
+    // every request of the store tries a refused connection once more (http_call) before it gives up
+    EXPECT_EQ(server.requests_without_retry(), 0);
 }

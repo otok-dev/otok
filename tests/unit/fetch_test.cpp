@@ -159,6 +159,25 @@ TEST(http, downloads_over_https)
     EXPECT_EQ(again->status, 304);
 }
 
+// A connection refused (nothing listens on port 1 of this machine) is tried once more after the pause when the request asks for
+// it, and is still an error naming the transfer when the second one is refused too (cache.md 12.2).
+TEST(http, tries_a_refused_connection_once_more)
+{
+    http_settings settings;
+    settings.connect_timeout = 10;
+    settings.connect_retry_pause = std::chrono::milliseconds{400};
+    http_exchange request;
+    request.method = "PUT";
+    request.url = "http://127.0.0.1:1/ac/x";
+    request.retry_connect = true;
+    auto const start = std::chrono::steady_clock::now();
+    auto reply = http_call(request, settings);
+    auto const elapsed = std::chrono::steady_clock::now() - start;
+    ASSERT_FALSE(reply.has_value());
+    EXPECT_EQ(reply.error().message.find("PUT http://127.0.0.1:1/ac/x: "), 0u) << reply.error().message;
+    EXPECT_GE(elapsed, settings.connect_retry_pause);
+}
+
 TEST(http, finds_the_ca_bundle_of_the_system)
 {
     test::temp_dir dir;

@@ -233,6 +233,7 @@ public:
         return [s = state_](http_exchange const& e) -> result<http_reply> {
             std::lock_guard lock{s->m};
             s->requests.push_back(e.method + " " + e.url);
+            if (!e.retry_connect) ++s->without_retry;
             if (s->failing) return fail("connection refused");
             if (!e.url.starts_with(s->base + "/")) return http_answer(404, "");
             if (!s->token.empty() && std::ranges::find(e.headers, "Authorization: Bearer " + s->token) == e.headers.end()) return http_answer(401, "");
@@ -274,6 +275,12 @@ public:
         std::lock_guard lock{state_->m};
         return state_->requests;
     }
+    // requests that would not try a refused connection again (cache.md 12.2)
+    int requests_without_retry() const
+    {
+        std::lock_guard lock{state_->m};
+        return state_->without_retry;
+    }
     void set_failing(bool failing)
     {
         std::lock_guard lock{state_->m};
@@ -288,6 +295,7 @@ private:
         std::map<std::string, std::string> files;
         std::vector<std::string> requests;
         bool failing = false;
+        int without_retry = 0;
     };
     std::shared_ptr<state> state_;
 };

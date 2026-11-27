@@ -366,8 +366,10 @@ A hit becomes an entry of the local cache as 6 creates one: the descriptor read,
 entry and its libraries as the builder checks those it builds (their kinds by the linkage of the slice, and what the target
 checks of them: their architectures); then renamed into place, with the
 current time (9). An entry failing any of these is dropped with a warning naming the store, and the next store is
-asked, or the slice is built. A store that cannot be reached (a network error, an HTTP status other than `200` and
-`404`) is a warning once per command and is not asked again in that command.
+asked, or the slice is built. A connection to a store that could not be made (refused, no route: nothing was sent) is
+tried once more a second later: the first connection of a newly installed otok may be refused once (seen on macOS). A
+store that cannot be reached then (a network error, an HTTP status other than `200` and `404`) is a warning once per
+command and is not asked again in that command.
 
 Stores are not used with `--offline` or `--frozen` (6.1) and by `otok fetch`, which fetches inputs for building offline.
 `otok publish` asks them for the slices of the dependencies of its builds as `install` does, and pushes what it builds;

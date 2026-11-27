@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -25,6 +26,7 @@ struct http_settings
     std::string user_agent = "otok";
     long connect_timeout = 30;       // seconds
     long stall_timeout = 60;         // seconds below 1 byte/s before giving up
+    std::chrono::milliseconds connect_retry_pause{1000};  // http_exchange::retry_connect
     std::size_t max_parallel = 8;
 };
 
@@ -58,6 +60,10 @@ struct http_exchange
     std::filesystem::path upload{};     // the body read from this file instead (a PUT of a large file); empty: `body`
     std::filesystem::path download{};   // the reply's body written to this file instead, whatever its status; empty: in the reply
     bool follow_redirects = true;       // false: a redirect is the reply (a PUT must not be sent elsewhere)
+    // A connection that could not be made (refused, no route: nothing was sent, whatever the method) tried once more
+    // after `http_settings::connect_retry_pause` (a build cache, `cache.md` 12.2): the first connection of a new binary
+    // may be refused by its system's checks.
+    bool retry_connect = false;
 };
 
 struct http_reply
