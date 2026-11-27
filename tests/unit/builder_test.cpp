@@ -1211,7 +1211,8 @@ TEST_F(builder_test, checks_what_libraries_load)
     };
     std::string const refused = "/lib/liba.so) loads '";
     std::string const why = "', which is neither its slice's, nor a dependency's, nor the system's: a library of the build machine, or of a "
-                            "dependency the recipe does not declare";
+                            "dependency the recipe does not declare; an interface of the system taken from the machine as it is (crypt, pam) "
+                            "is named in 'link' of a product or in [tool] link (recipe-toml.md 3.1, 11)";
 
     a_loads("libc.so.6");
     ASSERT_EQ(run({"install"}), 0) << err.str();
@@ -1228,6 +1229,36 @@ TEST_F(builder_test, checks_what_libraries_load)
     a_loads("/opt/homebrew/lib/libgen.so.3");
     EXPECT_EQ(run({"install"}), 1);
     EXPECT_NE(err.str().find(refused + "/opt/homebrew/lib/libgen.so.3" + why), std::string::npos) << err.str();
+}
+
+// What a tool's program loads (build-lua-api.md 8): the system's, or a library of `[tool] link` (recipe-toml.md 3.1)
+TEST_F(builder_test, checks_what_programs_load)
+{
+    toolchain.system = std::set<std::string>{"libc.so.6"};
+    project.write("otok.toml", manifest + "[tool-deps.srv]\nrecipe = { path = \"recipes/srv\" }\ndeliver = true\n");
+    auto const srv_loads = [&](std::string const& loaded, std::string const& link = "") {
+        project.write("recipes/srv/recipe.toml",
+            "[recipe]\napi = 1\nlibrary = \"srv\"\nname = \"srv\"\nversion = \"1.0\"\nrevision = 1\nlicense = \"MIT\"\n"
+            "license-files = [\"LICENSE\"]\ndescription = \"Test.\"\n[source]\nurl = \"" + urls["ninja"] + "\"\nsha256 = \"" + hashes["ninja"] + "\"\n"
+            "[platforms]\nsupported = [\"native\"]\nbuild-on = [\"*/cc\"]\n[tool]\nprograms = [\"srv\"]\n" + link);
+        project.write("recipes/srv/build.lua",
+            "function build(slice)\n    otok.write(slice.prefix .. '/sbin/srv', " + test::lua_bytes(test::elf_image(1) + loaded + '\0') + ")\n"
+            "    return { programs = { srv = slice.prefix .. '/sbin/srv' } }\nend\n");
+    };
+    srv_loads("libc.so.6");
+    ASSERT_EQ(run({"install"}), 0) << err.str();
+
+    srv_loads("libcrypt.so.1");
+    EXPECT_EQ(run({"install"}), 1);
+    EXPECT_NE(err.str().find("/sbin/srv) loads 'libcrypt.so.1', which is neither its slice's, nor a dependency's, nor the system's"),
+        std::string::npos) << err.str();
+
+    srv_loads("libcrypt.so.1", "link = { libraries = [\"crypt\"] }\n");
+    ASSERT_EQ(run({"install"}), 0) << err.str();
+    // only what it names
+    srv_loads("libpam.so.0", "link = { libraries = [\"crypt\"] }\n");
+    EXPECT_EQ(run({"install"}), 1);
+    EXPECT_NE(err.str().find("loads 'libpam.so.0'"), std::string::npos) << err.str();
 }
 
 TEST_F(builder_test, tool_dependencies_and_build_tools)

@@ -136,6 +136,7 @@ programs = ["ninja"]
 | Key | Type | Meaning |
 |---|---|---|
 | `programs` | array of program names, `[a-z0-9][a-z0-9_+-]{0,63}`, non-empty, without repeats | — (required). The programs `build` returns (`build-lua-api.md` 8). Every program a toolchain takes from the recipe (13.1, 13.2) is listed. A program may be a script run by a toolchain of the recipe (Meson by `python`).  |
+| `link` | table with `libraries` only | The system libraries the programs load, as `link.libraries` of a product (11): an array of strings or `{ library, when }` tables, `when` with `option` and `os` conditions (9.1). Not the C++ standard library, which the target allows anyway. They pass the check of what programs load (`build-lua-api.md` 8): `crypt` allows `libcrypt.so.1`, which on Linux is libxcrypt's and not the C library's. For an interface of the system the program must use as the machine has it (`crypt` of the hashes of `/etc/shadow`, `pam`, `systemd`), not for a library a recipe builds (`z`, `ssl`): a library named here comes from the machines that build and run the program, in versions no lock records. |
 
 A tool recipe needs no `[[product]]`. Without products it can be a tool dependency only: a recipe or a project that
 has it as a dependency fails to resolve. A project may deliver it to its own build (`deliver` in `[tool-deps]`, or in `[deps]` for a library that is also a tool, `otok-toml.md` 7.1). It may have products too, for a library that is also a tool. `otok publish`

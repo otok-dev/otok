@@ -997,6 +997,34 @@ TEST(recipe, checks_a_tool_recipe)
     EXPECT_TRUE(tool("").reports("missing required key 'programs' in tool"));
 }
 
+// recipe-toml.md 3.1: the system libraries a tool's programs load (libcrypt of nginx's auth_basic)
+TEST(recipe, reads_the_link_of_a_tool)
+{
+    std::string const option = "[options.crypt]\ntype = \"bool\"\ndefault = false\ndoc = \"crypt().\"\n";
+    auto const tool = [&](std::string const& link) {
+        return parse(head_text + source_text + platforms_text + option + "[tool]\nprograms = [\"nginx\"]\nlink = " + link + "\n");
+    };
+    auto ok = tool("{ libraries = [\"pam\", { library = \"crypt\", when = { option = \"crypt\", os = [\"linux\"] } }] }");
+    ASSERT_TRUE(ok.r.has_value()) << messages(ok.diags);
+    std::vector<product_link> const& link = ok.r->tool_link_libraries;
+    ASSERT_EQ(link.size(), 2u);
+    EXPECT_EQ(link[0].library, "pam");
+    EXPECT_FALSE(link[0].when.has_value());
+    EXPECT_EQ(link[1].library, "crypt");
+    ASSERT_TRUE(link[1].when.has_value());
+    EXPECT_EQ(link[1].when->option, "crypt");
+    EXPECT_EQ(link[1].when->os, (std::vector<std::string>{"linux"}));
+    EXPECT_TRUE(ok.r->products.empty());
+
+    EXPECT_TRUE(tool("{ libraries = [\"stdc++\"] }")
+                    .reports("'stdc++' in 'libraries' in tool.link is the C++ standard library, which the target allows without it"));
+    EXPECT_TRUE(tool("{ libraries = [\"crypt\", \"crypt\"] }").reports("library 'crypt' is listed twice in 'libraries' in tool.link"));
+    EXPECT_TRUE(tool("{ libraries = \"crypt\" }").reports("'libraries' in tool.link must be an array of strings or { library, when } tables"));
+    EXPECT_TRUE(tool("{ libraries = [{ library = \"crypt\", when = { platform = [\"ios\"] } }] }").reports("may only test options and 'os' here"));
+    EXPECT_TRUE(tool("{ libraries = [{ library = \"crypt\", when = { option = \"none\" } }] }").reports("'none'"));
+    EXPECT_TRUE(tool("{ runtime = \"c++\" }").reports("unknown key 'runtime' in tool.link"));
+}
+
 TEST(recipe, a_resource_may_need_a_build_machine)
 {
     // recipe-toml.md 5, 9.1: release binaries of the machine only

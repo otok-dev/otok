@@ -496,7 +496,8 @@ and C++ runtimes, `libc.so.6`, `libm.so.6`, `libstdc++.so.6`, `libgcc_s.so.1`, `
 musl musl's `libc.so`, `libc.musl-*` (Alpine's name) and `ld-musl-*`; `apple`: everything in
 `/usr/lib/` and `/System/`); a name without a directory or starting with `@rpath/`, `@loader_path/` or
 `@executable_path/` whose file name is a file of the slice's prefix or of a directory of a library of a dependency,
-direct or not; or a library of the `link` of the recipe's products (`recipe-toml.md` 11): `z` allows `libz.so…`.
+direct or not; or a library of the `link` of the recipe's products (`recipe-toml.md` 11): `z` allows `libz.so…`, or of
+`[tool] link` (`recipe-toml.md` 3.1) for a tool's programs: `crypt` allows `libcrypt.so.1`.
 Anything else, such as `libpng16.so.16` from the machine's `/usr/lib` or `/opt/homebrew/lib/libpng16.16.dylib`, fails
 the build. Universal Mach-O files and PE images are not read; `android` and `windows` do not check (their
 toolchains see the NDK or the CRT and SDK only), nor static `apple` slices, which load nothing.

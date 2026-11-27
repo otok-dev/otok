@@ -166,6 +166,8 @@ private:
     // `when = { … }`, or with `key` its `not = { … }` (recipe-toml.md 9.1)
     std::optional<condition> when(toml_table& parent, recipe const& r, tests allowed, std::string_view key = "when");
     void tool_table(toml_table& root, recipe& r);
+    // `libraries` of a `link` table (recipe-toml.md 3.1, 11); `runtime_hint` ends the refusal of the C++ standard library
+    void link_libraries(toml_table& link, recipe const& r, tests allowed, std::vector<product_link>& out, std::string const& runtime_hint);
     void dependencies(toml_table& root, std::string_view key, bool tool, recipe& r);
     void target_tables(toml_table& root, recipe& r);
     void products(toml_table& root, recipe& r);
@@ -1109,7 +1111,48 @@ void recipe_reader::tool_table(toml_table& root, recipe& r)
         }
         r.programs = std::move(*programs);
     }
+    // the system libraries the programs load (recipe-toml.md 3.1)
+    if (auto link = t->table("link")) {
+        link_libraries(*link, r, tests::options_and_target, r.tool_link_libraries, "which the target allows without it");
+        link->finish();
+    }
     t->finish();
+}
+
+void recipe_reader::link_libraries(toml_table& link, recipe const& r, tests allowed, std::vector<product_link>& out, std::string const& runtime_hint)
+{
+    toml::node const* libraries = link.node("libraries");
+    if (!libraries) return;
+    std::string const shape = link.describe("libraries") + " must be an array of strings or { library, when } tables";
+    auto const* array = libraries->as_array();
+    if (!array) link.error(link.position("libraries"), shape);
+    for (std::size_t i = 0; array && i < array->size(); ++i) {
+        toml::node const& element = (*array)[i];
+        product_link entry;
+        if (auto const* s = element.as_string()) {
+            entry.library = s->get();
+        } else if (auto const* table = element.as_table()) {
+            toml_table lt = link.nested(*table, "libraries[" + std::to_string(i + 1) + "]");
+            entry.library = lt.string("library", need::required).value_or("");
+            if (lt.contains("when")) entry.when = when(lt, r, allowed);
+            lt.finish();
+        } else {
+            link.error(link.position_of(element), shape);
+            continue;
+        }
+        // the toolchain names the C++ standard library (recipe-toml.md 11)
+        static constexpr std::string_view cxx_runtimes[]{"c++", "stdc++", "c++_shared", "c++_static", "c++abi"};
+        if (std::ranges::find(cxx_runtimes, entry.library) != std::end(cxx_runtimes)) {
+            link.error(link.position_of(element), in_quotes(entry.library) + " in " + link.describe("libraries")
+                + " is the C++ standard library, " + runtime_hint);
+        } else if (entry.library.empty() && element.is_string()) {
+            link.error(link.position_of(element), link.describe("libraries") + " has an empty library name");
+        }
+        if (std::ranges::find(out, entry.library, &product_link::library) != out.end()) {
+            link.error(link.position_of(element), "library " + in_quotes(entry.library) + " is listed twice in " + link.describe("libraries"));
+        }
+        out.push_back(std::move(entry));
+    }
 }
 
 void recipe_reader::products(toml_table& root, recipe& r)
@@ -1202,38 +1245,7 @@ void recipe_reader::products(toml_table& root, recipe& r)
             }
         }
         if (auto link = t.table("link")) {
-            if (toml::node const* libraries = link->node("libraries")) {
-                std::string const shape = link->describe("libraries") + " must be an array of strings or { library, when } tables";
-                auto const* array = libraries->as_array();
-                if (!array) link->error(link->position("libraries"), shape);
-                for (std::size_t i = 0; array && i < array->size(); ++i) {
-                    toml::node const& element = (*array)[i];
-                    product_link entry;
-                    if (auto const* s = element.as_string()) {
-                        entry.library = s->get();
-                    } else if (auto const* table = element.as_table()) {
-                        toml_table lt = link->nested(*table, "libraries[" + std::to_string(i + 1) + "]");
-                        entry.library = lt.string("library", need::required).value_or("");
-                        if (lt.contains("when")) entry.when = when(lt, r, tests::options_and_target);
-                        lt.finish();
-                    } else {
-                        link->error(link->position_of(element), shape);
-                        continue;
-                    }
-                    // the toolchain names the C++ standard library (recipe-toml.md 11)
-                    static constexpr std::string_view cxx_runtimes[]{"c++", "stdc++", "c++_shared", "c++_static", "c++abi"};
-                    if (std::ranges::find(cxx_runtimes, entry.library) != std::end(cxx_runtimes)) {
-                        link->error(link->position_of(element), in_quotes(entry.library) + " in " + link->describe("libraries")
-                            + " is the C++ standard library, which the target names: write runtime = \"c++\" in " + t.describe("link"));
-                    } else if (entry.library.empty() && element.is_string()) {
-                        link->error(link->position_of(element), link->describe("libraries") + " has an empty library name");
-                    }
-                    if (std::ranges::find(p.link_libraries, entry.library, &product_link::library) != p.link_libraries.end()) {
-                        link->error(link->position_of(element), "library " + in_quotes(entry.library) + " is listed twice in " + link->describe("libraries"));
-                    }
-                    p.link_libraries.push_back(std::move(entry));
-                }
-            }
+            link_libraries(*link, r, tests::options_and_target, p.link_libraries, "which the target names: write runtime = \"c++\" in " + t.describe("link"));
             if (auto runtime = link->string("runtime")) {
                 if (*runtime != "c++") link->error(link->position("runtime"), link->describe("runtime") + " must be \"c++\", not " + in_quotes(*runtime));
                 p.runtime = std::move(*runtime);

@@ -2804,11 +2804,11 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
                 }
                 return *known;
             };
-            // a library of the products' `link` (recipe-toml.md 11): `z` is libz.so.1 or libz.1.dylib
+            // a library of the products' `link` (recipe-toml.md 11), or of `[tool] link` (3.1): `z` is libz.so.1 or libz.1.dylib
             auto const linked = [&](std::string const& file) {
-                return std::ranges::any_of(rec.products, [&](product const& prod) {
-                    return std::ranges::any_of(prod.link_libraries, [&](product_link const& l) { return file.starts_with("lib" + l.library + "."); });
-                });
+                auto const names = [&](product_link const& l) { return file.starts_with("lib" + l.library + "."); };
+                return std::ranges::any_of(rec.tool_link_libraries, names)
+                    || std::ranges::any_of(rec.products, [&](product const& prod) { return std::ranges::any_of(prod.link_libraries, names); });
             };
             std::vector<std::pair<std::string, fs::path>> loading;
             for (auto const& [name, lib] : built->libraries) loading.emplace_back("the library '" + name + "'", lib);
@@ -2822,7 +2822,8 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
                     else if (loaded.starts_with("@rpath/") || loaded.starts_with("@loader_path/") || loaded.starts_with("@executable_path/")) name = loaded.substr(loaded.rfind('/') + 1);
                     if (!name.empty() && (known_names().contains(name) || linked(name))) continue;
                     return failed(what + " (" + slashed(file) + ") loads '" + loaded + "', which is neither its slice's, nor a dependency's, nor the system's: "
-                        + "a library of the build machine, or of a dependency the recipe does not declare");
+                        + "a library of the build machine, or of a dependency the recipe does not declare; an interface of the system "
+                        + "taken from the machine as it is (crypt, pam) is named in 'link' of a product or in [tool] link (recipe-toml.md 3.1, 11)");
                 }
             }
         }

@@ -238,6 +238,7 @@ struct recipe
     bool delivers_sources = false;
     std::vector<toolchain_requirement> toolchains;
     std::vector<std::string> programs;           // `[tool] programs` (recipe-toml.md 3.1); empty: not a tool recipe
+    std::vector<product_link> tool_link_libraries;   // `[tool] link.libraries`: the system libraries the programs load
     std::vector<option_values> publish_checks;
     std::map<std::string, toml::table, std::less<>> publish_targets;   // `[publish.<target>]`, as written
 
