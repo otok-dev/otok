@@ -113,6 +113,7 @@ protected:
         base = std::filesystem::canonical(dir.path());
         slice.name = "iossim-arm64";
         slice.os = "apple";
+        slice.version = "1.6.47";
         slice.platform = "iossim";
         slice.arch = "arm64";
         slice.environment = "macos/xcode";
@@ -177,6 +178,7 @@ TEST_F(build_script, sees_slice_options_and_deps)
     auto out = run(R"(
 function build(slice, options, deps)
     assert(slice.name == "iossim-arm64" and slice.os == "apple" and slice.platform == "iossim" and slice.arch == "arm64")
+    assert(slice.version == "1.6.47")
     assert(slice.environment == "macos/xcode" and slice.host == "macos-arm64" and slice.compiler == "xcode")
     assert(slice.host_libc == nil)
     assert(slice.triple == "arm64-apple-ios15.0-simulator" and slice.configuration == "release" and slice.is_tool == false)
@@ -228,6 +230,7 @@ TEST_F(build_script, sees_the_headers_slice)
     auto out = run(R"lua(
 function build(slice, options, deps)
     assert(slice.headers == true and slice.name == "headers" and slice.os == "apple" and slice.is_tool == false)
+    assert(slice.version == "1.6.47")
     assert(slice.platform == nil and slice.arch == nil and slice.environment == nil and slice.host == nil and slice.compiler == nil)
     assert(slice.triple == nil and slice.configuration == nil and slice.linkage == nil and slice.cxx_standard == nil)
     assert(slice.rust_target == nil and slice.apple == nil and slice.tools == nil)

@@ -2384,6 +2384,7 @@ result<built_slice> builder::build_slice(resolved_package const& p, bool tool, s
 
         slice.name = slice_name(spec);
         slice.os = os;
+        slice.version = rec.version->str();
         slice.headers = headers;
         slice.platform = spec.platform;
         slice.arch = spec.arch;

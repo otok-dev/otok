@@ -154,6 +154,7 @@ void push_slice(lua_State* L, slice_context const& s)
     }
     set_string(L, "name", s.name);
     set_string(L, "os", s.os);
+    set_string(L, "version", s.version);
     lua_pushboolean(L, s.headers);
     lua_setfield(L, -2, "headers");
     if (s.headers) {

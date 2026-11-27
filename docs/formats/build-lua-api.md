@@ -1,3 +1,4 @@
+| `version` | string | The version of the recipe being built, as `[recipe] version` gives it (`recipe-toml.md` 3), without the revision: `"1.6.47"`. For the files a build writes itself (a `.pc` file's `Version:`, a path holding the version), so that a new version of the recipe needs no edit of `build.lua`. |
 # `build.lua` — recipe build script, API 1
 
 Status: draft. Recipe metadata is in [recipe-toml.md](recipe-toml.md); common rules in
@@ -94,7 +95,7 @@ A read-only table. Paths are absolute, with `/` as separator on every host.
 | `linkage` | string | `"static"` or `"dynamic"`: what the project asks for (`otok-toml.md` 5), one of the recipe's `[recipe] linkage`; `"static"` in tool slices. |
 | `c_standard` | integer or nil | The C standard of the target (`otok-toml.md` 5.1), `11`: the project's, or the lowest the recipes allow; nil when there is none and the recipe chooses. Its flag is in `toolchain.cflags` (none for C89 and C99 with MSVC), and the helpers pass it on (6.2). |
 | `cxx_standard` | integer or nil | The C++ standard of the target (`otok-toml.md` 5.1), `23`: the project's, or the lowest the recipes allow; nil when there is none and the recipe chooses. Its flag is in `toolchain.cxxflags`, and the helpers pass it on (6.2). |
-| `headers` | boolean | `true` in the one slice of a package of products of headers only (3.5), which has no platform, architecture or compiler: the fields above but `name` and `os` are nil there. |
+| `headers` | boolean | `true` in the one slice of a package of products of headers only (3.5), which has no platform, architecture or compiler: the fields above but `name`, `os` and `version` are nil there. |
 | `is_tool` | boolean | `true` in the slices of a tool package (built for the build machine, `recipe-toml.md` 13) and in `build_tools`: a recipe that is a library and a tool at once builds its programs there only. |
 | `source` | path | The fresh source copy; the default working directory. Writable. |
 | `build` | path | An empty directory for out-of-source builds. Writable. |
@@ -179,7 +180,7 @@ and `windres` llvm-rc.
 A package whose products are all of headers only is built from one slice of its target (`recipe-toml.md` 11.3), whose
 result serves every platform, architecture, configuration and linkage of the package:
 
-- `name` is `"headers"`, `headers` is `true`, `os` the target. `platform`, `arch`, `environment`, `host`, `host_libc`,
+- `name` is `"headers"`, `headers` is `true`, `os` the target, `version` the recipe's. `platform`, `arch`, `environment`, `host`, `host_libc`,
   `compiler`, `triple`, `configuration`, `linkage`, `c_standard`, `cxx_standard`, `tools` and the target's tables
   (`apple`, `android`, `windows`) are nil.
 - `slice.toolchain` has only `env`, the environment of processes (5), without compilers or flags.

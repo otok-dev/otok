@@ -205,8 +205,14 @@ jobs:
             gh release create "$tag" "${flags[@]}" >/dev/null
           }
           retry make_draft
-          id=$(retry release_id)
-          [[ -n $id ]] || { echo "no release of $tag after its creation" >&2; exit 1; }
+          # the list of releases shows a new draft only some seconds after its creation: not found is a failure, tried again
+          created_id() {
+            local found
+            found=$(release_id) || return 1
+            [[ -n $found ]] || { echo "no release of $tag yet" >&2; return 1; }
+            echo "$found"
+          }
+          id=$(retry created_id) || { echo "no release of $tag after its creation" >&2; exit 1; }
           echo "release $id"
           # a file replaces the one of the same name, if any (a part of a failed upload among them)
           upload() {

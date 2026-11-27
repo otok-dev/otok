@@ -53,6 +53,7 @@ struct slice_context
 {
     std::string name;            // "iossim-arm64"
     std::string os;              // "apple"
+    std::string version;         // the recipe's version, "1.6.47", without the revision (build-lua-api.md 3)
     std::string platform;        // "iossim"
     std::string arch;            // "arm64"
     // The build environment (build-lua-api.md 3): "linux/clang-cl", the machine "linux-x86_64" and the compiler "clang-cl";
