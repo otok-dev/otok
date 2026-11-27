@@ -1539,6 +1539,15 @@ std::optional<resolution> resolve(manifest const& m, std::span<target_info const
             bool const first = h == 0 || tool.graphs[h - 1].environment.system != tool.graphs[h].environment.system;
             req.platforms.emplace_back(config_count, first ? std::set<std::string>{tool.graphs[h].tool_platform} : std::set<std::string>{});
         }
+        // the lock's tool packages of the library: no package references a root, so its locked version and what it links are
+        // these (otok-lock.md 5.7); an unlocked library is left to `locked`, which keeps what it links
+        if (tool.preferred) {
+            for (locked_package const& p : tool.preferred->tool_packages) {
+                if (p.library != library || !p.version) continue;
+                std::string reference = tool_reference(library, p.version->str());
+                if (std::ranges::find(req.preferred, reference) == req.preferred.end()) req.preferred.push_back(std::move(reference));
+            }
+        }
         return req;
     };
     for (dependency const& d : m.tool_deps) {

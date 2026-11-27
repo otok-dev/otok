@@ -1416,6 +1416,90 @@ TEST_F(commands, names_tool_packages)
         std::string::npos) << out.str();
 }
 
+// The lock keeps what a delivered tool links (otok-lock.md 5.7): a newer version of it published since changes neither
+// install nor the tool package's id, and outdated compares the locked version with it, as for a target package.
+TEST_F(commands, keeps_what_a_delivered_tool_links)
+{
+    auto git = find_git(current_environment());
+    if (!git) GTEST_SKIP() << "git is not in PATH";
+    auto const git_in = [&](std::filesystem::path const& dir, std::vector<std::string> args) {
+        std::vector<std::string> full{"-c", "user.name=otok test", "-c", "user.email=test@otok.invalid", "-c", "core.autocrlf=false"};
+        full.insert(full.end(), args.begin(), args.end());
+        auto done = run_git(*git, full, dir, upstream.path() / "setup.log");
+        EXPECT_TRUE(done.has_value()) << (done ? "" : done.error().message);
+    };
+    target_info const* const native_only[] = {&test::native_info()};
+    targets = native_only;
+    std::filesystem::path const recipes = upstream.path() / "recipes";
+    std::filesystem::path const index = upstream.path() / "index";
+    std::string const index_arg = path_to_utf8(index);
+    auto const publish = [&](std::string const& dir) {
+        git_in(recipes, {"add", "."});
+        git_in(recipes, {"commit", "-q", "-m", dir});
+        ASSERT_EQ(run({"publish", "--no-build", "--no-push", "--index", index_arg, "--publisher", "p", path_to_utf8(recipes / dir)}), 0) << err.str();
+    };
+    upstream.write("index/index.toml", "format = 1\n");
+    git_in(upstream.path(), {"init", "-q", "index"});
+    git_in(index, {"add", "."});
+    git_in(index, {"commit", "-q", "-m", "index"});
+    git_in(index, {"config", "user.name", "otok test"});
+    git_in(index, {"config", "user.email", "test@otok.invalid"});
+    git_in(upstream.path(), {"init", "-q", "recipes"});
+    git_in(recipes, {"remote", "add", "origin", file_url(recipes)});
+    // the library z, linked by the tool d; the library a, a dependency of the project
+    auto const library_recipe = [&](std::string const& library, std::string const& version) {
+        std::string text = recipe_toml(library, version, source_of("c"));
+        std::string const apple = "supported = [\"ios\", \"iossim\", \"macosx\"]\nbuild-on = [\"macos/xcode\"]\n";
+        return text.replace(text.find(apple), apple.size(), "supported = [\"native\"]\nbuild-on = [\"*/cc\"]\n");
+    };
+    upstream.write("recipes/z/recipe.toml", library_recipe("z", "1.0"));
+    publish("z");
+    upstream.write("recipes/a/recipe.toml", library_recipe("a", "1.0"));
+    publish("a");
+    upstream.write("recipes/d/recipe.toml",
+        "[recipe]\napi = 1\nlibrary = \"d\"\nname = \"d\"\nversion = \"1.0\"\nrevision = 1\nlicense = \"MIT\"\n"
+        "license-files = [\"LICENSE\"]\ndescription = \"Test.\"\n[tool]\nprograms = [\"d\"]\n[source]\n" + source_of("c")
+        + "[platforms]\nsupported = [\"native\"]\nbuild-on = [\"*/cc\"]\n[deps.z]\nversion = \">= 1\"\ndefault-recipe = \"p/z\"\n");
+    publish("d");
+    env_vars["OTOK_INDEX_MIRROR"] = index_arg;
+
+    project.write("otok.toml", "[otok]\nformat = 1\n[native]\nplatforms = [\"native\"]\n[deps.a]\nrecipe = \"p/a\"\nversion = \">= 1\"\n"
+                               "[tool-deps.d]\nrecipe = \"p/d\"\nversion = \">= 1\"\ndeliver = true\n");
+    ASSERT_EQ(run_unbuilt({"install"}, {"native"}), 0) << err.str();
+    std::string const locked = lock_text();
+
+    upstream.write("recipes/z/recipe.toml", library_recipe("z", "2.0"));
+    publish("z");
+    upstream.write("recipes/a/recipe.toml", library_recipe("a", "2.0"));
+    publish("a");
+    // the lock still holds: install keeps z 1.0
+    ASSERT_EQ(run_unbuilt({"install", "--locked"}, {"native"}), 0) << err.str();
+    EXPECT_EQ(lock_text(), locked);
+
+    ASSERT_EQ(run({"outdated"}), 0) << err.str();
+    EXPECT_EQ(out.str(), "library  current   compatible  latest    recipe\n"
+                         "a        1.0 (r1)  2.0 (r1)    2.0 (r1)  p/a\n"
+                         "tool d   1.0 (r1)  1.0 (r1)    1.0 (r1)  p/d\n"
+                         "tool z   1.0 (r1)  2.0 (r1)    2.0 (r1)  p/z\n");
+    ASSERT_EQ(run({"outdated", "--format", "json"}), 0) << err.str();
+    auto const j = nlohmann::json::parse(out.str());
+    std::map<std::string, nlohmann::json> by_id;
+    for (auto const& p : j["packages"]) by_id[p["id"].get<std::string>()] = p;
+    ASSERT_TRUE(by_id.contains("a")) << j.dump();
+    ASSERT_TRUE(by_id.contains("z@1.0")) << j.dump();
+    for (std::string const id : {"a", "z@1.0"}) {
+        nlohmann::json const& p = by_id[id];
+        EXPECT_EQ(p["current"], nlohmann::json::parse(R"({"version": "1.0", "revision": 1})")) << id;
+        EXPECT_EQ(p["compatible"], nlohmann::json::parse(R"({"version": "2.0", "revision": 1})")) << id;
+        EXPECT_TRUE(p["behind"].get<bool>()) << id;
+    }
+
+    // update takes the newer z
+    ASSERT_EQ(run_unbuilt({"update"}, {"native"}), 0) << err.str();
+    ASSERT_EQ(run({"outdated"}), 0) << err.str();
+    EXPECT_NE(out.str().find("tool z   2.0 (r1)  2.0 (r1)    2.0 (r1)  p/z\n"), std::string::npos) << out.str();
+}
+
 // otok info shows every variant of the newest version (recipe-toml.md 6.1), and options and dependencies per group of
 // variants that have the same
 TEST_F(commands, info_shows_the_variants)

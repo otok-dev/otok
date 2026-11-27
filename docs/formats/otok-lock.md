@@ -249,8 +249,9 @@ constrains another's.
 - A tool dependency on a library whose own tool dependencies lead back to it is a cycle and fails resolution.
 - A tool the project delivers (`deliver`, `otok-toml.md` 7.1) is an edge of the project itself, rooted in the first tool
   graph of each system, so the lock has its `tool-package` though no package references it; adding or removing
-  `deliver` makes the lock stale (6), changing the programs it names does not. Delivered from `[deps.<library>]`, it has
-  that library's recipe and exactly its version, as a tool taken from a dependency.
+  `deliver` makes the lock stale (6), changing the programs it names does not. The versions its graph prefers are those of
+  the lock's tool packages of that library, then their `dependencies`, as for an edge of a package. Delivered from
+  `[deps.<library>]`, it has that library's recipe and exactly its version, as a tool taken from a dependency.
 
 ### 5.6 Checks
 

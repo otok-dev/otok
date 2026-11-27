@@ -3168,6 +3168,8 @@ int outdated(parsed_command const& cmd, command_context& ctx)
     for (auto [packages, tool] : {std::pair{&current->r.packages, false}, std::pair{&current->r.tool_packages, true}}) {
         for (resolved_package const& pkg : *packages) {
             locked_package const* locked = locked_entry(*current->lock, current->r, pkg, tool);
+            // a tool package whose locked version no longer qualifies (a stale lock): the lock's of its library in the graph
+            if (!locked && tool) locked = current->lock->find_tool(pkg.library, current->r.tool_graphs[pkg.graph].environment.text());
             // a tool package by its id, which several of one library have (otok-lock.md 5.7), else by its library
             resolved_package const* fresh = !tool ? compatible->r.find(pkg.library, pkg.target)
                 : compatible->r.find_tool(pkg.id) ? compatible->r.find_tool(pkg.id) : compatible->r.find_tool(pkg.library);
