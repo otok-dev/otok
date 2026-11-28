@@ -2,25 +2,42 @@
 # SPDX-License-Identifier: GPL-3.0-only WITH AdditionRef-otok-output-exception
 #
 # The availability of inputs (docs/formats/index.md 11): weekly, `otok index-probe` writes
-# availability.toml, committed to the default branch.
+# availability.toml, committed to the branch. Started by hand with `recipes`, it probes those recipes
+# alone and merges their records into the file.
 name: probe
+run-name: probe ${{ inputs.recipes || 'all' }}
 on:
   schedule:
     - cron: "0 3 * * 1"
   workflow_dispatch:
+    inputs:
+      recipes:
+        description: "Recipe ids to probe, separated by spaces (empty: the whole index)"
+        required: false
+        default: ""
 permissions:
   contents: write
+# One group per selection: a run waiting behind one of the same selection may be replaced by a newer one, which gives
+# the same result; runs of other selections never wait for or replace each other, and a moved branch is handled below.
 concurrency:
-  group: probe
+  group: probe-${{ github.ref }}-${{ inputs.recipes || 'all' }}
 jobs:
   probe:
+    # on the runner itself: its image has git, curl, jq and ssh, and otok-linux-x64 is static
     runs-on: ubuntu-24.04
-    container: ubuntu:26.04  # the tools below; otok-linux-x64 is static and runs on any system
     steps:
-      - name: Tools
+      - name: Check the recipes
+        env:
+          RECIPES: ${{ inputs.recipes }}
         run: |
-          apt-get update -qq
-          apt-get install -y -qq git ca-certificates curl jq openssh-client > /dev/null
+          set -f
+          for id in $RECIPES; do
+            # publisher/name as the index names them: a GitHub login, a library name
+            if ! printf '%s\n' "$id" | grep -Eqx '[a-z0-9]([a-z0-9-]{0,37}[a-z0-9])?/[a-z0-9][a-z0-9_-]{0,63}'; then
+              echo "::error::not a recipe id \"publisher/name\": ${id//[^a-zA-Z0-9._\/+-]/?}"
+              exit 1
+            fi
+          done
       - uses: actions/checkout@v5
         with:
           path: index
@@ -32,42 +49,55 @@ jobs:
           asset=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" "$api/releases/tags/otok" | jq -r '.assets[] | select(.name == "otok-linux-x64") | .url')
           curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" -o "$RUNNER_TEMP/otok" "$asset"
           chmod +x "$RUNNER_TEMP/otok"
-      - name: Probe
-        env:
-          OTOK_CACHE_DIR: ${{ runner.temp }}/otok-cache
-        working-directory: index
-        run: |
-          "$RUNNER_TEMP/otok" index-probe
-      - name: Commit
+      - name: Probe and commit
         # pushed as check.yml pushes: with the deploy key of INDEX_PUSH_KEY when there is one, else with the workflow's token
         env:
+          RECIPES: ${{ inputs.recipes }}
+          OTOK_CACHE_DIR: ${{ runner.temp }}/otok-cache
           GH_TOKEN: ${{ github.token }}
           PUSH_KEY: ${{ secrets.INDEX_PUSH_KEY }}
-          BRANCH: ${{ github.event.repository.default_branch }}
+          BRANCH: ${{ github.ref_name }}
         working-directory: index
         run: |
-          git add availability.toml
-          if ! git diff --cached --quiet; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -q -m "Probe the inputs of the published versions"
-            if [ -n "$PUSH_KEY" ]; then
-              host=${GITHUB_SERVER_URL#https://}
-              printf '%s\n' "$PUSH_KEY" > "$RUNNER_TEMP/push-key" && chmod 600 "$RUNNER_TEMP/push-key"
-              curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -o "$RUNNER_TEMP/meta.json" "$GITHUB_API_URL/meta"
-              jq -r --arg h "$host" '.ssh_keys[] | "\($h) \(.)"' "$RUNNER_TEMP/meta.json" > "$RUNNER_TEMP/known_hosts"
-              [ -s "$RUNNER_TEMP/known_hosts" ]
-              export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/push-key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
-              remote="git@$host:$GITHUB_REPOSITORY.git"
-            else
-              remote=origin
-            fi
-            # the branch may have moved while probing (check.yml merging); availability.toml is written only here, so the
-            # commit is put on top of it
-            for attempt in 1 2 3; do
-              git fetch -q "$remote" "$BRANCH"
-              git rebase -q FETCH_HEAD
-              git push -q "$remote" "HEAD:refs/heads/$BRANCH" && exit 0
-            done
-            exit 1
+          set -f
+          args=()
+          names=""
+          for id in $RECIPES; do
+            args+=(--recipe "$id")
+            names="${names:+$names, }$id"
+          done
+          message="Probe the inputs of ${names:-the published versions}"
+          if [ -n "$PUSH_KEY" ]; then
+            host=${GITHUB_SERVER_URL#https://}
+            printf '%s\n' "$PUSH_KEY" > "$RUNNER_TEMP/push-key" && chmod 600 "$RUNNER_TEMP/push-key"
+            curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -o "$RUNNER_TEMP/meta.json" "$GITHUB_API_URL/meta"
+            jq -r --arg h "$host" '.ssh_keys[] | "\($h) \(.)"' "$RUNNER_TEMP/meta.json" > "$RUNNER_TEMP/known_hosts"
+            [ -s "$RUNNER_TEMP/known_hosts" ]
+            export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/push-key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
+            remote="git@$host:$GITHUB_REPOSITORY.git"
+          else
+            remote=origin
           fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # The branch may move while probing: check.yml merging, another probe of other recipes. Every commit pushed is
+          # probed on the very commit it goes on top of: when the push is refused, the probe is made again on the
+          # branch's new head (seconds for some recipes, a full probe being rare), never a rebase of availability.toml.
+          for attempt in 1 2 3; do
+            if [ "$attempt" -gt 1 ]; then
+              sleep $((RANDOM % 5 + 1))
+              echo "$BRANCH moved: probing again on its new head"
+              git fetch -q "$remote" "$BRANCH"
+              git reset -q --hard FETCH_HEAD
+            fi
+            "$RUNNER_TEMP/otok" index-probe "${args[@]}"
+            git add availability.toml
+            if git diff --cached --quiet; then
+              echo "availability.toml unchanged"
+              exit 0
+            fi
+            git commit -q -m "$message"
+            git push -q "$remote" "HEAD:refs/heads/$BRANCH" && exit 0
+          done
+          echo "::error::the push to $BRANCH was refused three times"
+          exit 1

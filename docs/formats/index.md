@@ -611,6 +611,27 @@ An archive is available when `url` or one of its `mirrors` answers a `HEAD` requ
 not downloaded: the hashes are checked by every build. A version that becomes available again leaves
 the file.
 
+Each distinct URL, and each distinct commit of a repository, is probed once for all the versions that
+use it (URLs compared with their scheme and host in lowercase); the commits of one repository are asked
+in one shallow fetch of several, and one by one only when it fails. `--jobs N` (default 16) probes run
+at once, at most 4 of one host. A probe that gets no answer (a timeout, a refused connection, a TLS or
+name failure), HTTP 408, 429 or 5xx, or a git failure that does not say the repository or the commit is
+missing, is tried twice more, after 3 and 10 seconds (longer when a 429 or 503 asks for it with
+`Retry-After`, up to 30 seconds), while the other probes go on; any other status, such as 404 or 410,
+is final at once. The records are in the order above whatever order the probes end in, so an
+unchanged index with the same answers gives the same file but for `checked`. The command ends with a
+line on standard error: `probed 312 URLs and 140 commits for 587 entries in 14.2 s: 0 unavailable,
+3 retried`.
+
+`--recipe ID` (repeatable, `publisher/name`) probes every version, revision and variant of those
+recipes alone and merges the result into the file it writes (`--output FILE` when that exists, else
+the checkout's `availability.toml`; none is an empty one): the records of the selected recipes are
+replaced by the fresh ones, each kept `since` as a full probe keeps it, and put where a full probe
+puts them (records are ordered by recipe id); every other record, those of recipes the index no
+longer has too, and `checked`, the time of the last full probe, stay as they were. A recipe the index
+does not have is an error, and nothing is written. Without `--recipe` the file is made anew. The
+index's `probe` workflow takes the ids as its input `recipes` (`tools/index-ci/probe.yml`).
+
 The file changes nothing for resolution: `otok info` shows it ("inputs unavailable since …"), and so
 does the catalog. A user who has the inputs (the cache, `otok vendor`, `asset-mirror`) still
 builds. Pull requests may not change it (9).

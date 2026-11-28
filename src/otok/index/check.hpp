@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "otok/cache/store.hpp"
+#include "otok/core/names.hpp"
 #include "otok/core/target_info.hpp"
 #include "otok/fetch/git.hpp"
 #include "otok/fetch/http.hpp"
@@ -86,18 +87,33 @@ struct index_probe_settings
     std::span<target_info const* const> targets;
     cache_store* cache = nullptr;      // its tmp/ holds the repository shallow fetches go to
     git_tool const* git = nullptr;
-    http_transport http;               // HEAD and ranged GET requests
+    http_transport http;               // HEAD and ranged GET requests; called from several threads at once
+    std::size_t jobs = 16;             // probes at once
+    std::size_t jobs_per_host = 4;     // probes of one host at once
+    // The pauses before the second and later attempts of a probe that failed for a reason that may pass (index.md 11):
+    // their number is the number of retries.
+    std::vector<std::chrono::milliseconds> retry_pauses{std::chrono::seconds{3}, std::chrono::seconds{10}};
+    std::chrono::milliseconds longest_retry_after{std::chrono::seconds{30}};  // a server's Retry-After is followed up to it
+    // Only these recipes, their records merged into `availability`'s and the others kept as they are; empty: every
+    // recipe, the file made anew.
+    std::vector<recipe_id> recipes;
+    std::filesystem::path availability;  // the file read for `since` (and merged into); empty: availability.toml of `root`
 };
 
 struct index_probe_result
 {
-    std::size_t versions = 0;          // versions probed
+    std::size_t versions = 0;          // versions probed (entry files)
     std::string availability;          // the new availability.toml
-    std::size_t unavailable = 0;
+    std::size_t unavailable = 0;       // records of the versions probed: an input unavailable
+    std::size_t urls = 0;              // distinct archive URLs probed
+    std::size_t commits = 0;           // distinct (repository, commit) pairs probed
+    std::size_t retried = 0;           // of those, the ones that needed more than one attempt
 };
 
 // Probes the inputs of every version of the index (index.md 11); `since` is kept from the checkout's
-// availability.toml for versions still missing something.
+// availability.toml for versions still missing something. Each distinct URL or commit is probed once, several at a
+// time; the output does not depend on the order in which the probes end. With `recipes`, a recipe the index does not
+// have is an error.
 result<index_probe_result> probe_index(index_probe_settings const& settings);
 
 struct index_reproject_settings

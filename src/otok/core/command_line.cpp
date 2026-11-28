@@ -51,6 +51,12 @@ std::optional<std::string> parsed_command::value(std::string_view name) const
     return it->second;
 }
 
+std::vector<std::string> parsed_command::values_of(std::string_view name) const
+{
+    auto const it = lists.find(name);
+    return it == lists.end() ? std::vector<std::string>{} : it->second;
+}
+
 int parsed_command::count(std::string_view name) const
 {
     auto const it = counts.find(name);
@@ -129,6 +135,7 @@ result<parsed_command> parse_command_line(std::span<std::string const> args, std
             if (i + 1 >= args.size()) return fail("option '--" + key + "' needs a value (" + std::string{spec->value_name} + ")");
             inline_value = args[++i];
         }
+        out.lists[key].push_back(*inline_value);
         out.values.emplace(key, std::move(*inline_value));
     }
 

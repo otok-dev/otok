@@ -7,8 +7,11 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <functional>
 #include <map>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <vector>
 
@@ -169,6 +172,19 @@ protected:
         github["/repos/idx/index/pulls?state=open&per_page=100&page=1"] = test::http_answer(200, list.dump());
     }
 
+    // The probe of the index, without pauses before retries.
+    index_probe_settings probe_settings()
+    {
+        index_probe_settings s;
+        s.root = index();
+        s.now = now;
+        s.targets = targets;
+        s.cache = &*cache;
+        s.git = &*git;
+        s.retry_pauses = {std::chrono::milliseconds{0}, std::chrono::milliseconds{0}};
+        return s;
+    }
+
     static std::string all(index_check_report const& r)
     {
         std::string text;
@@ -185,6 +201,7 @@ protected:
     std::optional<std::int64_t> approved_by;
     bool stamp = false;
     std::map<std::string, http_reply> github;  // API path → reply
+    std::mutex asked_mutex;                     // the probe's fakes are called from several threads
 };
 
 }
@@ -537,13 +554,9 @@ TEST_F(index_check, probes_the_inputs_of_every_version)
     dir.write("index/recipes/p/b/native/1.0-r1.toml", missing);
     std::vector<std::string> asked;
     bool answers = true;
-    index_probe_settings s;
-    s.root = index();
-    s.now = now;
-    s.targets = targets;
-    s.cache = &*cache;
-    s.git = &*git;
+    index_probe_settings s = probe_settings();
     s.http = [&](http_exchange const& e) -> result<http_reply> {
+        std::scoped_lock lock{asked_mutex};
         asked.push_back(e.method + " " + e.url);
         return test::http_answer(answers ? 200 : 404, "");
     };
@@ -551,6 +564,9 @@ TEST_F(index_check, probes_the_inputs_of_every_version)
     ASSERT_TRUE(probed.has_value()) << probed.error().message;
     EXPECT_EQ(probed->versions, 2u);
     EXPECT_EQ(probed->unavailable, 1u);
+    // the commit the repository lacks is missing at once, not tried again; the fetch of both commits is followed by one of each
+    EXPECT_EQ(probed->retried, 0u);
+    EXPECT_EQ(probed->commits, 2u);
     EXPECT_EQ(asked.front(), "HEAD " + archive_url);
     diagnostics d;
     auto a = parse_availability(probed->availability, "availability.toml", d);
@@ -577,6 +593,213 @@ TEST_F(index_check, probes_the_inputs_of_every_version)
     EXPECT_EQ(a->unavailable[1].since.date.day, 2u);
     // a GET of the first byte is tried after a HEAD
     EXPECT_NE(std::ranges::find(asked, "GET " + archive_url), asked.end());
+}
+
+// index.md 11: an archive URL two versions share is asked once, and both versions get its answer
+TEST_F(index_check, probes_each_url_once)
+{
+    dir.write("index/recipes/p/a/native/1.0-r1.toml", entry_of("a"));
+    dir.write("index/recipes/p/b/native/1.0-r1.toml", entry_of("b"));
+    std::vector<std::string> asked;
+    index_probe_settings s = probe_settings();
+    s.http = [&](http_exchange const& e) -> result<http_reply> {
+        std::scoped_lock lock{asked_mutex};
+        asked.push_back(e.method + " " + e.url);
+        return test::http_answer(404, "");
+    };
+    auto probed = probe_index(s);
+    ASSERT_TRUE(probed.has_value()) << probed.error().message;
+    EXPECT_EQ(asked, (std::vector<std::string>{"HEAD " + archive_url, "GET " + archive_url}));
+    EXPECT_EQ(probed->urls, 1u);
+    EXPECT_EQ(probed->commits, 1u);
+    diagnostics d;
+    auto a = parse_availability(probed->availability, "availability.toml", d);
+    ASSERT_TRUE(a.has_value()) << probed->availability;
+    ASSERT_EQ(a->unavailable.size(), 2u);
+    EXPECT_EQ(a->unavailable[0].recipe.str(), "p/a");
+    EXPECT_EQ(a->unavailable[1].recipe.str(), "p/b");
+    EXPECT_EQ(a->unavailable[1].inputs, std::vector<std::string>{"source " + archive_url});
+}
+
+// index.md 11: a server's error or no answer is tried again; a 404 is not
+TEST_F(index_check, retries_failures_that_may_pass)
+{
+    dir.write("index/recipes/p/a/native/1.0-r1.toml", entry_of("a"));
+    std::size_t heads = 0;
+    std::function<result<http_reply>(std::size_t)> answer;  // by the number of the HEAD request
+    index_probe_settings s = probe_settings();
+    s.http = [&](http_exchange const& e) -> result<http_reply> {
+        std::scoped_lock lock{asked_mutex};
+        if (e.method == "HEAD") ++heads;
+        return answer(heads);
+    };
+    auto const probe = [&](auto const& reply) {
+        heads = 0;
+        answer = reply;
+        auto probed = probe_index(s);
+        EXPECT_TRUE(probed.has_value()) << probed.error().message;
+        return probed.value_or(index_probe_result{});
+    };
+
+    // a 503, then an answer: no record
+    auto probed = probe([](std::size_t n) -> result<http_reply> { return test::http_answer(n == 1 ? 503 : 200, ""); });
+    EXPECT_EQ(probed.unavailable, 0u) << probed.availability;
+    EXPECT_EQ(probed.retried, 1u);
+    EXPECT_EQ(heads, 2u);
+    // no answer (a timeout), then an answer: no record
+    probed = probe([](std::size_t n) -> result<http_reply> {
+        if (n == 1) return fail("HEAD x: Operation timed out after 15000 milliseconds");
+        return test::http_answer(200, "");
+    });
+    EXPECT_EQ(probed.unavailable, 0u) << probed.availability;
+    EXPECT_EQ(probed.retried, 1u);
+    // a 503 every time: a record after the retries
+    probed = probe([](std::size_t) -> result<http_reply> { return test::http_answer(503, ""); });
+    EXPECT_EQ(probed.unavailable, 1u);
+    EXPECT_EQ(heads, 3u);
+    // no answer every time: a record after the retries
+    probed = probe([](std::size_t) -> result<http_reply> { return fail("Could not connect to server"); });
+    EXPECT_EQ(probed.unavailable, 1u);
+    EXPECT_EQ(heads, 3u);
+    // rate limited, then an answer: no record
+    probed = probe([](std::size_t n) -> result<http_reply> {
+        http_reply r = test::http_answer(n == 1 ? 429 : 200, "");
+        r.headers.emplace_back("retry-after", "0");
+        return r;
+    });
+    EXPECT_EQ(probed.unavailable, 0u);
+    // a 404: a record at once
+    probed = probe([](std::size_t) -> result<http_reply> { return test::http_answer(404, ""); });
+    EXPECT_EQ(probed.unavailable, 1u);
+    EXPECT_EQ(probed.retried, 0u);
+    EXPECT_EQ(heads, 1u);
+}
+
+// index.md 11: the records are in the order of the index, whatever order the probes end in
+TEST_F(index_check, probes_in_any_order_give_one_file)
+{
+    for (std::string const name : {"a", "b"}) {
+        for (int r = 1; r <= 3; ++r) {
+            std::string const url = "https://h" + std::to_string(r % 2) + ".example/" + name + std::to_string(r) + ".tar.gz";
+            std::string entry = replace_in(entry_of(name), archive_url, url);
+            entry = replace_in(entry, "revision = 1", "revision = " + std::to_string(r));
+            dir.write("index/recipes/p/" + name + "/native/1.0-r" + std::to_string(r) + ".toml", entry);
+        }
+    }
+    index_probe_settings s = probe_settings();
+    std::size_t asked = 0;
+    s.http = [&](http_exchange const& e) -> result<http_reply> {
+        std::size_t n = 0;
+        {
+            std::scoped_lock lock{asked_mutex};
+            n = ++asked;
+        }
+        // the first asked answers last
+        std::this_thread::sleep_for(std::chrono::milliseconds{n <= 6 ? 60 - 10 * static_cast<int>(n) : 0});
+        return test::http_answer(e.url.find("/b") != std::string::npos ? 200 : 404, "");
+    };
+    s.jobs = 1;
+    auto one = probe_index(s);
+    ASSERT_TRUE(one.has_value()) << one.error().message;
+    asked = 0;
+    s.jobs = 8;
+    auto many = probe_index(s);
+    ASSERT_TRUE(many.has_value()) << many.error().message;
+    EXPECT_EQ(many->availability, one->availability);
+    EXPECT_EQ(many->unavailable, 3u);
+    EXPECT_EQ(many->urls, 6u);
+    diagnostics d;
+    auto a = parse_availability(many->availability, "availability.toml", d);
+    ASSERT_TRUE(a.has_value()) << many->availability;
+    ASSERT_EQ(a->unavailable.size(), 3u);
+    for (int r = 1; r <= 3; ++r) {
+        EXPECT_EQ(a->unavailable[r - 1].version, "1.0-r" + std::to_string(r));
+        EXPECT_EQ(a->unavailable[r - 1].inputs, std::vector<std::string>{"source https://h" + std::to_string(r % 2) + ".example/a" + std::to_string(r) + ".tar.gz"});
+    }
+}
+
+// index.md 11: `--recipe` probes some recipes and merges their records into the file, the others kept as they are
+TEST_F(index_check, merges_the_records_of_selected_recipes)
+{
+    dir.write("recipes/c/recipe.toml", recipe_toml("c", "1.0", archive_url, archive_sha));
+    run(dir.path() / "recipes", {"add", "."});
+    run(dir.path() / "recipes", {"commit", "-q", "-m", "c"});
+    recipes_commit = run(dir.path() / "recipes", {"rev-parse", "HEAD"});
+    for (std::string const name : {"a", "b", "c"}) {
+        dir.write("index/recipes/p/" + name + "/native/1.0-r1.toml", replace_in(entry_of(name), archive_url, "https://" + name + ".example/" + name + ".tar.gz"));
+    }
+    std::map<std::string, long> status{{"a", 404}, {"b", 404}, {"c", 404}};  // by recipe
+    auto const probe = [&](std::chrono::system_clock::time_point at, std::vector<std::string> const& recipes) {
+        index_probe_settings s = probe_settings();
+        s.now = at;
+        for (std::string const& r : recipes) s.recipes.push_back(*parse_recipe_id(r));
+        s.http = [&](http_exchange const& e) -> result<http_reply> {
+            std::scoped_lock lock{asked_mutex};
+            return test::http_answer(status.at(e.url.substr(8, 1)), "");
+        };
+        return probe_index(s);
+    };
+    auto const record = [](std::string const& name, std::string const& since) {
+        return "\n[[unavailable]]\ninputs = [ \"source https://" + name + ".example/" + name + ".tar.gz\" ]\nrecipe = \"p/" + name
+            + "\"\nsince = " + since + "\nversion = \"1.0-r1\"\n";
+    };
+    auto const without_checked = [](std::string text) {
+        std::size_t const at = text.find("checked = ");
+        return at == std::string::npos ? text : text.erase(at, text.find('\n', at) + 1 - at);
+    };
+    auto const week = now + std::chrono::days{7};
+
+    // a full probe: the three unavailable
+    auto full = probe(now, {});
+    ASSERT_TRUE(full.has_value()) << full.error().message;
+    std::string const header = "# Generated by otok index-probe; do not edit.\nchecked = 2026-11-02T12:00:00Z\n";
+    std::string const day2 = "2026-11-02T12:00:00Z", day9 = "2026-11-09T12:00:00Z";
+    ASSERT_EQ(full->availability, header + record("a", day2) + record("b", day2) + record("c", day2));
+    dir.write("index/availability.toml", full->availability);
+
+    // b answers again: its record goes, the others and `checked` stay; as a full probe would have it but for `checked`
+    status["b"] = 200;
+    auto merged = probe(week, {"p/b"});
+    ASSERT_TRUE(merged.has_value()) << merged.error().message;
+    EXPECT_EQ(merged->availability, header + record("a", day2) + record("c", day2));
+    EXPECT_EQ(merged->versions, 1u);
+    EXPECT_EQ(merged->unavailable, 0u);
+    auto again = probe(week, {});
+    ASSERT_TRUE(again.has_value()) << again.error().message;
+    EXPECT_EQ(without_checked(merged->availability), without_checked(again->availability));
+    dir.write("index/availability.toml", merged->availability);
+
+    // a still missing: its `since` kept
+    merged = probe(week, {"p/a"});
+    ASSERT_TRUE(merged.has_value()) << merged.error().message;
+    EXPECT_EQ(merged->availability, header + record("a", day2) + record("c", day2));
+
+    // b missing again: a new record, where a full probe puts it
+    status["b"] = 404;
+    merged = probe(week, {"p/b"});
+    ASSERT_TRUE(merged.has_value()) << merged.error().message;
+    EXPECT_EQ(merged->availability, header + record("a", day2) + record("b", day9) + record("c", day2));
+    again = probe(week, {});
+    ASSERT_TRUE(again.has_value()) << again.error().message;
+    EXPECT_EQ(without_checked(merged->availability), without_checked(again->availability));
+
+    // several recipes at once; the record of a recipe the index no longer has stays
+    dir.write("index/availability.toml", header + record("a", day2) + record("b", day2) + record("c", day2) + record("old", day2));
+    status = {{"a", 200}, {"b", 404}, {"c", 200}};
+    merged = probe(week, {"p/a", "p/c"});
+    ASSERT_TRUE(merged.has_value()) << merged.error().message;
+    EXPECT_EQ(merged->availability, header + record("b", day2) + record("old", day2));
+
+    // no file: an empty one, `checked` this probe's
+    std::filesystem::remove(index() / "availability.toml");
+    merged = probe(week, {"p/b"});
+    ASSERT_TRUE(merged.has_value()) << merged.error().message;
+    EXPECT_EQ(merged->availability, "# Generated by otok index-probe; do not edit.\nchecked = " + day9 + "\n" + record("b", day9));
+
+    // a recipe the index does not have: an error
+    auto unknown = probe(week, {"p/b", "p/zz"});
+    ASSERT_FALSE(unknown.has_value());
+    EXPECT_EQ(unknown.error().message, "the index has no recipe 'p/zz'");
 }
 
 // index.md 3.1, docs/PLAN.md decision 141: entries made before the projection kept option docs, made anew from their trees

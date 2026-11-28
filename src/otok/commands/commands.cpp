@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <functional>
+#include <iomanip>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -4218,28 +4219,65 @@ int index_check(parsed_command const& cmd, command_context& ctx)
     return report->verdict == index_verdict::refused ? 1 : 0;
 }
 
-// otok index-probe (index.md 11): the inputs of every version, into availability.toml.
+// otok index-probe (index.md 11): the inputs of every version, into availability.toml; with --recipe those of some
+// recipes, merged into it.
 int index_probe(parsed_command const& cmd, command_context& ctx)
 {
+    index_probe_settings settings;
+    for (std::string const& text : cmd.values_of("recipe")) {
+        auto const id = parse_recipe_id(text);
+        if (!id) {
+            ctx.err << "error: --recipe must be a recipe id \"publisher/name\", not " << in_quotes(text) << "\n";
+            return 1;
+        }
+        if (std::ranges::find(settings.recipes, *id) == settings.recipes.end()) settings.recipes.push_back(*id);
+    }
     auto tools = open_index_tools(ctx);
     if (!tools) return 1;
-    index_probe_settings settings;
     settings.root = cmd.arguments.empty() ? ctx.project_dir : ctx.project_dir / path_from_utf8(cmd.arguments.front());
+    std::filesystem::path const output = cmd.value("output") ? ctx.project_dir / path_from_utf8(*cmd.value("output")) : settings.root / "availability.toml";
+    // a merge starts from the file it writes, when there is one
+    std::error_code exists_ec;
+    if (!settings.recipes.empty() && std::filesystem::exists(output, exists_ec)) settings.availability = output;
     settings.targets = ctx.targets;
     settings.cache = &*tools->cache;
     settings.git = &tools->git;
-    settings.http = transport_of(ctx, tools->config);
+    if (ctx.http) {
+        settings.http = ctx.http;
+    } else {
+        // a probe is a HEAD or a byte: an answer slower than this is a failure, tried again (index.md 11)
+        http_settings http;
+        http.proxy = tools->config.proxy;
+        http.connect_timeout = 15;
+        http.stall_timeout = 20;
+        settings.http = [http](http_exchange const& e) { return http_call(e, http); };
+    }
+    if (auto const jobs = cmd.value("jobs")) {
+        std::size_t parsed = 0;
+        auto const [end, ec] = std::from_chars(jobs->data(), jobs->data() + jobs->size(), parsed);
+        if (ec != std::errc{} || end != jobs->data() + jobs->size() || parsed < 1) {
+            ctx.err << "error: --jobs must be a number of 1 or more, not " << in_quotes(*jobs) << "\n";
+            return 1;
+        }
+        settings.jobs = parsed;
+    }
+    auto const started = std::chrono::steady_clock::now();
     auto probed = probe_index(settings);
     if (!probed) {
         ctx.err << "error: " << probed.error().message << "\n";
         return 1;
     }
-    std::filesystem::path const output = cmd.value("output") ? ctx.project_dir / path_from_utf8(*cmd.value("output")) : settings.root / "availability.toml";
     if (auto ok = write_file_atomic(output, probed->availability); !ok) {
         ctx.err << "error: " << ok.error().message << "\n";
         return 1;
     }
     ctx.out << probed->versions << " versions probed, " << probed->unavailable << " with inputs unavailable\n";
+    double const seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    std::ostringstream summary;
+    summary << std::fixed << std::setprecision(1) << seconds;
+    ctx.err << "probed " << probed->urls << " URLs and " << probed->commits << " commits for " << probed->versions << " entries";
+    if (!settings.recipes.empty()) ctx.err << " of " << settings.recipes.size() << (settings.recipes.size() == 1 ? " recipe" : " recipes");
+    ctx.err << " in " << summary.str() << " s: " << probed->unavailable << " unavailable, " << probed->retried << " retried\n";
     return 0;
 }
 
@@ -4407,7 +4445,13 @@ std::span<command_spec const> command_specs()
                 {"summary", 0, "FILE", "Write the verdict as JSON"}, {"comment", 0, "FILE", "Write the verdict as the Markdown of a comment for the pull request"}},
             0, 1},
         {"index-probe", "[DIR]", "Probe the inputs of every version of a checkout of the index into availability.toml (for index maintainers)",
-            {{"output", 0, "FILE", "Write it elsewhere"}}, 0, 1},
+            {{"output", 0, "FILE", "Write it elsewhere"},
+                {"jobs", 'j', "N", "Probe at most N URLs and commits at once (default 16; 4 of one host); each is probed once, a timeout, a "
+                                   "refused connection, HTTP 429 or 5xx tried twice more"},
+                {"recipe", 0, "ID", "Probe only this recipe (publisher/name; repeatable) and merge its records into the file, keeping the "
+                                    "others and 'checked' as they are",
+                    true}},
+            0, 1},
         {"index-reproject", "[DIR]", "Make every entry of a checkout of the index anew from its recipe tree, when the projection changed (for index maintainers)",
             {}, 0, 1},
         {"index-view", "[DIR]", "Generate the HTTPS view of a checkout of the index (for index maintainers)",

@@ -4,10 +4,16 @@
 #include "otok/index/check.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <charconv>
+#include <condition_variable>
+#include <deque>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <sstream>
+#include <thread>
 
 #include <nlohmann/json.hpp>
 
@@ -767,60 +773,283 @@ std::optional<std::string> summary_of_comment(std::string_view comment)
 
 namespace {
 
-// Whether an archive answers at one of its locations (index.md 11).
-bool archive_answers(http_transport const& http, input_location const& l)
+// What one attempt of a probe found (index.md 11): a missing input is a definite answer, a transient failure is tried again.
+enum class probe_answer
 {
-    std::vector<std::string> urls{l.url};
-    urls.insert(urls.end(), l.mirrors.begin(), l.mirrors.end());
-    for (std::string const& url : urls) {
-        http_exchange head;
-        head.method = "HEAD";
-        head.url = url;
-        if (auto r = http(head); r && r->status >= 200 && r->status < 300) return true;
-        http_exchange first_byte;
-        first_byte.url = url;
-        first_byte.headers = {"Range: bytes=0-0"};
-        first_byte.max_body = 1024;
-        if (auto r = http(first_byte); r && (r->status == 200 || r->status == 206)) return true;
+    available,
+    missing,
+    transient
+};
+
+struct probe_attempt
+{
+    probe_answer answer = probe_answer::missing;
+    std::optional<std::chrono::milliseconds> pause;  // the server's Retry-After
+};
+
+// The host of a URL, lowercase ("" for none): what the per-host limit counts.
+std::string host_of(std::string_view url)
+{
+    std::size_t const scheme = url.find("://");
+    std::string_view rest = scheme == std::string_view::npos ? url : url.substr(scheme + 3);
+    rest = rest.substr(0, rest.find_first_of("/?#"));
+    if (scheme == std::string_view::npos) {
+        // git's scp-like `user@host:path`, or a local path
+        std::size_t const colon = rest.find(':');
+        if (colon == std::string_view::npos || colon < 2) return {};
+        rest = rest.substr(0, colon);
     }
-    return false;
+    if (std::size_t const at = rest.rfind('@'); at != std::string_view::npos) rest = rest.substr(at + 1);
+    if (!rest.starts_with('[')) rest = rest.substr(0, rest.find(':'));
+    std::string host{rest};
+    for (char& c : host) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return host;
 }
+
+// A URL as probes are told apart: its scheme and host lowercase, the rest as written.
+std::string probe_key(std::string_view url)
+{
+    std::string key{url};
+    std::size_t const scheme = key.find("://");
+    if (scheme == std::string::npos) return key;
+    std::size_t const end = std::min(key.find_first_of("/?#", scheme + 3), key.size());
+    for (std::size_t i = 0; i < end; ++i) key[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(key[i])));
+    return key;
+}
+
+// Statuses that may pass: the server's error, rate limiting, a timeout of the server's.
+bool passing_status(long status)
+{
+    return status == 408 || status == 429 || (status >= 500 && status < 600);
+}
+
+std::optional<std::chrono::milliseconds> retry_after(http_reply const& reply)
+{
+    std::string const* value = reply.header("retry-after");
+    if (!value) return std::nullopt;
+    unsigned seconds = 0;
+    auto const [end, ec] = std::from_chars(value->data(), value->data() + value->size(), seconds);
+    if (ec != std::errc{} || end == value->data()) return std::nullopt;  // an HTTP date is not followed
+    return std::chrono::seconds{std::min(seconds, 3600u)};
+}
+
+// One attempt at an archive URL: a HEAD request, then the first byte by GET for servers refusing HEAD.
+probe_attempt probe_archive_url(http_transport const& http, std::string const& url)
+{
+    http_exchange head;
+    head.method = "HEAD";
+    head.url = url;
+    if (auto r = http(head); r && r->status >= 200 && r->status < 300) return {probe_answer::available};
+    http_exchange first_byte;
+    first_byte.url = url;
+    first_byte.headers = {"Range: bytes=0-0"};
+    first_byte.max_body = 1024;
+    auto const r = http(first_byte);
+    if (!r) return {probe_answer::transient};  // no answer: a timeout, a refused connection, TLS, a name not found
+    if (r->status == 200 || r->status == 206) return {probe_answer::available};
+    if (passing_status(r->status)) return {probe_answer::transient, retry_after(*r)};
+    return {probe_answer::missing};
+}
+
+// Whether a failed fetch says that the repository or the commit is not there, rather than that it could not ask.
+bool git_says_missing(std::string_view message)
+{
+    std::string lower{message};
+    for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    static constexpr std::string_view definite[] = {"not our ref", "unadvertised object", "couldn't find remote ref", "no such remote ref",
+        "repository not found", "does not appear to be a git repository", "returned error: 404", "returned error: 410", "' not found"};
+    return std::ranges::any_of(definite, [&](std::string_view d) { return lower.find(d) != std::string::npos; });
+}
+
+struct probe_task
+{
+    std::string host;
+    std::string url;                   // the archive URL, or the repository
+    std::vector<std::string> commits;  // git: fetched at once; empty for an archive URL
+    std::size_t attempts = 0;
+    std::chrono::steady_clock::time_point not_before{};
+};
+
+// The probes of distinct URLs and commits, `jobs` at once and `jobs_per_host` of one host at once. A probe failing for
+// a reason that may pass goes back to the queue after its pause and is taken again then, while others go on. A fetch of
+// several commits of a repository failing for any reason is followed by a fetch of each.
+class prober
+{
+public:
+    prober(index_probe_settings const& s, fs::path dir) : s_{s}, dir_{std::move(dir)} {}
+
+    void add(probe_task task)
+    {
+        task.host = host_of(task.url);
+        queue_.push_back(std::move(task));
+    }
+
+    result<void> run()
+    {
+        std::size_t const jobs = std::max<std::size_t>(s_.jobs, 1);
+        repositories_.resize(std::max(repositories_.size(), jobs), 0);
+        {
+            std::vector<std::jthread> workers;
+            for (std::size_t i = 0; i < jobs; ++i) workers.emplace_back([this, i] { work(i); });
+        }
+        if (failure_) return std::unexpected{*failure_};
+        return {};
+    }
+
+    std::optional<bool> url(std::string const& u) const
+    {
+        auto const it = urls_.find(probe_key(u));
+        return it == urls_.end() ? std::nullopt : std::optional{it->second};
+    }
+
+    bool commit(std::string const& repository, std::string const& c) const
+    {
+        auto const it = commits_.find({probe_key(repository), c});
+        return it != commits_.end() && it->second;
+    }
+
+    std::size_t urls() const noexcept { return urls_.size(); }
+    std::size_t commits() const noexcept { return commits_.size(); }
+    std::size_t retried() const noexcept { return retried_; }
+
+private:
+    void work(std::size_t worker)
+    {
+        std::size_t const per_host = std::max<std::size_t>(s_.jobs_per_host, 1);
+        std::unique_lock lock{mutex_};
+        while (true) {
+            if (queue_.empty() && running_ == 0) {
+                changed_.notify_all();
+                return;
+            }
+            auto const now = std::chrono::steady_clock::now();
+            auto pick = queue_.end();
+            std::optional<std::chrono::steady_clock::time_point> wake;
+            for (auto it = queue_.begin(); it != queue_.end(); ++it) {
+                if (busy_[it->host] >= per_host) continue;
+                if (it->not_before <= now) {
+                    pick = it;
+                    break;
+                }
+                if (!wake || it->not_before < *wake) wake = it->not_before;
+            }
+            if (pick == queue_.end()) {
+                if (wake) changed_.wait_until(lock, *wake);
+                else changed_.wait(lock);
+                continue;
+            }
+            probe_task task = std::move(*pick);
+            queue_.erase(pick);
+            ++busy_[task.host];
+            ++running_;
+            lock.unlock();
+            ++task.attempts;
+            probe_attempt const found = attempt(task, worker);
+            lock.lock();
+            --busy_[task.host];
+            --running_;
+            settle(std::move(task), found);
+            changed_.notify_all();
+        }
+    }
+
+    probe_attempt attempt(probe_task const& task, std::size_t worker)
+    {
+        if (task.commits.empty()) return probe_archive_url(s_.http, task.url);
+        // each worker its own repository: shallow fetches of one repository at once would contend for its locks
+        fs::path const repository = dir_ / (std::to_string(worker) + ".git");
+        fs::path const log = dir_ / (std::to_string(worker) + ".log");
+        std::error_code ec;
+        fs::remove(log, ec);  // the log of this fetch alone, for its message
+        if (!repositories_[worker]) {
+            fs::create_directories(repository, ec);
+            if (auto ok = run_git(*s_.git, {"init", "-q", "--bare"}, repository, log); !ok) {
+                std::scoped_lock lock{mutex_};
+                if (!failure_) failure_ = ok.error();
+                return {probe_answer::missing};
+            }
+            repositories_[worker] = 1;
+        }
+        std::vector<std::string> args{"-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=30", "fetch", "-q", "--depth", "1", "--filter=tree:0", task.url};
+        args.insert(args.end(), task.commits.begin(), task.commits.end());
+        auto const fetched = run_git(*s_.git, args, repository, log);
+        if (fetched) return {probe_answer::available};
+        return {git_says_missing(fetched.error().message) ? probe_answer::missing : probe_answer::transient};
+    }
+
+    // Under the lock: the answer recorded, or the task queued again.
+    void settle(probe_task task, probe_attempt const& found)
+    {
+        if (task.commits.size() > 1 && found.answer != probe_answer::available) {
+            for (std::string& c : task.commits) queue_.push_back({task.host, task.url, {std::move(c)}});
+            return;
+        }
+        if (found.answer == probe_answer::transient && task.attempts <= s_.retry_pauses.size()) {
+            auto pause = s_.retry_pauses[task.attempts - 1];
+            if (found.pause) pause = std::max(pause, std::min(*found.pause, s_.longest_retry_after));
+            if (task.attempts == 1) ++retried_;
+            task.not_before = std::chrono::steady_clock::now() + pause;
+            queue_.push_back(std::move(task));
+            return;
+        }
+        bool const available = found.answer == probe_answer::available;
+        if (task.commits.empty()) urls_[probe_key(task.url)] = available;
+        for (std::string const& c : task.commits) commits_[{probe_key(task.url), c}] = available;
+    }
+
+    index_probe_settings const& s_;
+    fs::path dir_;
+    std::mutex mutex_;
+    std::condition_variable changed_;
+    std::deque<probe_task> queue_;
+    std::map<std::string, std::size_t> busy_;  // by host
+    std::size_t running_ = 0;
+    std::vector<char> repositories_;            // by worker: its repository made
+    std::map<std::string, bool> urls_;          // by probe_key
+    std::map<std::pair<std::string, std::string>, bool> commits_;
+    std::size_t retried_ = 0;
+    std::optional<otok::error> failure_;
+};
+
+// A version's inputs, in the order of its record.
+struct probed_version
+{
+    recipe_id id;
+    std::string version;
+    std::vector<std::pair<std::string, input_location>> inputs;  // what ("recipe", "source", "resource <name>"), where
+};
 
 }
 
 result<index_probe_result> probe_index(index_probe_settings const& s)
 {
     if (!s.cache || !s.git) return fail("probing the index needs the cache and git");
-    fs::path const repository = s.cache->tmp() / "probe.git";
-    fs::path const log = s.cache->tmp() / "index-probe.log";
+    fs::path const dir = s.cache->tmp() / "probe";
     std::error_code ec;
-    fs::remove_all(repository, ec);
-    fs::create_directories(repository, ec);
-    if (auto ok = run_git(*s.git, {"init", "-q", "--bare"}, repository, log); !ok) return std::unexpected{ok.error()};
-    std::map<std::pair<std::string, std::string>, bool> commits;  // (url, commit) → available
-    auto const commit_answers = [&](std::string const& url, std::string const& commit) {
-        auto const key = std::pair{url, commit};
-        if (auto it = commits.find(key); it != commits.end()) return it->second;
-        bool const found = run_git(*s.git, {"fetch", "-q", "--depth", "1", "--filter=tree:0", url, commit}, repository, log).has_value();
-        commits[key] = found;
-        return found;
-    };
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
 
+    fs::path const file = s.availability.empty() ? s.root / "availability.toml" : s.availability;
     input_availability previous;
-    if (auto content = read_file(s.root / "availability.toml")) {
+    if (auto content = read_file(file)) {
         diagnostics d;
-        if (auto a = parse_availability(*content, "availability.toml", d, index_reading::ci)) previous = std::move(*a);
-        else return fail("the index has an invalid availability.toml:" + messages(d));
+        if (auto a = parse_availability(*content, path_to_utf8(file.filename()), d, index_reading::ci)) previous = std::move(*a);
+        else return fail("'" + path_to_utf8(file) + "' is an invalid availability.toml:" + messages(d));
     }
     toml::date_time const now = date_time_of(s.now);
     index_probe_result out;
-    input_availability fresh;
-    fresh.checked = now;
 
+    // the inputs of every version, in the order of the output
+    std::vector<probed_version> versions;
     recipe_index idx{s.root, s.targets, index_reading::ci};
     auto ids = idx.recipe_ids();
     if (!ids) return std::unexpected{ids.error()};
+    auto const selected = [&](recipe_id const& id) { return s.recipes.empty() || std::ranges::find(s.recipes, id) != s.recipes.end(); };
+    for (recipe_id const& id : s.recipes) {
+        if (std::ranges::find(*ids, id) == ids->end()) return fail("the index has no recipe " + in_quotes(id.str()));
+    }
     for (recipe_id const& id : *ids) {
+        if (!selected(id)) continue;
         auto entries = idx.entries(id);
         if (!entries) return std::unexpected{entries.error()};
         std::vector<index_entry const*> sorted;
@@ -834,35 +1063,114 @@ result<index_probe_result> probe_index(index_probe_settings const& s)
             });
         }
         for (index_entry const* e : sorted) {
-            ++out.versions;
-            std::vector<std::string> missing;
-            auto const probe = [&](std::string const& what, input_location const& l) {
-                if (l.type == input_location::kind::archive) {
-                    if (!archive_answers(s.http, l)) missing.push_back(what + " " + l.url);
-                } else if (!commit_answers(l.git, l.commit)) {
-                    missing.push_back(what + " " + l.git + " " + l.commit);
-                }
-            };
-            if (!commit_answers(e->recipe_source.git, e->recipe_source.commit)) missing.push_back("recipe " + e->recipe_source.git + " " + e->recipe_source.commit);
-            probe("source", e->projection.source.location);
-            for (recipe_resource const& res : e->projection.resources) probe("resource " + res.name, res.location);
-            if (missing.empty()) continue;
-            std::string const version = e->projection.version->str() + "-r" + std::to_string(e->projection.revision);
-            // the variants of one version and revision share a line
-            auto const known = std::ranges::find_if(fresh.unavailable, [&](unavailable_version const& u) { return u.recipe == id && u.version == version; });
-            if (known != fresh.unavailable.end()) {
-                for (std::string& m : missing) {
-                    if (std::ranges::find(known->inputs, m) == known->inputs.end()) known->inputs.push_back(std::move(m));
-                }
-                continue;
-            }
-            unavailable_version const* before = previous.find(id, version);
-            fresh.unavailable.push_back({id, version, before ? before->since : now, std::move(missing)});
+            probed_version v{id, e->projection.version->str() + "-r" + std::to_string(e->projection.revision), {}};
+            input_location recipe_tree;
+            recipe_tree.type = input_location::kind::git;
+            recipe_tree.git = e->recipe_source.git;
+            recipe_tree.commit = e->recipe_source.commit;
+            v.inputs.emplace_back("recipe", std::move(recipe_tree));
+            v.inputs.emplace_back("source", e->projection.source.location);
+            for (recipe_resource const& res : e->projection.resources) v.inputs.emplace_back("resource " + res.name, res.location);
+            versions.push_back(std::move(v));
         }
     }
-    fs::remove_all(repository, ec);
+    out.versions = versions.size();
+
+    // each URL and each commit once; the commits of one repository fetched together, in groups
+    prober probes{s, dir};
+    std::set<std::string> queued;  // archive URLs, by probe_key
+    std::vector<std::pair<std::string, std::vector<std::string>>> repositories;  // in the order met
+    std::map<std::string, std::size_t> repository_at;
+    std::set<std::pair<std::string, std::string>> commits;
+    for (probed_version const& v : versions) {
+        for (auto const& [what, l] : v.inputs) {
+            if (l.type == input_location::kind::archive) {
+                if (queued.insert(probe_key(l.url)).second) probes.add({{}, l.url});
+                continue;
+            }
+            std::string const key = probe_key(l.git);
+            if (!commits.insert({key, l.commit}).second) continue;
+            auto [at, added] = repository_at.try_emplace(key, repositories.size());
+            if (added) repositories.push_back({l.git, {}});
+            repositories[at->second].second.push_back(l.commit);
+        }
+    }
+    constexpr std::size_t group = 64;  // commits of one fetch
+    for (auto& [repository, list] : repositories) {
+        for (std::size_t i = 0; i < list.size(); i += group) {
+            probes.add({{}, repository, std::vector<std::string>(list.begin() + i, list.begin() + std::min(i + group, list.size()))});
+        }
+    }
+    if (auto ok = probes.run(); !ok) return std::unexpected{ok.error()};
+
+    // the mirrors of archives whose URL did not answer, in their order, until one answers
+    auto const archive_state = [&](input_location const& l) -> std::optional<bool> {
+        if (auto const answered = probes.url(l.url); !answered || *answered) return answered;
+        for (std::string const& mirror : l.mirrors) {
+            auto const answered = probes.url(mirror);
+            if (!answered || *answered) return answered;
+        }
+        return false;
+    };
+    while (true) {
+        bool more = false;
+        for (probed_version const& v : versions) {
+            for (auto const& [what, l] : v.inputs) {
+                if (l.type != input_location::kind::archive || archive_state(l)) continue;
+                for (std::string const& mirror : l.mirrors) {
+                    if (probes.url(mirror)) continue;
+                    if (queued.insert(probe_key(mirror)).second) probes.add({{}, mirror});
+                    more = true;
+                    break;
+                }
+            }
+        }
+        if (!more) break;
+        if (auto ok = probes.run(); !ok) return std::unexpected{ok.error()};
+    }
+    out.urls = probes.urls();
+    out.commits = probes.commits();
+    out.retried = probes.retried();
+
+    input_availability fresh;
+    fresh.checked = now;
+    for (probed_version const& v : versions) {
+        std::vector<std::string> missing;
+        for (auto const& [what, l] : v.inputs) {
+            if (l.type == input_location::kind::archive) {
+                if (!*archive_state(l)) missing.push_back(what + " " + l.url);
+            } else if (!probes.commit(l.git, l.commit)) {
+                missing.push_back(what + " " + l.git + " " + l.commit);
+            }
+        }
+        if (missing.empty()) continue;
+        // the variants of one version and revision share a line
+        auto const known = std::ranges::find_if(fresh.unavailable, [&](unavailable_version const& u) { return u.recipe == v.id && u.version == v.version; });
+        if (known != fresh.unavailable.end()) {
+            for (std::string& m : missing) {
+                if (std::ranges::find(known->inputs, m) == known->inputs.end()) known->inputs.push_back(std::move(m));
+            }
+            continue;
+        }
+        unavailable_version const* before = previous.find(v.id, v.version);
+        fresh.unavailable.push_back({v.id, v.version, before ? before->since : now, std::move(missing)});
+    }
+    fs::remove_all(dir, ec);
     out.unavailable = fresh.unavailable.size();
-    out.availability = write_availability(fresh);
+    if (s.recipes.empty()) {
+        out.availability = write_availability(fresh);
+        return out;
+    }
+    // the selected recipes' records in place of theirs, where a full probe puts them (by recipe id); the others and
+    // `checked`, the time of the last full probe, as they were
+    input_availability merged = std::move(previous);
+    if (!merged.checked) merged.checked = now;
+    std::erase_if(merged.unavailable, [&](unavailable_version const& u) { return selected(u.recipe); });
+    for (unavailable_version& u : fresh.unavailable) {
+        auto const at = std::ranges::find_if(merged.unavailable, [&](unavailable_version const& m) { return m.recipe.str() > u.recipe.str(); });
+        merged.unavailable.insert(at, std::move(u));
+    }
+    out.availability = write_availability(merged);
     return out;
 }
 

@@ -13,7 +13,8 @@ decision 47). An index maintainer copies them to `.github/workflows/` of the ind
   when another one's merge moved the default branch since the check, the push is refused, and the workflow merges the
   head with the new default branch, checks it again and pushes, up to five times; a conflict or a verdict other than
   `auto` on the new default branch fails the run (run the check again for its comment and label).
-- `probe.yml`: weekly, `otok index-probe` writes `availability.toml`.
+- `probe.yml`: weekly, `otok index-probe` writes `availability.toml`; started by hand (`workflow_dispatch`) with the
+  input `recipes` (ids separated by spaces), it probes those alone, its run named `probe <ids>` (`probe all` without).
 - `view.yml`: on every push, and when `check.yml` or `probe.yml` finish (their pushes, made with the workflow's
   token, start no workflow), `otok index-view` generates the HTTPS view (`index.md` 8) and `otok index-catalog`
   the catalog site beside it (DESIGN 8), and GitHub Pages serves them (the repository's Pages source set to
@@ -53,8 +54,8 @@ them when creating the index, adjusting the name.
 
 The workflows take otok from the index's own release named `otok`, asset `otok-linux-x64`, never from a pull
 request. The release holds a Linux x86-64 build of otok that the maintainers have checked: the static binary of
-a release of otok (`otok-<version>-linux-x64.tar.gz`), which runs on any system; the jobs run in a container of
-`ubuntu:26.04` for their other tools.
+a release of otok (`otok-<version>-linux-x64.tar.gz`), which runs on any system; `check` and `view` run in a container of
+`ubuntu:26.04` for their other tools, `probe` on the runner itself, whose image has them (it waits for no `apt-get`).
 
 The repository's settings: Actions may write (the workflows ask for `contents: write` and
 `pull-requests: write` themselves); the labels `approved`, `ready-for-review` and `refused` exist; the default branch

@@ -21,7 +21,7 @@ option_spec const global[] = {
 };
 
 command_spec const commands[] = {
-    {"install", "", "Install", {{"locked", 0, "", "Use the lock"}, {"profile", 0, "NAME", "A profile"}, {"jobs", 'j', "N", "Jobs"}, {"verbose", 'v', "", "Say more", true}}, 0, 0},
+    {"install", "", "Install", {{"locked", 0, "", "Use the lock"}, {"profile", 0, "NAME", "A profile"}, {"jobs", 'j', "N", "Jobs"}, {"verbose", 'v', "", "Say more", true}, {"skip", 0, "NAME", "Skip", true}}, 0, 0},
     {"why", "LIBRARY", "Explain", {}, 1, 1},
     {"update", "[LIBRARY...]", "Update", {}, 0, static_cast<std::size_t>(-1)},
 };
@@ -77,6 +77,18 @@ TEST(command_line, counts_repeatable_flags)
     EXPECT_EQ(p->count("locked"), 1);
     EXPECT_EQ(parse({"-CC"}).value().value("directory"), "C");  // only a flag repeats: an option with a value takes it
     EXPECT_EQ(parse({"install", "-vx"}).error().message, "unknown option '-vx'");
+}
+
+// `--skip a --skip b`: every value, in order
+TEST(command_line, keeps_every_value_of_a_repeatable_option)
+{
+    auto p = parse({"install", "--skip", "a", "--skip=b", "--profile", "ci"});
+    ASSERT_TRUE(p.has_value()) << p.error().message;
+    EXPECT_EQ(p->values_of("skip"), (std::vector<std::string>{"a", "b"}));
+    EXPECT_EQ(p->value("skip"), "a");
+    EXPECT_EQ(p->values_of("profile"), std::vector<std::string>{"ci"});
+    EXPECT_TRUE(p->values_of("locked").empty());
+    EXPECT_EQ(parse({"install", "--profile", "a", "--profile", "b"}).error().message, "option '--profile' is given twice");
 }
 
 TEST(command_line, reports_errors)

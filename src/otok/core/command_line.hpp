@@ -26,7 +26,9 @@ struct option_spec
     char alias = 0;               // 'C' for -C; 0: none
     std::string_view value_name;  // "DIR": takes a value; empty: a flag
     std::string_view help;
-    bool repeatable = false;      // a flag that may be given more than once: `-vv`, `-v -v`
+    // A flag that may be given more than once (`-vv`, `-v -v`: counted), or an option with a value that may (`--recipe a
+    // --recipe b`: every value in `parsed_command::values_of`, the first in `value`).
+    bool repeatable = false;
 };
 
 struct command_spec
@@ -44,12 +46,14 @@ struct parsed_command
     std::string command;                                    // empty: no command given
     std::set<std::string, std::less<>> flags;               // global and command flags given
     std::map<std::string, std::string, std::less<>> values; // options with values
+    std::map<std::string, std::vector<std::string>, std::less<>> lists;  // every value of each option, in order
     std::map<std::string, int, std::less<>> counts;         // how often each flag was given
     std::vector<std::string> arguments;
 
     bool flag(std::string_view name) const { return flags.contains(name); }
     int count(std::string_view name) const;
     std::optional<std::string> value(std::string_view name) const;
+    std::vector<std::string> values_of(std::string_view name) const;
 };
 
 // Parses `args` (without the program name). Global options come before the command; a command's own
