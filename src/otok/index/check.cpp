@@ -888,10 +888,16 @@ public:
     {
         std::size_t const jobs = std::max<std::size_t>(s_.jobs, 1);
         repositories_.resize(std::max(repositories_.size(), jobs), 0);
-        {
-            std::vector<std::jthread> workers;
+        // std::thread, not std::jthread: the stop state of jthread waits with WaitOnAddress, which the static CRT of the
+        // release takes from api-ms-win-core-synch-l1-2-0.dll, refused by its check of imports (tools/release)
+        std::vector<std::thread> workers;
+        try {
             for (std::size_t i = 0; i < jobs; ++i) workers.emplace_back([this, i] { work(i); });
+        } catch (...) {
+            for (std::thread& t : workers) t.join();  // those started empty the queue
+            throw;
         }
+        for (std::thread& t : workers) t.join();
         if (failure_) return std::unexpected{*failure_};
         return {};
     }
